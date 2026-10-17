@@ -1,0 +1,5 @@
+node_modules/
+lib/
+*.tgz
+.compat-results/
+.DS_Store

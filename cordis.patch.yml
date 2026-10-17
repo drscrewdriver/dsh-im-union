@@ -1,0 +1,4 @@
+# 将 IM-Union 插件插入 profile（id 与 npm 包名一致，避免 entry id≠包名的表单自绑坑）
+- insert:
+    - id: dsh-im-union
+      name: 'dsh-im-union'
