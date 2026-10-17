@@ -98,5 +98,8 @@
     "access": "public",
     "registry": "https://registry.npmjs.org/",
     "tag": "next"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.76.0"
   }
 }

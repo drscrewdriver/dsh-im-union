@@ -41,3 +41,4 @@ export function implementedChannels(): string[] {
 // 已实现渠道（懒加载工厂；import 只拉注册表本体，适配器模块首次 createAdapter 才进缓存）。
 registerChannel('telegram', async (options) => (await import('./telegram.js')).createTelegramAdapter(options))
 registerChannel('discord', async (options) => (await import('./discord.js')).createDiscordAdapter(options))
+registerChannel('feishu', async (options) => (await import('./feishu.js')).createFeishuAdapter(options))

@@ -124,7 +124,7 @@ test('校验：accountId 形态/未知渠道/未实现渠道三路拒', async ()
   const { manager } = makeManager()
   await assert.rejects(manager.upsert(rec({ accountId: 'bad id!' })), AccountValidationError)
   await assert.rejects(manager.upsert(rec({ channel: 'myspace' })), /未知渠道/)
-  await assert.rejects(manager.upsert(rec({ channel: 'feishu' })), /尚未实现/)
+  await assert.rejects(manager.upsert(rec({ channel: 'slack' })), /尚未实现/)
 })
 
 test('重复 upsert：旧适配器先断后重建（重启生效）', async () => {
