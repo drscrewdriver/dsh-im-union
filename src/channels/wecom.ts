@@ -92,6 +92,7 @@ export class WecomAdapter implements ChannelAdapter {
     nativeStream: false,
     nativeChoices: false,
     statusReaction: false,
+    statusProgress: true,
     typing: false,
     imageIn: false,
     fileIn: false,

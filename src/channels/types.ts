@@ -18,6 +18,8 @@ export interface ChannelCaps {
   nativeChoices: boolean
   /** 状态表情回应/标签 */
   statusReaction: boolean
+  /** 回合内原生进度显示（思考中/工具执行附在流式快照内，企微机器人专属档位） */
+  statusProgress?: boolean
   /** "正在输入"提示 */
   typing: boolean
   /** 收图片 */

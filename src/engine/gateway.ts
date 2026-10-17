@@ -52,6 +52,8 @@ interface SessionEventLike {
   data?: {
     turn?: number
     step?: number
+    name?: string
+    callId?: string
     reason?: { kind?: string }
     message?: { content?: Array<{ type?: string; text?: string }> }
   }
@@ -267,7 +269,16 @@ export class ImUnionEngine {
     let stream: ReplyStream | undefined
     let streamBroken = false
     let progressChain: Promise<void> = Promise.resolve()
-    const snapshot = (): string => segments.join('\n\n')
+    // 原生进度显示（T1.6）：caps.statusProgress 渠道在落定前把「思考中/工具执行」
+    // 附在快照尾部同一条流式消息内；文本落定即清。
+    let progressNote = ''
+    const noteProgress = (note: string): void => {
+      if (adapter.caps.statusProgress !== true) return
+      progressNote = note
+      pushProgress()
+    }
+    const snapshot = (): string =>
+      progressNote === '' ? segments.join('\n\n') : [segments.join('\n\n'), progressNote].filter((s) => s !== '').join('\n\n')
     const pushProgress = (): void => {
       if (!canStream || streamBroken) return
       progressChain = progressChain.then(async () => {
@@ -289,9 +300,15 @@ export class ImUnionEngine {
         if (event?.type === 'assistant/message') {
           const text = extractAssistantText(event)
           if (text !== '') {
+            progressNote = ''
             segments.push(text)
             if (!streamBroken) pushProgress()
           }
+        } else if (event?.type === 'tool/call') {
+          const toolName = String(event.data?.name ?? '工具')
+          noteProgress(`🔧 正在执行：${toolName}`)
+        } else if (event?.type === 'step/start') {
+          if (segments.length === 0) noteProgress('🤔 思考中…')
         } else if (event?.type === 'turn/end' && endReason === undefined) {
           endReason = String(event.data?.reason?.kind ?? 'completed')
           markDone()

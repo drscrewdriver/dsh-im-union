@@ -316,3 +316,41 @@ test('/new 解除绑定后下一条重开宿主真会话并复用', async () => 
   await second
   assert.equal(session.state.prompted[1].sessionId, 'x', '真 id 已绑定，后续消息复用')
 })
+
+// —— 原生进度显示（T1.6 企微档位）——————————————————
+
+test('statusProgress 渠道：思考中/工具执行附进流式快照，文本落定即清', async () => {
+  const adapter = streamAdapter({ statusProgress: true })
+  const session = liveSession()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session })
+  const inflight = engine.handleInbound('acct-1', dmMessage('干活'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit({ type: 'step/start', data: { turn: 1, step: 1 } })
+  await waitUntil(() => adapter.streams[0]?.updates.length === 1, 500)
+  assert.match(adapter.streams[0].updates[0], /思考中/)
+  session.emit({ type: 'tool/call', data: { name: 'bash', arguments: '{}' } })
+  await waitUntil(() => adapter.streams[0].updates.length === 2, 500)
+  assert.match(adapter.streams[0].updates[1], /正在执行：bash/)
+  session.emit(assistantEvent('结果文本'))
+  await waitUntil(() => adapter.streams[0].updates.length === 3, 500)
+  assert.equal(adapter.streams[0].updates[2], '结果文本', '落定后进度尾巴必须消失')
+  session.emit(turnEnd())
+  await inflight
+})
+
+test('无 statusProgress 档位：进度事件不产生额外流式拍（回归防护）', async () => {
+  const adapter = streamAdapter() // caps 不含 statusProgress
+  const session = liveSession()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session })
+  const inflight = engine.handleInbound('acct-1', dmMessage('干活'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit({ type: 'step/start', data: { turn: 1, step: 1 } })
+  session.emit({ type: 'tool/call', data: { name: 'bash' } })
+  await new Promise((r) => setTimeout(r, 20))
+  assert.equal(adapter.streams.length, 0, '无落定文本且非进度档位时不得开流')
+  session.emit(assistantEvent('正文'))
+  await waitUntil(() => adapter.streams[0]?.updates.length === 1, 500)
+  assert.equal(adapter.streams[0].updates[0], '正文')
+  session.emit(turnEnd())
+  await inflight
+})
