@@ -16,6 +16,8 @@ import type { SessionApi } from '../host-compat/session-api.js'
 import { UnsupportedError } from '../host-compat/session-api.js'
 import { ChatRouter, shouldRespondToGroup, type Binding, type ChatAddress } from './router.js'
 import { chatOverrideKey, isCommandName, parseCommand, runCommand, type CommandDeps } from './commands.js'
+import { InteractionBroker, type ChatSessionRef } from './interactions.js'
+import type { ApprovalOutcome, ApprovalRequest, QuestionAnswer, QuestionRequest } from '../host-compat/interaction.js'
 import type { ChannelAdapter, Receipt, ReplyStream, SemanticMessage } from '../channels/types.js'
 
 export interface AccountPolicy {
@@ -32,6 +34,8 @@ export interface EngineDeps {
   router: ChatRouter
   /** turn/end 丢失时的投递看门狗（默认 10 分钟，测试可缩短）。 */
   turnTimeoutMs?: number
+  /** 审批/提问等待上限（默认 5 分钟，红线 D5）。 */
+  approvalTimeoutMs?: number
   /** 凭据载体形态（/status 展示：service=宿主凭据库 / file=文件 vault）。 */
   vaultKind?: string
 }
@@ -91,10 +95,19 @@ export class ImUnionEngine {
   private turns = new Map<string, TurnState>()
   private selections = new Map<string, { model?: string; provider?: string; reasoningEffort?: string }>()
   private workspaceOverrides = new Map<string, string>()
+  /** 宿主会话 id → 最近发起任务的聊天（审批/提问的回路由表，T1.9）。 */
+  private sessionChats = new Map<string, ChatSessionRef>()
+  private readonly broker: InteractionBroker
   private readonly log: LoggerLike
 
   constructor(private readonly deps: EngineDeps) {
     this.log = deps.ctx.logger('dsh-im-union')
+    this.broker = new InteractionBroker({
+      resolveChat: (sessionId) => this.sessionChats.get(sessionId),
+      getAdapter: (accountId) => this.accounts.get(accountId)?.adapter,
+      timeoutMs: deps.approvalTimeoutMs,
+      logWarn: (msg) => this.log.warn(msg),
+    })
   }
 
   registerAccount(adapter: ChannelAdapter, accountId: string, policy?: Partial<AccountPolicy>): void {
@@ -110,6 +123,20 @@ export class ImUnionEngine {
 
   unregister(accountId: string): void {
     this.accounts.delete(accountId)
+    // 拆除连带：该账号的 pending 审批全部取消（fail-closed），回路由表清理。
+    this.broker.dropAccount(accountId)
+    for (const [sid, ref] of [...this.sessionChats]) {
+      if (ref.accountId === accountId) this.sessionChats.delete(sid)
+    }
+  }
+
+  /** 审批接管入口（index.ts 传给 attachInteraction）。 */
+  handleApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
+    return this.broker.handleApproval(request, next)
+  }
+
+  handleQuestion(request: QuestionRequest, next: () => Promise<QuestionAnswer>): Promise<QuestionAnswer> {
+    return this.broker.handleQuestion(request, next)
   }
 
   private admitted(accountId: string, message: SemanticMessage): boolean {
@@ -131,6 +158,8 @@ export class ImUnionEngine {
   async handleInbound(accountId: string, message: SemanticMessage): Promise<void> {
     const adapter = this.accounts.get(accountId)?.adapter
     if (adapter === undefined || !this.admitted(accountId, message)) return
+    // 审批/提问回复优先消费（发起者限定在 broker 内裁决，D5）。
+    if (this.broker.consumeInbound(accountId, message.address, message.userId, message.text)) return
     const key = `${message.address.channel}:${message.address.chatId}`
 
     const text = message.text.trim()
@@ -153,7 +182,7 @@ export class ImUnionEngine {
     }
     state.running = true
     try {
-      await this.runTurn(adapter, message)
+      await this.runTurn(adapter, message, accountId)
     } finally {
       state.running = false
       const next = state.queue.shift()
@@ -194,10 +223,12 @@ export class ImUnionEngine {
     }
   }
 
-  private async runTurn(adapter: ChannelAdapter, message: SemanticMessage): Promise<void> {
+  private async runTurn(adapter: ChannelAdapter, message: SemanticMessage, accountId: string): Promise<void> {
     const { router, sessionApi } = this.deps
     const binding = router.resolve(message.address)
     const sessionId = await this.ensureSessionId(message.address, binding)
+    // 审批回路由登记：后发起的任务覆盖先前记录（与活跃任务一致）。
+    this.sessionChats.set(sessionId, { accountId, address: message.address, userId: message.userId })
     if (sessionApi.backend === 'none') {
       await adapter.reply(message.address, new UnsupportedError('会话后端').message)
       return

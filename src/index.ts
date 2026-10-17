@@ -166,9 +166,12 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     ...accountRoutes,
   })
 
-  // M0 先占审批/提问的接管位（handler 在 M1 接通渠道）：
-  // prepend 订阅保证网页 UI 之前拿到请求，杜绝"审批被网页先消费、IM 侧静默"。
-  const detachInteraction = attachInteraction(ctx, {})
+  // 审批/提问接管（T1.9）：waterfall 返回值即裁决——查不到发起聊天的请求
+  // 由 broker 内 next() 委派回网页 UI；接管时原聊天闭环、超时/失败 fail-closed（D5）。
+  const detachInteraction = attachInteraction(ctx, {
+    onApproval: (request, next) => engine.handleApproval(request, next),
+    onQuestion: (request, next) => engine.handleQuestion(request, next),
+  })
 
   const dispose = ctx.effect?.(() => {
     return () => {
