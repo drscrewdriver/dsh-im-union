@@ -42,3 +42,4 @@ export function implementedChannels(): string[] {
 registerChannel('telegram', async (options) => (await import('./telegram.js')).createTelegramAdapter(options))
 registerChannel('discord', async (options) => (await import('./discord.js')).createDiscordAdapter(options))
 registerChannel('feishu', async (options) => (await import('./feishu.js')).createFeishuAdapter(options))
+registerChannel('wecom', async (options) => (await import('./wecom.js')).createWecomAdapter(options))
