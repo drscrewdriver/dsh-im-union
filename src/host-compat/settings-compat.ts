@@ -86,7 +86,18 @@ function settingsModuleFromHost(): object {
 }
 
 function hasGen2Install(ctx: CordisLike): boolean {
-  return typeof ctx.settings?.installSection === 'function'
+  return gen2InstallSectionOf(ctx) !== undefined
+}
+
+/** 探取 gen2 注册函数；ctx 代理抛错（未 inject）或形状不符均归一 undefined。 */
+function gen2InstallSectionOf(ctx: CordisLike): ((...args: unknown[]) => void) | undefined {
+  try {
+    const settings = (ctx as { settings?: { installSection?: unknown } }).settings
+    const fn = settings?.installSection
+    return typeof fn === 'function' ? (fn as (...args: unknown[]) => void) : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function hasGen1Install(module: object = settingsModuleFromHost()): boolean {
@@ -98,6 +109,10 @@ function hasGen1Install(module: object = settingsModuleFromHost()): boolean {
  * gen2 = ctx.settings.installSection（0.1.2~0.1.6）→
  * gen1 = 宿主模块级 installSettingsSection（0.1.0/0.1.1）→
  * gen3 = 两者皆无（0.1.7+/0.2.x，命令式注册已删，走 volatile 声明式）。
+ *
+ * 宿主纪律（农场 0.1.2-rc.1/0.1.7-rc.2 实证）：Cordis ctx 代理对未 inject 的
+ * 属性**访问本身**即抛 `cannot get property "settings" without inject`，可选链
+ * 拦不住——任何 `ctx.settings` 读点必须过 try/catch 守卫（gen2Probe）。
  */
 export function detectSettingsGeneration(ctx: CordisLike, module?: object): SettingsGeneration {
   if (hasGen2Install(ctx)) return 'gen2'
@@ -116,9 +131,10 @@ export function installSettingsSectionCompat<T>(
   entry: T,
   hooks: SettingsSectionHooks<T>,
 ): void {
-  if (typeof ctx.settings?.installSection === 'function') {
+  const gen2 = gen2InstallSectionOf(ctx)
+  if (gen2 !== undefined) {
     // gen2 硬规：base 必须先 resolveConfig，否则 ValidationError: expected string...
-    ctx.settings.installSection(ctx, namespace, schema, entry, hooks)
+    gen2(ctx, namespace, schema, entry, hooks)
     return
   }
   const legacy = moduleExport(settingsModuleFromHost(), 'installSettingsSection')

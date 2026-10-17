@@ -3,7 +3,7 @@
  *
  * 枚举口径（2026-10-17 定稿，机制移植自 dsh-tidy-display/scripts/hosts.mjs 的
  * 单源纪律，版本集合按 IM 插件的宿主面裁剪）：
- * - 起步支持 0.1.2-rc.1 .. 0.2.1-alpha.3 共 10 个 tag（对标 MichengAI/dsh-im-connect
+ * - 起步支持 0.1.2-rc.1 .. 0.2.1-rc.1 共 11 个 tag（对标 MichengAI/dsh-im-connect
  *   的声明面），由本地隔离矩阵逐格验证后**删红留绿**；矩阵结论落 `.compat-results/`。
  * - 0.1.0/0.1.1 线**不入列**：缺认证与会话控制接口（IM 插件硬依赖），装上也必挂；
  *   代码里保留 gen1 设置面兜底路径仅为家族其他插件复用 settings-compat 服务。
@@ -31,9 +31,10 @@ export const supportedHosts = Object.freeze([
   // 0.2.0 线（2 个 rc；0.2.0 与 0.1.7-rc.2 宿主面零 diff，不设专属适配分支）
   '0.2.0-rc.1',
   '0.2.0-rc.2',
-  // 0.2.1 线（2 个 alpha，参考仓已实证的管理面基线）
+  // 0.2.1 线（2 个 alpha + rc.1，参考仓已实证的管理面基线；rc.1 于 2026-10-17 农场实证后入列）
   '0.2.1-alpha.2',
   '0.2.1-alpha.3',
+  '0.2.1-rc.1',
 ])
 
 /** peerDependencies / engines.dsh 共用的枚举串（精确枚举无暗坑：caret 与 `<x-0` 上界实测漏 rc 线）。 */
