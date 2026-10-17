@@ -34,6 +34,31 @@ window.__ModuleLoader__.load({
         'panel.channels': '渠道实现度',
         'panel.implemented': '已实现',
         'panel.planned': '规划中',
+        'accounts.title': '账号管理',
+        'accounts.empty': '暂无账号，在下方添加。',
+        'accounts.add': '添加账号',
+        'accounts.save': '保存',
+        'accounts.cancel': '取消',
+        'accounts.check': '检查连接',
+        'accounts.pause': '暂停',
+        'accounts.resume': '恢复',
+        'accounts.remove': '删除',
+        'accounts.confirm.remove': '删除该账号？其凭据将一并清除。',
+        'accounts.saved': '已保存',
+        'accounts.removed': '已删除',
+        'accounts.channel': '渠道',
+        'accounts.accountId': '账号 ID（字母数字_-，1-64 位）',
+        'accounts.alias': '别名（可选）',
+        'accounts.state.connected': '已连接',
+        'accounts.state.disconnected': '未连接',
+        'accounts.state.paused': '已暂停',
+        'accounts.secret.yes': '凭据已配置',
+        'accounts.secret.no': '凭据缺失',
+        'accounts.allowlist': '私聊白名单（每行一个用户 ID，空=拒绝所有私聊）',
+        'accounts.allowlist.save': '保存白名单',
+        'check.passed': '通过',
+        'check.failed': '失败',
+        'check.unverified': '未验证',
       },
       en: {
         'settings.title': 'IM Union Bridge',
@@ -45,7 +70,39 @@ window.__ModuleLoader__.load({
         'panel.channels': 'Channels',
         'panel.implemented': 'implemented',
         'panel.planned': 'planned',
+        'accounts.title': 'Accounts',
+        'accounts.empty': 'No accounts yet. Add one below.',
+        'accounts.add': 'Add account',
+        'accounts.save': 'Save',
+        'accounts.cancel': 'Cancel',
+        'accounts.check': 'Check connection',
+        'accounts.pause': 'Pause',
+        'accounts.resume': 'Resume',
+        'accounts.remove': 'Remove',
+        'accounts.confirm.remove': 'Remove this account? Its credentials will be cleared too.',
+        'accounts.saved': 'Saved',
+        'accounts.removed': 'Removed',
+        'accounts.channel': 'Channel',
+        'accounts.accountId': 'Account ID (letters/digits/_-, 1-64)',
+        'accounts.alias': 'Alias (optional)',
+        'accounts.state.connected': 'Connected',
+        'accounts.state.disconnected': 'Disconnected',
+        'accounts.state.paused': 'Paused',
+        'accounts.secret.yes': 'credential set',
+        'accounts.secret.no': 'credential missing',
+        'accounts.allowlist': 'DM allowlist (one user ID per line; empty = reject all)',
+        'accounts.allowlist.save': 'Save allowlist',
+        'check.passed': 'passed',
+        'check.failed': 'failed',
+        'check.unverified': 'unverified',
       },
+      ja: { 'settings.title': 'IM Union', 'accounts.title': 'アカウント', 'accounts.add': '追加', 'accounts.save': '保存', 'accounts.cancel': '取消', 'accounts.check': '接続確認', 'accounts.pause': '一時停止', 'accounts.resume': '再開', 'accounts.remove': '削除', 'accounts.state.connected': '接続済', 'accounts.state.disconnected': '未接続', 'accounts.state.paused': '停止中', 'check.passed': '成功', 'check.failed': '失敗', 'check.unverified': '未検証' },
+      ko: { 'settings.title': 'IM Union', 'accounts.title': '계정', 'accounts.add': '추가', 'accounts.save': '저장', 'accounts.cancel': '취소', 'accounts.check': '연결 확인', 'accounts.pause': '일시정지', 'accounts.resume': '재개', 'accounts.remove': '삭제', 'accounts.state.connected': '연결됨', 'accounts.state.disconnected': '미연결', 'accounts.state.paused': '정지됨', 'check.passed': '통과', 'check.failed': '실패', 'check.unverified': '미검증' },
+      fr: { 'settings.title': 'IM Union', 'accounts.title': 'Comptes', 'accounts.add': 'Ajouter', 'accounts.save': 'Enregistrer', 'accounts.cancel': 'Annuler', 'accounts.check': 'Vérifier', 'accounts.pause': 'Suspendre', 'accounts.resume': 'Reprendre', 'accounts.remove': 'Supprimer', 'accounts.state.connected': 'Connecté', 'accounts.state.disconnected': 'Déconnecté', 'accounts.state.paused': 'Suspendu', 'check.passed': 'réussi', 'check.failed': 'échoué', 'check.unverified': 'non vérifié' },
+      de: { 'settings.title': 'IM Union', 'accounts.title': 'Konten', 'accounts.add': 'Hinzufügen', 'accounts.save': 'Speichern', 'accounts.cancel': 'Abbrechen', 'accounts.check': 'Verbindung prüfen', 'accounts.pause': 'Pausieren', 'accounts.resume': 'Fortsetzen', 'accounts.remove': 'Entfernen', 'accounts.state.connected': 'Verbunden', 'accounts.state.disconnected': 'Getrennt', 'accounts.state.paused': 'Pausiert', 'check.passed': 'ok', 'check.failed': 'fehlgeschlagen', 'check.unverified': 'ungeprüft' },
+      it: { 'settings.title': 'IM Union', 'accounts.title': 'Account', 'accounts.add': 'Aggiungi', 'accounts.save': 'Salva', 'accounts.cancel': 'Annulla', 'accounts.check': 'Controlla', 'accounts.pause': 'Pausa', 'accounts.resume': 'Riprendi', 'accounts.remove': 'Rimuovi', 'accounts.state.connected': 'Connesso', 'accounts.state.disconnected': 'Disconnesso', 'accounts.state.paused': 'In pausa', 'check.passed': 'ok', 'check.failed': 'fallito', 'check.unverified': 'non verificato' },
+      ru: { 'settings.title': 'IM Union', 'accounts.title': 'Аккаунты', 'accounts.add': 'Добавить', 'accounts.save': 'Сохранить', 'accounts.cancel': 'Отмена', 'accounts.check': 'Проверить', 'accounts.pause': 'Пауза', 'accounts.resume': 'Возобновить', 'accounts.remove': 'Удалить', 'accounts.state.connected': 'Подключено', 'accounts.state.disconnected': 'Отключено', 'accounts.state.paused': 'Пауза', 'check.passed': 'успех', 'check.failed': 'ошибка', 'check.unverified': 'не проверено' },
+      es: { 'settings.title': 'IM Union', 'accounts.title': 'Cuentas', 'accounts.add': 'Añadir', 'accounts.save': 'Guardar', 'accounts.cancel': 'Cancelar', 'accounts.check': 'Comprobar', 'accounts.pause': 'Pausar', 'accounts.resume': 'Reanudar', 'accounts.remove': 'Eliminar', 'accounts.state.connected': 'Conectado', 'accounts.state.disconnected': 'Desconectado', 'accounts.state.paused': 'Pausado', 'check.passed': 'correcto', 'check.failed': 'fallido', 'check.unverified': 'sin verificar' },
     };
     var dictionary = LOCALES.zh;
     function t(key) {
@@ -68,6 +125,288 @@ window.__ModuleLoader__.load({
         .catch(function (error) {
           setError(String(error && error.message ? error.message : error));
         });
+    }
+
+    function getJSON(path) {
+      return fetch(API_BASE + path, {
+        credentials: 'same-origin',
+        headers: { 'x-dsh-im-union-client': '1' },
+      }).then(function (response) {
+        return response.json().then(function (json) {
+          return { status: response.status, json: json };
+        });
+      });
+    }
+
+    function postJSON(path, body) {
+      return fetch(API_BASE + path, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', 'x-dsh-im-union-client': '1' },
+        body: JSON.stringify(body || {}),
+      }).then(function (response) {
+        return response.json().then(function (json) {
+          return { status: response.status, json: json };
+        });
+      });
+    }
+
+    // 账号区（T1.8）：列表/增删改/暂停恢复/检查连接/白名单编辑。
+    // secret 输入只单向提交，提交后清空；回包零值（D4）。
+    function AccountsPanel(props) {
+      var channels = (props.channels || []).filter(function (c) { return c.implemented; });
+      var rowsHook = useState(null);
+      var rows = rowsHook[0];
+      var setRows = rowsHook[1];
+      var noticeHook = useState('');
+      var notice = noticeHook[0];
+      var setNotice = noticeHook[1];
+      var busyHook = useState(false);
+      var busy = busyHook[0];
+      var setBusy = busyHook[1];
+      var checksHook = useState({});
+      var checks = checksHook[0];
+      var setChecks = checksHook[1];
+      var addOpenHook = useState(false);
+      var addOpen = addOpenHook[0];
+      var setAddOpen = addOpenHook[1];
+      var formHook = useState({ channel: channels.length > 0 ? channels[0].id : '', accountId: '', alias: '', secrets: {} });
+      var form = formHook[0];
+      var setForm = formHook[1];
+      var allowHook = useState({});
+      var allowDrafts = allowHook[0];
+      var setAllowDrafts = allowHook[1];
+
+      var load = function () {
+        getJSON('/accounts').then(function (result) {
+          if (result.status === 200 && result.json && result.json.ok) {
+            setRows(result.json.accounts || []);
+          } else {
+            setRows([]);
+            setNotice((result.json && result.json.error) || 'HTTP ' + result.status);
+          }
+        }).catch(function (error) {
+          setNotice(String(error && error.message ? error.message : error));
+        });
+      };
+      useEffect(load, []);
+
+      var withBusy = function (task) {
+        setBusy(true);
+        Promise.resolve(task()).finally(function () { setBusy(false); });
+      };
+
+      var selectedChannel = null;
+      for (var ci = 0; ci < channels.length; ci += 1) {
+        if (channels[ci].id === form.channel) selectedChannel = channels[ci];
+      }
+
+      var submitNew = function () {
+        withBusy(function () {
+          return postJSON('/accounts/save', { record: form, secrets: form.secrets }).then(function (result) {
+            if (result.status === 200) {
+              setNotice(t('accounts.saved'));
+              setAddOpen(false);
+              setForm({ channel: form.channel, accountId: '', alias: '', secrets: {} });
+              load();
+            } else {
+              setNotice((result.json && result.json.error) || 'HTTP ' + result.status);
+            }
+          });
+        });
+      };
+
+      var doAction = function (path, body, doneNotice) {
+        withBusy(function () {
+          return postJSON(path, body).then(function (result) {
+            if (result.status === 200) {
+              if (doneNotice) setNotice(doneNotice);
+              load();
+            } else {
+              setNotice((result.json && result.json.error) || 'HTTP ' + result.status);
+            }
+          });
+        });
+      };
+
+      var doCheck = function (accountId) {
+        withBusy(function () {
+          return postJSON('/accounts/check', { accountId: accountId }).then(function (result) {
+            if (result.status === 200 && result.json && result.json.ok) {
+              var next = Object.assign({}, checks);
+              next[accountId] = result.json.checks || [];
+              setChecks(next);
+            } else {
+              setNotice((result.json && result.json.error) || 'HTTP ' + result.status);
+            }
+          });
+        });
+      };
+
+      var body = [];
+      body.push(createElement('h4', null, t('accounts.title')));
+      if (notice !== '') body.push(createElement('p', { style: { color: '#a33' } }, notice));
+      if (busy) body.push(createElement('p', null, '…'));
+      if (rows === null) {
+        body.push(createElement('p', null, t('panel.loading')));
+      } else if (rows.length === 0) {
+        body.push(createElement('p', null, t('accounts.empty')));
+      } else {
+        rows.forEach(function (row) {
+          var badge = row.paused
+            ? t('accounts.state.paused')
+            : row.connected
+              ? t('accounts.state.connected')
+              : t('accounts.state.disconnected');
+          var secretBadges = (row.secretFields || []).map(function (sf) {
+            return createElement('span', { key: sf.key, style: { marginLeft: 6 } }, sf.key + ': ' + (sf.configured ? t('accounts.secret.yes') : t('accounts.secret.no')));
+          });
+          var checkRows = (checks[row.accountId] || []).map(function (c) {
+            return createElement('li', { key: c.name }, c.name + ' — ' + t('check.' + c.status) + (c.hint ? '（' + c.hint + '）' : ''));
+          });
+          var allowValue = allowDrafts[row.accountId] !== undefined
+            ? allowDrafts[row.accountId]
+            : (row.dmAllowlist || []).join('\n');
+          body.push(
+            createElement(
+              'div',
+              { key: row.accountId, style: { border: '1px solid #ddd', borderRadius: 8, padding: 10, marginTop: 8 } },
+              createElement(
+                'div',
+                null,
+                createElement('strong', null, row.accountId + (row.alias ? '（' + row.alias + '）' : '')),
+                createElement('span', { style: { marginLeft: 8, color: '#666' } }, row.channel + ' · ' + badge),
+                createElement('span', { style: { marginLeft: 8 } }, secretBadges)
+              ),
+              createElement(
+                'div',
+                { style: { marginTop: 6 } },
+                createElement('button', { onClick: function () { doCheck(row.accountId); }, disabled: busy }, t('accounts.check')),
+                createElement('button', {
+                  style: { marginLeft: 6 },
+                  disabled: busy,
+                  onClick: function () { doAction('/accounts/pause', { accountId: row.accountId, paused: !row.paused }); },
+                }, row.paused ? t('accounts.resume') : t('accounts.pause')),
+                createElement('button', {
+                  style: { marginLeft: 6 },
+                  disabled: busy,
+                  onClick: function () {
+                    if (window.confirm(t('accounts.confirm.remove'))) {
+                      doAction('/accounts/remove', { accountId: row.accountId }, t('accounts.removed'));
+                    }
+                  },
+                }, t('accounts.remove'))
+              ),
+              checkRows.length > 0 ? createElement('ul', null, checkRows) : null,
+              createElement('div', { style: { marginTop: 6 } }, t('accounts.allowlist')),
+              createElement('textarea', {
+                rows: 2,
+                style: { width: '100%', marginTop: 2 },
+                value: allowValue,
+                onChange: function (event) {
+                  var next = Object.assign({}, allowDrafts);
+                  next[row.accountId] = event.target.value;
+                  setAllowDrafts(next);
+                },
+              }),
+              createElement('button', {
+                style: { marginTop: 4 },
+                disabled: busy,
+                onClick: function () {
+                  var ids = String(allowValue || '')
+                    .split('\n')
+                    .map(function (v) { return v.trim(); })
+                    .filter(function (v) { return v !== ''; });
+                  doAction('/accounts/allowlist', { accountId: row.accountId, userIds: ids }, t('accounts.saved'));
+                },
+              }, t('accounts.allowlist.save'))
+            )
+          );
+        });
+      }
+
+      if (!addOpen) {
+        body.push(
+          createElement('button', { style: { marginTop: 10 }, onClick: function () { setAddOpen(true); } }, t('accounts.add'))
+        );
+      } else {
+        var fieldInputs = [];
+        ((selectedChannel && selectedChannel.fields) || []).forEach(function (field) {
+          fieldInputs.push(
+            createElement(
+              'label',
+              { key: field.key, style: { display: 'block', marginTop: 6 } },
+              (field.label && (field.label.zh || field.label.en)) || field.key,
+              createElement('input', {
+                type: field.secret ? 'password' : 'text',
+                value: form.secrets[field.key] || '',
+                style: { marginLeft: 8 },
+                onChange: function (event) {
+                  var secrets = Object.assign({}, form.secrets);
+                  secrets[field.key] = event.target.value;
+                  setForm(Object.assign({}, form, { secrets: secrets }));
+                },
+              })
+            )
+          );
+        });
+        body.push(
+          createElement(
+            'div',
+            { key: 'add-form', style: { border: '1px dashed #bbb', borderRadius: 8, padding: 10, marginTop: 10 } },
+            createElement(
+              'label',
+              null,
+              t('accounts.channel'),
+              createElement(
+                'select',
+                {
+                  style: { marginLeft: 8 },
+                  value: form.channel,
+                  onChange: function (event) {
+                    setForm(Object.assign({}, form, { channel: event.target.value, secrets: {} }));
+                  },
+                },
+                channels.map(function (channel) {
+                  return createElement('option', { key: channel.id, value: channel.id }, (channel.label && (channel.label.zh || channel.label.en)) || channel.id);
+                })
+              )
+            ),
+            createElement(
+              'label',
+              { style: { display: 'block', marginTop: 6 } },
+              t('accounts.accountId'),
+              createElement('input', {
+                value: form.accountId,
+                style: { marginLeft: 8 },
+                onChange: function (event) { setForm(Object.assign({}, form, { accountId: event.target.value })); },
+              })
+            ),
+            createElement(
+              'label',
+              { style: { display: 'block', marginTop: 6 } },
+              t('accounts.alias'),
+              createElement('input', {
+                value: form.alias,
+                style: { marginLeft: 8 },
+                onChange: function (event) { setForm(Object.assign({}, form, { alias: event.target.value })); },
+              })
+            ),
+            fieldInputs,
+            createElement(
+              'div',
+              { style: { marginTop: 8 } },
+              createElement('button', { onClick: submitNew, disabled: busy || form.channel === '' || form.accountId === '' }, t('accounts.save')),
+              createElement(
+                'button',
+                { style: { marginLeft: 6 }, onClick: function () { setAddOpen(false); } },
+                t('accounts.cancel')
+              )
+            )
+          )
+        );
+      }
+      return createElement('div', { style: { marginTop: 12 } }, body);
     }
 
     function UnionPanel() {
@@ -115,7 +454,8 @@ window.__ModuleLoader__.load({
                 (channel.implemented ? t('panel.implemented') : t('panel.planned'))
             );
           })
-        )
+        ),
+        createElement(AccountsPanel, { channels: channels })
       );
     }
 

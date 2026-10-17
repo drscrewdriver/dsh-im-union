@@ -31,6 +31,9 @@ export interface PublicAccount {
   paused: boolean
   connected: boolean
   secretFields: Array<{ key: string; configured: boolean }>
+  /** 白名单是管理员自录配置（非平台回流的原始用户标识），设置页需回显编辑。 */
+  dmAllowlist: string[]
+  groupEnabled?: boolean
 }
 
 interface LiveAccount {
@@ -208,6 +211,8 @@ export class AccountManager {
         paused: record.paused === true,
         connected: live?.adapter?.connected === true,
         secretFields: fields,
+        dmAllowlist: record.dmAllowlist ?? [],
+        groupEnabled: record.groupEnabled,
       })
     }
     return rows

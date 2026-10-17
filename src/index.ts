@@ -152,6 +152,14 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
           label: CHANNEL_META[id].label,
           bind: CHANNEL_META[id].bind,
           implemented: implementedChannels().includes(id),
+          // 表单驱动元数据（零敏感：字段名/标签/形态，不含值）。
+          fields: CHANNEL_META[id].fields.map((f) => ({
+            key: f.key,
+            label: f.label,
+            secret: f.secret,
+            required: f.required,
+            ...(f.helpUrl !== undefined ? { helpUrl: f.helpUrl } : {}),
+          })),
         })),
       })
     },
