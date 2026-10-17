@@ -51,6 +51,12 @@ export interface CreateSessionOptions {
   preset?: string
   /** IM 侧生成的稳定会话 id（imu: 前缀），宿主不接受时由实现方生成并回传。 */
   sessionIdHint?: string
+  /**
+   * 会话列表标题（T3.6 渠道 Logo 前缀，形如 `[TG] 帮我看看这份日志`）。
+   * 宿主创建面**不收** title（锚点见 native 分支 createSession 注释），
+   * 由本层在 create 成功后补一次 rename 落地；rename 面缺位/被拒即静默降级。
+   */
+  title?: string
 }
 
 export interface SessionApi {
@@ -170,11 +176,42 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
     return { sessionId, mode, content, requestId: `imu-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` }
   }
 
+  /**
+   * title 落地面（rename）：request 对象形优先，位置参形回退；
+   * 面缺位或被拒回 false（调用方不伪装列表可见）。
+   * 宿主锚点：packages/api/session-controller/src/types.ts:289-292（SessionRenameRequest
+   * 收 title）+ src/index.ts:325（@Remote('rename')）+ src/commands.ts:176-190（实现）。
+   */
+  async function renameTitle(sessionId: string, title: string): Promise<boolean> {
+    if (!renameFn) return false
+    try {
+      await callWithShapeFallback(
+        () => renameFn.call(sessionController, { sessionId, title }) as Promise<void>,
+        () => renameFn.call(sessionController, sessionId, title) as Promise<void>,
+      )
+      return true
+    } catch {
+      return false
+    }
+  }
+
   return {
     backend: 'native',
     async createSession(options) {
       // TODO(M1-contract): 逐线坐实 create 的参数形态（seed/meta/agentOptions），
       // 0.1.5 线需显式传 Agent 的分支在此收敛。
+      //
+      // title 面查实（宿主 0.2.x 线源码锚点，本仓 dsh-repo 对照）：
+      // - packages/api/session-controller/src/types.ts:265-270 SessionCreateRequest =
+      //   {workspaceId?, cwd?, sessionId?, agentPreset?}——**无 title 字段**；
+      // - packages/core/agent/src/index.ts:78-85 CreateAgentOptions.meta 白名单 =
+      //   {cwd,parentSession,isSeeded,origin,delegationDepth,agentPreset}——**无 title**，
+      //   且 origin 只允许 'subagent'（现有 meta.origin:'dsh-im-union' 属来源标记位，
+      //   宿主侧不保证入会话列表）；
+      // - 唯一 title 面 = sessionController.rename（types.ts:289-292），rename 成功后
+      //   宿主 settle 'title' 投影单元，列表行同步刷新
+      //   （packages/api/session-controller/src/client/sessions/session.ts:348-358）
+      //   → 渠道角标前缀走 create+rename 两步，不伪称 create 直接收 title。
       const created = await create.call(agents, {
         seed: [],
         meta: { origin: 'dsh-im-union', workspace: options.workspace },
@@ -184,6 +221,11 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
         (created && typeof created.id === 'string' && created.id) ||
         options.sessionIdHint ||
         `imu:union:generated:${Date.now()}`
+      const wanted = typeof options.title === 'string' ? options.title.trim() : ''
+      if (wanted !== '') {
+        const applied = await renameTitle(id, wanted)
+        if (applied) return { id, title: wanted }
+      }
       const title = created && typeof created.title === 'string' ? created.title : undefined
       return { id, title }
     },
@@ -336,16 +378,7 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
       throw new UnsupportedError('fork 回包无新会话 id')
     },
     async rename(sessionId, title) {
-      if (!renameFn) return false
-      try {
-        await callWithShapeFallback(
-          () => renameFn.call(sessionController, { sessionId, title }) as Promise<void>,
-          () => renameFn.call(sessionController, sessionId, title) as Promise<void>,
-        )
-        return true
-      } catch {
-        return false
-      }
+      return renameTitle(sessionId, title)
     },
   }
 }

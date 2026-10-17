@@ -17,6 +17,14 @@
  *   经 im.v1.message_resource 取回（GET /im/v1/messages/{id}/resources/{key}?type=file），
  *   需 im:resource 权限；限额不自设（引擎 FILE_BUDGET 20 MiB / ≤4 个，
  *   平台侧 stream 文件自身上限 30 MiB）；
+ * - 语音（T3.5，**全配置驱动、默认关**）：config.voiceEnabled='true' 才接线——
+ *   入站 msg_type=audio 帧下载资源（im.v1.message_resource）→ ffmpeg 转 wav/16k →
+ *   DashScope ASR → 正文带 🎤 标记；任一环节失败回占位「[语音转写失败：原因类别]」
+ *   不丢事件。出站 speak(address, text)（DashScope TTS → 转 opus → im.v1.file.create
+ *   （file_type=opus，duration 毫秒）→ msg_type=audio）**已实现但不在 caps 上吹**：
+ *   未真机实证前 caps.voice 保持 false（E1 纪律：声明=真实现），只作显式开启后的能力；
+ *   DashScope key 只走凭据库 resolve（secrets.dashScopeKey），零明文入 config；
+ *   ffmpeg/DashScope 均为外部进程与公开 REST，spawnImpl/fetchImpl 可注入替身；
  * - 图片入站/话题/按钮：P1+ 增强，本版本声明 false；
  * - QR 创建机器人：【决策不做】飞书官方无公开「扫码创建自建应用」API，
  *   OpenClaw 系流程为私有接口（净室边界 E2 同类红线）——保持 credentials 绑定
@@ -35,6 +43,17 @@ import type {
   SemanticMessage,
 } from './types.js'
 import type { ChatAddress } from '../engine/router.js'
+import {
+  checkFfmpeg,
+  dashscopeAsr,
+  dashscopeTts,
+  estimateWavDurationMs,
+  transcode,
+  voiceFailureText,
+  type FetchLike,
+  type SpawnLike,
+  type VoiceFailure,
+} from '../engine/voice.js'
 
 const MAX_MESSAGE_LENGTH = 4000
 const OPEN_BASE = 'https://open.feishu.cn'
@@ -100,7 +119,7 @@ export interface LarkLike {
        */
       file?: {
         create: (payload: {
-          data: { file_type: string; file_name: string; file: Uint8Array }
+          data: { file_type: string; file_name: string; file: Uint8Array; duration?: number }
         }) => Promise<FeishuUploadResult | null | undefined>
       }
       /** im.v1.message_resource 下载面（图/音/视频/文件共用，type 区分）。 */
@@ -121,11 +140,35 @@ export interface LarkLike {
   [key: string]: unknown
 }
 
+/** 语音档位（T3.5）：构造期由 config/凭据决定，运行期只读。 */
+export interface FeishuVoiceOptions {
+  enabled: true
+  /** DashScope API Key（凭据库 resolve，绝不出现在日志/文案）。 */
+  apiKey: string
+  asrModel?: string
+  ttsModel?: string
+  ttsVoice?: string
+  baseUrl?: string
+  /** ffmpeg 注入替身（缺省懒 import node:child_process）。 */
+  spawnImpl?: SpawnLike
+  /** DashScope 注入替身（缺省全局 fetch）。 */
+  fetchImpl?: FetchLike
+  timeoutMs?: number
+}
+
 export interface FeishuAdapterOptions {
   appId: string
   appSecret: string
   /** 流式档位：card=流式卡片（默认）/ text=逐步消息。 */
   cardMode?: 'card' | 'text'
+  /** 语音档位开关（config.voiceEnabled='true' 才为 true；默认关）。 */
+  voiceEnabled?: boolean
+  /** 语音凭据与模型（voiceEnabled=false 时一律忽略）。 */
+  voice?: Omit<FeishuVoiceOptions, 'enabled'>
+  /** ffmpeg 注入替身（透传给 voice）。 */
+  spawnImpl?: SpawnLike
+  /** DashScope 注入替身（透传给 voice；与 cardkit 的 fetchImpl 各自独立路由）。 */
+  voiceFetchImpl?: FetchLike
   /** 注入官方 SDK 模块面（测试 fake；缺省动态 import）。 */
   lark?: LarkLike
   /** card 档裸 REST 面与文件下载面共用（测试注入；缺省全局 fetch）。 */
@@ -168,6 +211,11 @@ export function normalizeFeishuMessage(payload: FeishuEventPayload): SemanticMes
           if (typeof key === 'string') text = text.replace(key, '').trim()
         }
       }
+    } else if (message.message_type === 'audio') {
+      // 语音消息：正文先给占位（不丢事件）；开了语音档位时由 fillAudio 覆写为转写结果。
+      // 不抢 'media'（视频）档：那种帧型本版本仍走「非文本未开通」占位，不造假。
+      text = '[语音消息]'
+      mentionedBot = true
     } else if (message.message_type === 'file' || typeof parsed.file_key === 'string') {
       // file 消息：正文先给文件名占位，字节由 fillFiles 异步补（失败也不丢整条）。
       const name = typeof parsed.file_name === 'string' && parsed.file_name !== '' ? parsed.file_name : '未命名文件'
@@ -197,6 +245,8 @@ export class FeishuAdapter implements ChannelAdapter {
   connected = false
   private readonly cardMode: 'card' | 'text'
   private readonly fetchImpl: NonNullable<FeishuAdapterOptions['fetchImpl']>
+  /** 语音档位（未开启=undefined：入站只留占位，零外部调用）。 */
+  private readonly voice: FeishuVoiceOptions | undefined
   private tenantToken: { value: string; expireAtMs: number } | undefined
   private listeners: MessageListener[] = []
   private client: InstanceType<LarkLike['Client']> | undefined
@@ -214,7 +264,26 @@ export class FeishuAdapter implements ChannelAdapter {
     this.lark = options.lark
     this.cardMode = options.cardMode === 'text' ? 'text' : 'card'
     this.fetchImpl = options.fetchImpl ?? ((globalThis as { fetch?: any }).fetch as any)
+    // 语音档位：全配置驱动，默认关。开了但无 key 仍保留 enabled（诊断报 failed，
+    // 入站回「未配置语音密钥」占位），不静默假装能力。
+    if (options.voiceEnabled === true) {
+      const base = options.voice ?? { apiKey: '' }
+      this.voice = {
+        enabled: true,
+        apiKey: typeof base.apiKey === 'string' ? base.apiKey : '',
+        ...(base.asrModel === undefined ? {} : { asrModel: base.asrModel }),
+        ...(base.ttsModel === undefined ? {} : { ttsModel: base.ttsModel }),
+        ...(base.ttsVoice === undefined ? {} : { ttsVoice: base.ttsVoice }),
+        ...(base.baseUrl === undefined ? {} : { baseUrl: base.baseUrl }),
+        ...(base.timeoutMs === undefined ? {} : { timeoutMs: base.timeoutMs }),
+        spawnImpl: base.spawnImpl ?? options.spawnImpl,
+        fetchImpl: base.fetchImpl ?? options.voiceFetchImpl,
+      }
+    } else {
+      this.voice = undefined
+    }
     // E1 档位声明=实际模式：card 档原生流式；text 档全 false 让引擎分段。
+    // voice 位**不因开了档位就抹上**：无真机实证保持 false（speak 已实现但不造假的声明）。
     this.caps = {
       editStream: false,
       nativeStream: this.cardMode === 'card',
@@ -254,6 +323,8 @@ export class FeishuAdapter implements ChannelAdapter {
         if (message === undefined) return
         // 入站文件下载（T2.4）：失败降级为无附件，不丢整条。
         await this.fillFiles(message, data?.message)
+        // 入站语音转写（T3.5）：失败回占位文案，同样不丢整条。
+        await this.fillAudio(message, data?.message)
         for (const listener of this.listeners) listener(message)
       },
     }
@@ -318,16 +389,32 @@ export class FeishuAdapter implements ChannelAdapter {
    * 本层只重平台硬约束（非空文件）。
    */
   async sendFile(address: ChatAddress, file: OutboundFile, _signal?: AbortSignal): Promise<Receipt> {
+    const fileKey = await this.uploadFile('stream', file.name, file.data)
+    return this.sendMessagePayload(address, 'file', JSON.stringify({ file_key: fileKey }))
+  }
+
+  /**
+   * im.v1.file.create 上传面（普通文件与语音条共用）。协议事实：file_type 可用
+   * stream / opus（opus 需 duration 毫秒，见飞书「上传文件」文档）；单文件 ≤30 MB
+   * 且不得为空。错误分型沿用既有姿态：网络类=Uncertain（D7 禁自动重发），
+   * 平台码=确定性转译。
+   */
+  private async uploadFile(fileType: string, fileName: string, data: Uint8Array, durationMs?: number): Promise<string> {
     const client = this.client
     if (client === undefined) throw new Error('feishu: 客户端未初始化（先 connect）')
     if (typeof client.im?.file?.create !== 'function') {
       throw new Error('feishu: 当前 SDK 面缺 im.file.create，文件上传不可用')
     }
-    if (file.data.byteLength === 0) throw new Error(`feishu: 空文件不允许上传（${file.name}）`)
+    if (data.byteLength === 0) throw new Error(`feishu: 空文件不允许上传（${fileName}）`)
     let uploaded: FeishuUploadResult | null | undefined
     try {
       uploaded = await client.im.file.create({
-        data: { file_type: 'stream', file_name: file.name, file: Buffer.from(file.data) },
+        data: {
+          file_type: fileType,
+          file_name: fileName,
+          file: Buffer.from(data),
+          ...(typeof durationMs === 'number' && durationMs > 0 ? { duration: Math.round(durationMs) } : {}),
+        },
       })
     } catch (error) {
       if (isNetworkLike(error)) throw new FeishuUncertainError(`feishu file upload: ${(error as Error).message}`)
@@ -342,7 +429,7 @@ export class FeishuAdapter implements ChannelAdapter {
     if (typeof fileKey !== 'string' || fileKey === '') {
       throw new Error('feishu: 文件上传未返回 file_key')
     }
-    return this.sendMessagePayload(address, 'file', JSON.stringify({ file_key: fileKey }))
+    return fileKey
   }
 
   /**
@@ -362,18 +449,28 @@ export class FeishuAdapter implements ChannelAdapter {
       return
     }
     if (fileKey === '') return
+    const data = await this.downloadResource(raw.message_id, fileKey, 'file')
+    if (data === undefined) return
+    message.files = [{ name: fileName, data }]
+  }
+
+  /**
+   * im.v1.message_resource 下载面（文件/语音等资源共用，type 区分）。
+   * 无下载面/抛错/无流/空字节 → undefined（降级不抛，归一层已给占位正文）。
+   */
+  private async downloadResource(messageId: string, resourceKey: string, type: 'file' | 'media'): Promise<Uint8Array | undefined> {
     const client = this.client
     if (typeof client?.im?.messageResource?.get !== 'function') {
-      this.log('feishu: 当前 SDK 面缺 im.message_resource.get，入站文件降级为无附件')
-      return
+      this.log('feishu: 当前 SDK 面缺 im.message_resource.get，入站资源降级为无字节')
+      return undefined
     }
     try {
       const resource = await client.im.messageResource.get({
-        params: { type: 'file' },
-        path: { message_id: raw.message_id, file_key: fileKey },
+        params: { type },
+        path: { message_id: messageId, file_key: resourceKey },
       })
       const stream = resource?.getReadableStream?.()
-      if (stream === undefined) return
+      if (stream === undefined) return undefined
       const chunks: Uint8Array[] = []
       let total = 0
       for await (const chunk of stream) {
@@ -381,17 +478,115 @@ export class FeishuAdapter implements ChannelAdapter {
         chunks.push(bytes)
         total += bytes.byteLength
       }
-      if (total === 0) return
+      if (total === 0) return undefined
       const data = new Uint8Array(total)
       let offset = 0
       for (const chunk of chunks) {
         data.set(chunk, offset)
         offset += chunk.byteLength
       }
-      message.files = [{ name: fileName, data }]
+      return data
     } catch (error) {
-      this.log(`feishu: 文件下载失败（降级为无附件）: ${(error as Error).message}`)
+      this.log(`feishu: 资源下载失败（type=${type}，降级）: ${(error as Error).message}`)
+      return undefined
     }
+  }
+
+  /**
+   * 入站语音转写（T3.5）：audio 帧 → 下载资源 → ffmpeg 转 wav/16k → DashScope ASR
+   * → 正文覆写为「🎤 <转写>」。任一环节失败：正文回「[语音转写失败：<原因类别>]」，
+   * 事件照常派发（不丢）。语音档位关闭时首行返回——零下载/零进程/零网络。
+   */
+  private async fillAudio(message: SemanticMessage, raw: FeishuEventMessage | undefined): Promise<void> {
+    if (raw === undefined || raw.message_type !== 'audio') return
+    const voice = this.voice
+    if (voice === undefined) return
+    const fail = (kind: VoiceFailure['kind'], note: string): void => {
+      message.text = voiceFailureText({ kind, message: note, uncertain: false })
+    }
+    if (voice.apiKey === '') {
+      fail('missing-config', 'feishu: 语音档位缺 DashScope API Key（凭据库未入库）')
+      return
+    }
+    const messageId = typeof raw.message_id === 'string' ? raw.message_id : ''
+    if (messageId === '') {
+      fail('bad-input', 'feishu: audio 事件缺 message_id')
+      return
+    }
+    let fileKey = ''
+    try {
+      const parsed = JSON.parse(String(raw.content ?? '{}')) as Record<string, unknown>
+      if (typeof parsed.file_key === 'string') fileKey = parsed.file_key
+    } catch {
+      // content 非 JSON：按缺资源处理（下面 fileKey 为空即占位）
+    }
+    if (fileKey === '') {
+      fail('bad-input', 'feishu: audio 帧 content 无 file_key')
+      return
+    }
+    // 音频资源归属：飞书文档对语音下载 type=file / type=media 表述不一致 →
+    // 先 file 再 media 双试（两次都无字节才判下载失败），不硬编单侧结论。
+    let bytes = await this.downloadResource(messageId, fileKey, 'file')
+    if (bytes === undefined) bytes = await this.downloadResource(messageId, fileKey, 'media')
+    if (bytes === undefined || bytes.byteLength === 0) {
+      fail('download-failed', 'feishu: 语音资源下载无字节')
+      return
+    }
+    const converted = await transcode(bytes, 'ogg', 'wav', voice.spawnImpl, voice.timeoutMs === undefined ? {} : { timeoutMs: voice.timeoutMs })
+    if (converted.audio === undefined) {
+      message.text = voiceFailureText(converted.failure)
+      return
+    }
+    const asr = await dashscopeAsr(converted.audio, {
+      apiKey: voice.apiKey,
+      format: converted.format ?? 'wav',
+      ...(voice.asrModel === undefined ? {} : { model: voice.asrModel }),
+      ...(voice.baseUrl === undefined ? {} : { baseUrl: voice.baseUrl }),
+      ...(voice.timeoutMs === undefined ? {} : { timeoutMs: voice.timeoutMs }),
+      ...(voice.fetchImpl === undefined ? {} : { fetchImpl: voice.fetchImpl }),
+    })
+    if (typeof asr.text !== 'string' || asr.text === '') {
+      message.text = voiceFailureText(asr.failure)
+      return
+    }
+    message.text = `🎤 ${asr.text}`
+    this.log(`feishu: 语音转写完成（${String(asr.seconds ?? '?')}s）`)
+  }
+
+  /**
+   * 出站语音（T3.5，**仅 voiceEnabled 可达**）：DashScope TTS → ffmpeg 转 opus/ogg
+   * （飞书语音条口径 libopus/-ac 1/-ar 16000）→ im.v1.file.create（file_type=opus,
+   * duration 毫秒）→ im.v1.message.create（msg_type=audio, content.file_key）。
+   * caps.voice 仍为 false：未真机实证不吹能力位（E1）。
+   */
+  async speak(address: ChatAddress, text: string, _signal?: AbortSignal): Promise<Receipt> {
+    const voice = this.voice
+    if (voice === undefined) throw new Error('feishu: 语音档位未启用（config.voiceEnabled=true 才可发）')
+    if (voice.apiKey === '') throw new Error('feishu: 语音档位缺 DashScope API Key（凭据库 feishu.<账号>.dashScopeKey 未入库）')
+    const synth = await dashscopeTts(text, {
+      apiKey: voice.apiKey,
+      ...(voice.ttsModel === undefined ? {} : { model: voice.ttsModel }),
+      ...(voice.ttsVoice === undefined ? {} : { voice: voice.ttsVoice }),
+      ...(voice.baseUrl === undefined ? {} : { baseUrl: voice.baseUrl }),
+      ...(voice.timeoutMs === undefined ? {} : { timeoutMs: voice.timeoutMs }),
+      ...(voice.fetchImpl === undefined ? {} : { fetchImpl: voice.fetchImpl }),
+    })
+    if (synth.audio === undefined) {
+      if (synth.failure?.uncertain === true) throw new FeishuUncertainError(`feishu speak: ${synth.failure.message}`)
+      throw new Error(`feishu: 语音合成失败 ${voiceFailureText(synth.failure, '合成')}`)
+    }
+    const durationMs = estimateWavDurationMs(synth.audio)
+    const encoded = await transcode(synth.audio, synth.format ?? 'wav', 'opus', voice.spawnImpl, voice.timeoutMs === undefined ? {} : { timeoutMs: voice.timeoutMs })
+    if (encoded.audio === undefined) {
+      if (encoded.failure?.uncertain === true) throw new FeishuUncertainError(`feishu speak: ${encoded.failure.message}`)
+      throw new Error(`feishu: 语音转码失败 ${voiceFailureText(encoded.failure, '合成')}`)
+    }
+    const fileKey = await this.uploadFile('opus', `voice-${Date.now()}.opus`, encoded.audio, durationMs)
+    return this.sendMessagePayload(
+      address,
+      'audio',
+      JSON.stringify({ file_key: fileKey, ...(durationMs === undefined ? {} : { duration: Math.round(durationMs) }) }),
+    )
   }
 
   // —— 流式卡片档（cardkit v1 公开 REST）————————————————
@@ -530,7 +725,36 @@ export class FeishuAdapter implements ChannelAdapter {
       status: 'unverified',
       hint: '文件收发需 im:resource（上传 im.v1.file / 下载 im.v1.message_resource）；首次文件收发时实证',
     })
+    checks.push(await this.voiceCheck())
     return checks
+  }
+
+  /**
+   * 语音档位诊断（T3.5 三态）：
+   * - 未启用（voiceEnabled 非 'true'）= unverified——能力存在但未开通，不谎报；
+   * - 已启用但无密钥 / ffmpeg 探测失败 = failed（给可行动提示，不回显密钥）；
+   * - 已启用 + 密钥到位 + ffmpeg 探测通过 = passed（DashScope 实调用仍需首次实证）。
+   * 未注入探测面时不真起进程（禁真实副作用），诚实报 unverified。
+   */
+  private async voiceCheck(): Promise<ChannelDiagnosisCheck> {
+    const voice = this.voice
+    if (voice === undefined) {
+      return {
+        name: 'voice-pipeline',
+        status: 'unverified',
+        hint: '语音档位未启用（config.voiceEnabled=true + 凭据库 feishu.<账号>.dashScopeKey 入库后开启）；未真机实证前 caps.voice 保持 false',
+      }
+    }
+    if (voice.apiKey === '') {
+      return { name: 'voice-pipeline', status: 'failed', hint: '语音档位已开但 DashScope API Key 未入库（凭据库 feishu.<账号>.dashScopeKey）' }
+    }
+    if (voice.spawnImpl === undefined) {
+      return { name: 'voice-pipeline', status: 'unverified', hint: '语音档位已配（密钥到位）；ffmpeg 探测面未注入，首次真实转码时实证' }
+    }
+    const probe = await checkFfmpeg({ spawnImpl: voice.spawnImpl, ...(voice.timeoutMs === undefined ? {} : { timeoutMs: voice.timeoutMs }) })
+    return probe.ok
+      ? { name: 'voice-pipeline', status: 'passed', hint: `ffmpeg 到位（${String(probe.version ?? '')}）；ASR/TTS 需首次实调用实证权限与配额` }
+      : { name: 'voice-pipeline', status: 'failed', hint: `语音探测失败：${voiceFailureText(probe.failure)}（内部：${String(probe.failure?.message ?? '')}）` }
   }
 
   /** 测试/诊断驱动：模拟一条 receive 事件（与 SDK handler 同一入口）。 */
@@ -543,7 +767,11 @@ export class FeishuAdapter implements ChannelAdapter {
 
 class FeishuUncertainError extends Error {}
 
-/** 工厂挂 registry（懒加载动态 import SDK 面）。 */
+/**
+ * 工厂挂 registry（懒加载动态 import SDK 面）。语音档位全配置驱动、默认关：
+ * config.voiceEnabled='true' 才接线；API Key 只从凭据库 resolve（secrets.dashScopeKey，
+ * meta.ts feishu 条目 secret 字段），零明文入 config；模型/音色走 config 可选项。
+ */
 export async function createFeishuAdapter(options: {
   accountId: string
   config: Record<string, string>
@@ -554,9 +782,32 @@ export async function createFeishuAdapter(options: {
   if (typeof appId !== 'string' || appId === '' || typeof appSecret !== 'string' || appSecret === '') {
     throw new Error(`feishu 账号 ${options.accountId}: appId/appSecret 未入库（检查凭据配置）`)
   }
+  const config = options.config ?? {}
+  const plain = (key: string): string | undefined => {
+    const value = config[key]
+    return typeof value === 'string' && value !== '' ? value : undefined
+  }
+  const optional: Record<string, string> = {}
+  const asrModel = plain('dashscopeModel')
+  const ttsModel = plain('dashscopeTtsModel')
+  const ttsVoice = plain('dashscopeVoice')
+  const baseUrl = plain('dashscopeBaseUrl')
+  if (asrModel !== undefined) optional.asrModel = asrModel
+  if (ttsModel !== undefined) optional.ttsModel = ttsModel
+  if (ttsVoice !== undefined) optional.ttsVoice = ttsVoice
+  if (baseUrl !== undefined) optional.baseUrl = baseUrl
   return new FeishuAdapter({
     appId,
     appSecret,
-    ...(options.config.cardMode === 'text' ? { cardMode: 'text' as const } : {}),
+    ...(config.cardMode === 'text' ? { cardMode: 'text' as const } : {}),
+    ...(config.voiceEnabled === 'true'
+      ? {
+          voiceEnabled: true as const,
+          voice: {
+            apiKey: typeof options.secrets.dashScopeKey === 'string' ? options.secrets.dashScopeKey : '',
+            ...optional,
+          },
+        }
+      : {}),
   })
 }

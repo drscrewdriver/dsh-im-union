@@ -356,6 +356,24 @@ test('T2.8 碎片续写：.. 挂起合并、!! 提交为一个回合；群聊不
   await tick()
 })
 
+test('/speak 路由：装了语音面的适配器命中，未装如实降级（T3.5）', async () => {
+  const bare = makeEngine()
+  await bare.engine.handleInbound('a1', bare.dm('/speak 你好'))
+  assert.match(bare.adapter.replies.at(-1).text, /不支持语音输出/)
+
+  const voiced = adapterStub()
+  const spoken = []
+  voiced.speak = async (address, text) => {
+    spoken.push({ address, text })
+    return { uncertain: false }
+  }
+  const second = makeEngine({ adapter: voiced })
+  await second.engine.handleInbound('a1', second.dm('/speak 播报测试'))
+  assert.equal(spoken.length, 1)
+  assert.equal(spoken[0].text, '播报测试')
+  assert.match(voiced.replies.at(-1).text, /已语音送出/)
+})
+
 test('主动投递观察：dm 入站在 admitted 前喂 onInboundDm（白名单外也在）', async () => {
   const seen = []
   const { engine, sessionApi, dm } = makeEngine({ onInboundDm: (accountId, message) => seen.push({ accountId, userId: message.userId }) })

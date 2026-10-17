@@ -39,6 +39,8 @@ export interface CommandDeps {
   toggleMute?: (address: ChatAddress) => string
   /** /goal：IM 侧目标备忘（chatKey → 文本）。 */
   goals: Map<string, string>
+  /** /speak：语音回本聊天（T3.5 飞书语音档）；缺位=降级文案。 */
+  speakText?: (address: ChatAddress, text: string) => Promise<string>
 }
 
 export interface ParsedCommand {
@@ -70,6 +72,7 @@ const COMMAND_TABLE: Array<{ name: string; usage: string; desc: string }> = [
   { name: 'goal', usage: '/goal <文本|->', desc: '设定/清除本聊天目标备忘' },
   { name: 'delivery', usage: '/delivery [retry <序号>]', desc: '投递日志/补发失败项' },
   { name: 'export', usage: '/export', desc: '导出本聊天投递记录 ZIP' },
+  { name: 'speak', usage: '/speak <文本>', desc: '语音回复（仅开启语音档的渠道）' },
 ]
 
 /** 行首 `/词` 才是命令；`/path` 之类文本不触发（群聊粘贴路径的误触面）。 */
@@ -298,6 +301,11 @@ export async function runCommand(
     case 'export':
       if (deps.exportChat === undefined) return '导出面未启用。'
       return await deps.exportChat(address, sessionId)
+    case 'speak': {
+      if (command.arg === '') return '用法：/speak <要念的文本>'
+      if (deps.speakText === undefined) return '当前宿主无语音面。'
+      return await deps.speakText(address, command.arg)
+    }
     default:
       return `未知命令 /${command.name}（/help 看可用命令）`
   }

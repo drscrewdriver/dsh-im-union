@@ -20,6 +20,8 @@ import { ChatRouter, chatKey, shouldRespondToGroup, type Binding, type ChatAddre
 import { chatOverrideKey, isCommandName, parseCommand, runCommand, type CommandDeps } from './commands.js'
 import { InteractionBroker, type ChatSessionRef } from './interactions.js'
 import { prepareImages, toPromptParts, visionSupported } from './media.js'
+import { withQuoteContext } from './quote.js'
+import { sessionTitle } from '../host-compat/session-source.js'
 import { prepareFiles, filesUnavailableNote, fileOutUnavailableNote } from './files.js'
 import { filePromptPart, type UploadsCompat } from '../host-compat/uploads-compat.js'
 import { extractDeliverables, type DeliverableRef, type DeliverablesCompat } from '../host-compat/deliverables-compat.js'
@@ -272,6 +274,21 @@ export class ImUnionEngine {
         return '本聊天已静音：宿主不再处理你的消息（/mute 再次切换恢复）；投递日志与网页端不受影响。'
       },
       goals: this.goals,
+      // /speak（T3.5）：只寻真正装了语音面的适配器（飞书语音档），其余渠道如实降级。
+      speakText: async (address, text) => {
+        for (const entry of this.accounts.values()) {
+          if (entry.adapter.id !== address.channel || typeof entry.adapter.speak !== 'function') continue
+          try {
+            const receipt = await entry.adapter.speak(address, text)
+            this.noteUncertain(receipt, '语音投递')
+            return receipt.uncertain ? '语音已发送但结果不明（不自动重发）。' : '已语音送出。'
+          } catch (error) {
+            this.log.warn(`speak 失败: ${(error as Error).message}`)
+            return '语音发送失败（原因已记入本机日志）。'
+          }
+        }
+        return '当前渠道不支持语音输出（或未开启语音档）。'
+      },
     }
   }
 
@@ -279,7 +296,7 @@ export class ImUnionEngine {
    * 隐式 imu: 形 id → 宿主真会话 id：首次使用时 createSession 并绑定；
    * 失败则继续用隐式 id（老线/降级面下 follow/prompt 自有报错路径，不阻断命令面）。
    */
-  private async ensureSessionId(address: ChatAddress, binding: Binding): Promise<string> {
+  private async ensureSessionId(address: ChatAddress, binding: Binding, title?: string): Promise<string> {
     const { sessionApi, router } = this.deps
     if (sessionApi.backend !== 'native' || !binding.sessionId.startsWith('imu:')) return binding.sessionId
     try {
@@ -287,6 +304,7 @@ export class ImUnionEngine {
       const info = await sessionApi.createSession({
         sessionIdHint: binding.sessionId,
         ...(workspace !== undefined ? { workspace } : {}),
+        ...(title !== undefined && title !== '' ? { title } : {}),
       })
       router.bind(address, info.id)
       return info.id
@@ -299,7 +317,12 @@ export class ImUnionEngine {
   private async runTurn(adapter: ChannelAdapter, message: SemanticMessage, accountId: string): Promise<void> {
     const { router, sessionApi } = this.deps
     const binding = router.resolve(message.address)
-    const sessionId = await this.ensureSessionId(message.address, binding)
+    // 会话列表渠道角标（T3.6）：首次建会话时把 `[渠道] 首条正文` 透传给 title。
+    const sessionId = await this.ensureSessionId(
+      message.address,
+      binding,
+      sessionTitle(message.address.channel, message.text),
+    )
     // 审批回路由登记：后发起的任务覆盖先前记录（与活跃任务一致）。
     this.sessionChats.set(sessionId, { accountId, address: message.address, userId: message.userId })
     if (sessionApi.backend === 'none') {
@@ -325,7 +348,9 @@ export class ImUnionEngine {
 
     // 图片输入（T1.7）：宿主 capability 元数据判视觉（E4，不按模型名猜）；
     // notes 回给渠道用户，不混进模型 prompt。
-    let promptInput: string | unknown[] = message.text
+    // 引用上下文（T3.6）：渠道已归一/回取的 quoteText 拼进正文尾部（无引用即原样）。
+    const promptText = withQuoteContext(message.text, message.quoteText)
+    let promptInput: string | unknown[] = promptText
     const inboundImages = message.images ?? []
     if (inboundImages.length > 0) {
       const supported = await visionSupported(this.deps.caps, this.selections.get(chatKey(message.address)))
@@ -334,7 +359,7 @@ export class ImUnionEngine {
         supported,
       )
       if (prepared.notes.length > 0) await adapter.reply(message.address, prepared.notes.join('\n'))
-      promptInput = toPromptParts(message.text, prepared)
+      promptInput = toPromptParts(promptText, prepared)
     }
     // 文件输入（T2.4）：上传面在位→{type:'file',receiptId} parts；
     // 缺位→纯文本回退（文件名/大小清单进 prompt，不假装内容已可读）。

@@ -22,6 +22,10 @@
  *   `payload` 是单个事件对象（带 event_id/event_type/event_ts），不是事件数组；
  *   message 事件 `{type:"message",channel,user,text,ts,channel_type}`，
  *   thread 内回复额外带 `thread_ts`（thread_ts !== ts 即为线程内消息）。
+ * - 引用原文（T3.6 上下文增强）：Slack 没有独立的「引用」消息类型，线程才是回复载体；
+ *   公开面 conversations.replies（channel+ts 必填，返回 messages 首元素即线程父消息）——
+ *   https://docs.slack.dev/reference/methods/conversations.replies /
+ *   https://docs.slack.dev/messaging/retrieving-messages ；失败静默，不丢事件。
  * - 出站：https://api.slack.com/methods/chat.postMessage（channel/text/thread_ts/
  *   blocks，bot scope chat:write；正文「超过 40000 字符会被截断」→ 长度上限取 40000）
  *   与 https://api.slack.com/methods/chat.update（必填 channel+ts，bot 可编辑自己
@@ -45,6 +49,7 @@
  * 首版不接；Block Kit 按钮、typing API、文件收发、reactions 首版均不接（详见 caps）。
  */
 import type { ChatAddress } from '../engine/router.js'
+import { mergeQuote } from '../engine/quote.js'
 import type {
   ChannelAdapter,
   ChannelCaps,
@@ -66,6 +71,9 @@ const RECONNECT_BASE_MS = 1_000
 const RECONNECT_MAX_MS = 30_000
 /** envelope 排重表上限（Socket Mode 重投窗口有限，环形淘汰足够）。 */
 const SEEN_LIMIT = 500
+/** 线程根原文缓存上限：conversations.replies 对非 Marketplace 新装应用限到 1 req/min，
+ *  同线程重复回取必须收敛（仅缓存成功值）。 */
+const QUOTE_CACHE_LIMIT = 100
 
 /** 可注入的 fetch 形态（只声明用到的能力）。 */
 type FetchLike = (
@@ -293,6 +301,8 @@ export class SlackAdapter implements ChannelAdapter {
   private botId = ''
   /** envelope_id（回退 event_id）排重：Socket Mode 未 ACK 会在 3s 后重投。 */
   private readonly seenKeys = new Set<string>()
+  /** `channel:ts` → 线程根消息原文（T3.6 引用回取限流收敛，只存成功值）。 */
+  private readonly quoteCache = new Map<string, string>()
 
   constructor(options: SlackAdapterOptions) {
     if (typeof options.botToken !== 'string' || options.botToken === '') {
@@ -545,12 +555,21 @@ export class SlackAdapter implements ChannelAdapter {
       const semantic = this.normalize(event)
       if (semantic === undefined) continue
       const refs = this.fileRefs(event)
-      if (refs.length > 0) {
-        // 异步 fill 范式：字节补齐后再投递（fillFiles 内部自吞异常，不丢整条消息）。
-        void this.fillFiles(semantic, refs).then(() => this.deliver(semantic))
+      const quoteTs = this.quoteRef(event)
+      if (refs.length === 0 && quoteTs === '') {
+        this.deliver(semantic)
         continue
       }
-      this.deliver(semantic)
+      // 异步补齐面（非图文件 T2.4 / 线程根原文 T3.6）：内部都自吞异常，
+      // finally 保证无论补强成功与否都投递，绝不丢事件。
+      void (async () => {
+        try {
+          if (refs.length > 0) await this.fillFiles(semantic, refs)
+          if (quoteTs !== '') await this.fillQuote(semantic, str(event.channel), quoteTs)
+        } finally {
+          this.deliver(semantic)
+        }
+      })()
     }
   }
 
@@ -644,7 +663,56 @@ export class SlackAdapter implements ChannelAdapter {
     }
     // Slack message 事件不带发送者显示名（需 users.info 另一次调用），首版不填。
     if (Number.isFinite(ts)) semantic.timestamp = Math.round(ts * 1000)
+    // 引用位（T3.6）：Slack 无独立「引用」类型，线程父消息就是被回复的消息；
+    // 只登记根 ts，原文由 fillQuote 走公开面回取，不伪填文本。
+    if (address.threadId !== undefined) semantic.quoteId = address.threadId
     return semantic
+  }
+
+  /** 本条事件是否需要回取线程根原文：线程内回复才是「引用」，根消息自身不取。 */
+  private quoteRef(event: SlackEvent): string {
+    const threadTs = str(event.thread_ts)
+    if (threadTs === '' || threadTs === str(event.ts)) return ''
+    return str(event.channel) === '' ? '' : threadTs
+  }
+
+  /**
+   * 线程根消息原文回取（T3.6 上下文增强）。
+   * 协议事实：Slack 事件体父位字段是 `thread_ts`（本文件头部第 24 行锚点），
+   * **不存在** `parent_message_id`；公开面 = `conversations.replies`
+   * （https://docs.slack.dev/reference/methods/conversations.replies：channel+ts 必填，
+   * ts 可为根消息或线程内任一消息；https://docs.slack.dev/messaging/retrieving-messages：
+   * 返回的 messages 数组首元素即线程父消息）→ 取 messages[0].text。
+   * 限流（同页 usage info：非 Marketplace 新装应用 1 req/min）→ 同线程走缓存。
+   * 失败（thread_not_found/channel_not_found/not_in_channel/限流/网络）静默：
+   * 不覆盖已有 quoteText、不丢事件。body 走现有 api() 判型面（与本适配器其余
+   * Web API 调用同形：POST + JSON + Bearer）。
+   */
+  private async fillQuote(message: SemanticMessage, channel: string, rootTs: string): Promise<void> {
+    if (channel === '' || rootTs === '') return
+    const key = `${channel}:${rootTs}`
+    let body = this.quoteCache.get(key)
+    if (body === undefined) {
+      try {
+        const value = await this.api('conversations.replies', { channel, ts: rootTs, limit: 1 }, this.botToken)
+        const rows = Array.isArray(value.messages) ? (value.messages as Array<Record<string, any>>) : []
+        const first = rows[0]
+        const text = typeof first?.text === 'string' ? first.text.trim() : ''
+        if (text === '') return
+        const user = typeof first?.user === 'string' && first.user !== '' ? first.user : ''
+        body = user === '' ? text : `${user}: ${text}`
+        this.quoteCache.set(key, body)
+        if (this.quoteCache.size > QUOTE_CACHE_LIMIT) {
+          const oldest = this.quoteCache.keys().next().value
+          if (oldest !== undefined) this.quoteCache.delete(oldest)
+        }
+      } catch (error) {
+        this.log(`slack: 线程根原文回取失败（保持现状）：${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
+    }
+    const merged = mergeQuote(message.quoteText, body, rootTs)
+    if (merged !== '') message.quoteText = merged
   }
 
   /** channel_type → 会话类型；channel_type 缺失时按频道 id 前缀回退（D=im）。 */

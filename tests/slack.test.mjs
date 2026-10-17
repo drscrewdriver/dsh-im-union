@@ -265,10 +265,13 @@ test('events_api：thread 内消息（thread_ts ≠ ts）→ ChatAddress.threadI
   sock.frame(eventsFrame('En-1', channelEvent({ text: 'root', ts: '1700.100' })))
   sock.frame(eventsFrame('En-2', channelEvent({ text: 'reply', ts: '1700.200', thread_ts: '1700.100' })))
   sock.frame(eventsFrame('En-3', channelEvent({ text: 'self', ts: '1700.300', thread_ts: '1700.300' })))
-  assert.equal(collected[0].address.threadId, undefined)
-  assert.equal(collected[1].address.threadId, '1700.100')
-  assert.equal(collected[1].address.chatId, 'C1')
-  assert.equal(collected[2].address.threadId, undefined)
+  // 线程内回复要走「投递前完成」的原文回取异步面（T3.6）→ 三条都落定后再断言
+  await waitUntil(() => collected.length === 3)
+  const byText = (value) => collected.find((m) => m.text === value)
+  assert.equal(byText('root').address.threadId, undefined)
+  assert.equal(byText('reply').address.threadId, '1700.100')
+  assert.equal(byText('reply').address.chatId, 'C1')
+  assert.equal(byText('self').address.threadId, undefined)
 })
 
 test('events_api：机器人回声（bot_id 非空）、subtype 事件、非消息类型一律丢弃', async () => {
@@ -801,4 +804,83 @@ test('sendFile：直传 4xx → SlackApiError（确定性拒投）', async () =>
   const { adapter } = await connectedAdapterWith(fetch)
   await assert.rejects(adapter.sendFile(dm, { name: 'a.txt', data: new Uint8Array([1]) }), SlackApiError)
   await adapter.disconnect()
+})
+
+// —— 线程根消息原文回取（T3.6 上下文增强）——————————————————————
+
+/** conversations.replies 成功回包：messages 首元素即线程父消息（公开文档语义）。 */
+const repliesOk = (root = { type: 'message', user: 'U8', text: '根消息原文', ts: '1700.100' }) =>
+  resp(200, { ok: true, messages: [root], has_more: false })
+
+const repliesRoute = (body) => (method, call, all) => {
+  if (method === 'conversations.replies') return body
+  return defaultRoute()(method, call, all)
+}
+
+test('线程内回复：走 conversations.replies 取根消息原文，拼「引用#ts」', async () => {
+  const { sock, collected, fetch } = await connectedAdapter(repliesRoute(repliesOk()))
+  sock.frame(eventsFrame('En-1', channelEvent({ text: '总结一下', ts: '1700.200', thread_ts: '1700.100' })))
+  await waitUntil(() => collected.length === 1)
+  assert.equal(collected[0].quoteId, '1700.100', 'normalize 阶段登记线程根 ts')
+  assert.equal(collected[0].quoteText, 'U8: 根消息原文\n[引用#1700.100]')
+  const call = fetch.byMethod('conversations.replies')[0]
+  assert.deepEqual(call.body, { channel: 'C1', ts: '1700.100', limit: 1 }, 'channel+ts 必填（ts=根消息）')
+  assert.equal(call.init.headers.authorization, `Bearer ${BOT}`)
+  assert.match(call.url, /^https:\/\/slack\.com\/api\/conversations\.replies$/, 'URL 形态 = Web API 公开面')
+})
+
+test('线程根消息自身（thread_ts === ts）不回取；非线程消息也不回取', async () => {
+  const { sock, collected, fetch } = await connectedAdapter(repliesRoute(repliesOk()))
+  sock.frame(eventsFrame('En-1', channelEvent({ text: 'root', ts: '1700.100', thread_ts: '1700.100' })))
+  sock.frame(eventsFrame('En-2', channelEvent({ text: 'plain', ts: '1700.300' })))
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(collected.length, 2, '两类消息都同步投递，不被回取阻塞')
+  assert.equal(collected[0].quoteId, undefined)
+  assert.equal(collected[1].quoteId, undefined)
+  assert.equal(fetch.byMethod('conversations.replies').length, 0, '无引用语境不发请求')
+})
+
+test('回取被拒（thread_not_found）→ 静默保持现状，不丢事件', async () => {
+  const { sock, collected } = await connectedAdapter(repliesRoute(resp(200, { ok: false, error: 'thread_not_found' })))
+  sock.frame(eventsFrame('En-1', channelEvent({ text: '总结一下', ts: '1700.200', thread_ts: '1700.100' })))
+  await waitUntil(() => collected.length === 1)
+  assert.equal(collected[0].text, '总结一下')
+  assert.equal(collected[0].quoteId, '1700.100', '定位已知、正文取不到：只留 id，不伪填文本')
+  assert.equal(collected[0].quoteText, undefined)
+})
+
+test('根消息无正文（纯附件线程）→ 不编造引用块', async () => {
+  const { sock, collected } = await connectedAdapter(repliesRoute(repliesOk({ type: 'message', user: 'U8', text: '', ts: '1700.100' })))
+  sock.frame(eventsFrame('En-1', channelEvent({ text: '看下这个', ts: '1700.200', thread_ts: '1700.100' })))
+  await waitUntil(() => collected.length === 1)
+  assert.equal(collected[0].quoteText, undefined)
+})
+
+test('同线程二次回复：命中缓存只发一次请求（conversations.replies 限流面收敛）', async () => {
+  const { sock, collected, fetch } = await connectedAdapter(repliesRoute(repliesOk()))
+  sock.frame(eventsFrame('En-1', channelEvent({ text: '第一条', ts: '1700.200', thread_ts: '1700.100' })))
+  await waitUntil(() => collected.length === 1)
+  sock.frame(eventsFrame('En-2', channelEvent({ text: '第二条', ts: '1700.300', thread_ts: '1700.100' })))
+  await waitUntil(() => collected.length === 2)
+  assert.equal(fetch.byMethod('conversations.replies').length, 1, '同 channel:ts 不重取')
+  assert.equal(collected[1].quoteText, 'U8: 根消息原文\n[引用#1700.100]')
+})
+
+test('线程 + 附件并存：两条异步补齐面都跑完且只投递一次', async () => {
+  const route = (method, call, all) => {
+    if (method === 'a.pdf') return binResp(200, [7, 7])
+    if (method === 'conversations.replies') return repliesOk()
+    return defaultRoute()(method, call, all)
+  }
+  const { sock, collected } = await connectedAdapter(route)
+  sock.frame(
+    eventsFrame(
+      'En-1',
+      channelEvent({ text: '附与引用', ts: '1700.200', thread_ts: '1700.100', files: [{ name: 'a.pdf', url_private: 'https://files.slack.com/a.pdf' }] }),
+    ),
+  )
+  await waitUntil(() => collected.length === 1)
+  assert.equal(collected.length, 1, '投递不重复')
+  assert.deepEqual([...collected[0].files[0].data], [7, 7])
+  assert.equal(collected[0].quoteText, 'U8: 根消息原文\n[引用#1700.100]')
 })

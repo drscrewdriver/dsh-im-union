@@ -441,3 +441,139 @@ test('diagnose：文件面未实证 = unverified', async () => {
   assert.equal(file.status, 'unverified')
   await adapter.disconnect()
 })
+
+// —— 引用原文回取（T3.6 上下文增强）——————————————————————————
+
+/** 被引用消息原文（公开面 GET /channels/{cid}/messages/{mid} 的回包形）。 */
+const quotedMessage = (over = {}) => ({
+  id: '555',
+  channel_id: '101',
+  author: { id: '8', username: 'alice', global_name: 'Alice' },
+  content: '被引用的原文',
+  ...over,
+})
+
+const replyFrame = (messageReference, over = {}) => ({
+  op: 0,
+  t: 'MESSAGE_CREATE',
+  s: 20,
+  d: {
+    channel_id: '101',
+    guild_id: '900',
+    author: { id: '7', username: 'bob', global_name: 'Bob' },
+    content: '总结这条',
+    mentions: [{ id: '42' }],
+    message_reference: messageReference,
+    ...over,
+  },
+})
+
+async function emitAndWait(ctx, frame) {
+  const got = []
+  ctx.adapter.onMessage((m) => got.push(m))
+  ctx.socket.emit(frame)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  return got
+}
+
+test('引用：message_reference 在位且无内联正文 → 走公开面 GET 回取原文并拼「引用#msgId」', async () => {
+  const ctx = await connectedAdapter((url) => {
+    if (url.endsWith('/channels/101/messages/555')) return resp(200, quotedMessage())
+    return GATEWAY_ROUTES(url)
+  })
+  const got = await emitAndWait(ctx, replyFrame({ message_id: '555', channel_id: '101' }))
+  await ctx.adapter.disconnect()
+  assert.equal(got.length, 1, '回取成功不影响投递')
+  assert.equal(got[0].quoteId, '555', 'normalize 阶段就登记平台侧引用 id')
+  assert.equal(got[0].quoteText, 'Alice: 被引用的原文\n[引用#555]')
+  const call = ctx.rest.calls.find((c) => String(c.url).includes('/messages/555'))
+  assert.ok(call, '必发一次按 id 取原文')
+  assert.equal(call.method, 'GET')
+  assert.match(String(call.url), /^https:\/\/api\.test\/channels\/101\/messages\/555$/, 'URL 形态 = 公开面路径')
+  assert.equal(call.headers.authorization, 'Bot DTOK')
+})
+
+test('引用：channel_id 与当前频道不同 → 用引用自带的频道 id 定位', async () => {
+  const ctx = await connectedAdapter((url) => {
+    if (url.endsWith('/channels/909/messages/555')) return resp(200, quotedMessage({ content: '跨频道原文' }))
+    return GATEWAY_ROUTES(url)
+  })
+  const got = await emitAndWait(ctx, replyFrame({ message_id: '555', channel_id: '909' }))
+  await ctx.adapter.disconnect()
+  assert.equal(got[0].quoteText, 'Alice: 跨频道原文\n[引用#555]')
+})
+
+test('引用：内联 referenced_message 在位 → 省一次 REST', async () => {
+  const ctx = await connectedAdapter()
+  const got = await emitAndWait(ctx, replyFrame({ message_id: '555', channel_id: '101' }, { referenced_message: quotedMessage({ content: '内联原文', author: { username: 'carl' } }) }))
+  await ctx.adapter.disconnect()
+  assert.equal(got[0].quoteText, 'carl: 内联原文\n[引用#555]')
+  assert.ok(!ctx.rest.calls.some((c) => String(c.url).includes('/messages/555')), '内联在位时不发回取请求')
+})
+
+test('引用：FORWARD 快照（message_snapshot.message）→ 取快照正文', async () => {
+  const ctx = await connectedAdapter()
+  const got = await emitAndWait(ctx, replyFrame({ type: 1, message_id: '555', channel_id: '101' }, { message_snapshot: { message: quotedMessage({ content: '转发快照正文', author: {} }) } }))
+  await ctx.adapter.disconnect()
+  assert.equal(got[0].quoteText, '转发快照正文\n[引用#555]', '无作者名时不编造前缀')
+})
+
+test('引用：回取 404 → 静默保持现状（不覆盖 quoteText、不丢消息、登记 id）', async () => {
+  const ctx = await connectedAdapter((url) => {
+    if (url.endsWith('/channels/101/messages/555')) return resp(404, { message: 'Unknown Message' })
+    return GATEWAY_ROUTES(url)
+  })
+  const got = await emitAndWait(ctx, replyFrame({ message_id: '555', channel_id: '101' }))
+  await ctx.adapter.disconnect()
+  assert.equal(got.length, 1)
+  assert.equal(got[0].text, '总结这条')
+  assert.equal(got[0].quoteId, '555')
+  assert.equal(got[0].quoteText, undefined, '取不到原文即不写引用块')
+})
+
+test('引用：网络异常（uncertain）→ 同样静默降级，不向上抛', async () => {
+  const ctx = await connectedAdapter((url) => {
+    if (url.endsWith('/channels/101/messages/555')) return resp(500, {})
+    return GATEWAY_ROUTES(url)
+  })
+  const got = await emitAndWait(ctx, replyFrame({ message_id: '555', channel_id: '101' }))
+  await ctx.adapter.disconnect()
+  assert.equal(got.length, 1, '5xx 不阻断投递')
+  assert.equal(got[0].quoteText, undefined)
+})
+
+test('引用：被引用消息无文本（纯附件）→ 不编造占位', async () => {
+  const ctx = await connectedAdapter((url) => {
+    if (url.endsWith('/channels/101/messages/555')) return resp(200, quotedMessage({ content: '', attachments: [{ id: 'a', filename: 'p.png', content_type: 'image/png' }] }))
+    return GATEWAY_ROUTES(url)
+  })
+  const got = await emitAndWait(ctx, replyFrame({ message_id: '555', channel_id: '101' }))
+  await ctx.adapter.disconnect()
+  assert.equal(got[0].quoteText, undefined)
+})
+
+test('引用：无 message_reference → 不发回取请求，quoteId/quoteText 均缺位', async () => {
+  const ctx = await connectedAdapter()
+  const got = await emitAndWait(ctx, {
+    op: 0,
+    t: 'MESSAGE_CREATE',
+    s: 21,
+    d: { channel_id: '101', guild_id: '900', author: { id: '7', username: 'bob' }, content: '普通消息', mentions: [{ id: '42' }] },
+  })
+  await ctx.adapter.disconnect()
+  assert.equal(got.length, 1)
+  assert.equal(got[0].quoteId, undefined)
+  assert.equal(got[0].quoteText, undefined)
+  assert.ok(!ctx.rest.calls.some((c) => String(c.url).includes('/messages/')))   
+})
+
+test('引用：原文超长 → quoteText 截到 800 码点且标记完整', async () => {
+  const ctx = await connectedAdapter((url) => {
+    if (url.endsWith('/channels/101/messages/555')) return resp(200, quotedMessage({ content: '字'.repeat(1200) }))
+    return GATEWAY_ROUTES(url)
+  })
+  const got = await emitAndWait(ctx, replyFrame({ message_id: '555', channel_id: '101' }))
+  await ctx.adapter.disconnect()
+  assert.equal(Array.from(got[0].quoteText).length, 800)
+  assert.ok(got[0].quoteText.endsWith('\n[引用#555]'))
+})

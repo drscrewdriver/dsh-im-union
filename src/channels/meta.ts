@@ -42,7 +42,16 @@ export const CHANNEL_META: Record<string, ChannelMeta> = {
     id: 'feishu',
     label: { zh: '飞书', en: 'Feishu / Lark' },
     bind: 'qr-or-credentials',
-    fields: [cred('appId', 'App ID', 'App ID'), cred('appSecret', 'App Secret', 'App Secret')],
+    fields: [
+      cred('appId', 'App ID', 'App ID'),
+      cred('appSecret', 'App Secret', 'App Secret'),
+      // 语音档位（T3.5）：密钥只入凭据库；必填=false——不开语音时留空即可。
+      { key: 'dashScopeKey', label: { zh: 'DashScope API Key（语音转写/合成，可选）', en: 'DashScope API Key (voice ASR/TTS, optional)' }, secret: true, required: false },
+      plain('voiceEnabled', '语音档位（填 true 开启，需本机 ffmpeg；缺位时只降级不谎报）', 'Voice tier ("true" to enable; needs local ffmpeg, degrades otherwise)'),
+      plain('dashscopeModel', 'ASR 模型（缺省 qwen3-asr-flash）', 'ASR model (default qwen3-asr-flash)'),
+      plain('dashscopeTtsModel', 'TTS 模型（缺省 cosyvoice-v3-flash）', 'TTS model (default cosyvoice-v3-flash)'),
+      plain('dashscopeVoice', 'TTS 音色（缺省 longanyang）', 'TTS voice (default longanyang)'),
+    ],
   },
   weixin: {
     id: 'weixin',

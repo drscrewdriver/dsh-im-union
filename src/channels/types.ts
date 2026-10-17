@@ -53,6 +53,8 @@ export interface SemanticMessage {
   mentionedBot: boolean
   /** 被引用消息的文本摘要（引擎做上下文增强用） */
   quoteText?: string
+  /** 被引用消息的平台侧 id（T3.6：渠道能给出时才填，用于「引用#msgId」标记与后续取回） */
+  quoteId?: string
   /** 图片附件（渠道下载后的字节，M1 起填） */
   images?: Array<{ name: string; data: Uint8Array; mimeType: string }>
   /** 普通文件附件（P1） */
@@ -87,6 +89,8 @@ export interface ChannelAdapter {
   /** caps.editStream || caps.nativeStream 才有；否则引擎退化为 reply。 */
   beginStream?(address: ChatAddress, signal?: AbortSignal): Promise<ReplyStream>
   sendFile?(address: ChatAddress, file: OutboundFile, signal?: AbortSignal): Promise<Receipt>
+  /** 语音出站（T3.5）：文本→TTS→渠道语音消息；仅飞书语音档实装，其余渠道无此方法。 */
+  speak?(address: ChatAddress, text: string): Promise<Receipt>
   /** 交互式提问/审批按钮；返回用户回包（文本或选项）。 */
   askChoices?(
     address: ChatAddress,

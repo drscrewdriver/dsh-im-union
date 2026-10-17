@@ -18,12 +18,16 @@
  *   （payload_json + files[0]，字段名为 Discord 公开约定）；入站 attachments 非图项
  *   按 content_type 判型进 SemanticMessage.files（图仍走 images）。
  *   本渠道不自设限额：张数/体积上限归引擎 FILE_BUDGET（20 MiB / ≤4 个）。
+ * - 引用面（T3.6 上下文增强）：MESSAGE_CREATE 的 message_reference 只给定位，
+ *   正文靠内联 referenced_message / message_snapshot（在网关缓存内才有），
+ *   不在位时走公开面 GET /channels/{id}/messages/{message_id} 回取（失败静默）。
  *
  * 运行时依赖零：Node≥22 全局 fetch/WebSocket/AbortController（宿主 engines 已锁），
  * 测试全量注入 fetchImpl/WebSocketImpl。
  */
 import type { ChatAddress } from '../engine/router.js'
 import { FILE_BUDGET } from '../engine/files.js'
+import { mergeQuote } from '../engine/quote.js'
 import type {
   ChannelAdapter,
   ChannelCaps,
@@ -250,9 +254,15 @@ export class DiscordAdapter implements ChannelAdapter {
           const message = this.normalize(frame.d)
           if (message !== undefined) {
             // 图片入站（T1.7）：下载后投递；失败降级无图文本，不丢整条。
-            void this.fillAttachments(message, frame.d).then(() => {
-              for (const listener of this.listeners) listener(message)
-            })
+            // 引用原文（T3.6）：同一「投递前完成」异步范式，链式串联免并发写同对象。
+            void this.fillAttachments(message, frame.d)
+              .then(() => this.fillQuote(message, frame.d))
+              .catch((error: unknown) =>
+                this.log(`discord 入站增强失败（降级投递）: ${(error as Error).message}`),
+              )
+              .then(() => {
+                for (const listener of this.listeners) listener(message)
+              })
           }
         }
         return
@@ -313,9 +323,42 @@ export class DiscordAdapter implements ChannelAdapter {
       mentionedBot,
       timestamp: typeof message.timestamp === 'string' ? Date.parse(message.timestamp) : undefined,
     }
-    // 协议事实：MESSAGE_CREATE 不带被引用消息正文，引用需额外 GET /messages/{id}；
-    // 上下文增强归 T3.6，这里不伪填充。
+    // 引用（T3.6）：MESSAGE_CREATE 只给 message_reference 定位，正文不在位时由
+    // fillQuote 走公开面回取（见文件头协议事实）；这里只登记平台 id，不伪填文本。
+    const refId = typeof message.message_reference?.message_id === 'string' ? message.message_reference.message_id : ''
+    if (refId !== '') semantic.quoteId = refId
     return semantic
+  }
+
+  /**
+   * 引用原文回取（T3.6 上下文增强）。
+   * 协议事实（https://discord.com/developers/docs/resources/message#get-message，
+   * 同页 Message Reference Object / Message Reference Types）：
+   * - `message_reference.type` 未设按 DEFAULT(0) 处理，耦合消息字段 `referenced_message`；
+   *   FORWARD(1) 耦合 `message_snapshot`；被引用消息不在网关缓存时内联字段会缺席；
+   * - `message_reference.channel_id` 「接收事件时总是存在」→ 跨频道引用也能定位；
+   * - 公开取回面 = `GET /channels/{channel_id}/messages/{message_id}`。
+   * 优先级：内联在位即用（省一次 REST）→ 不在位才回取。
+   * 失败（404/无权限/网络/正文为空）静默保持现状：不覆盖已有 quoteText、不丢整条消息。
+   */
+  private async fillQuote(message: SemanticMessage, raw: DiscordMessageLike | undefined): Promise<void> {
+    const ref = raw?.message_reference
+    const refId = typeof ref?.message_id === 'string' ? ref.message_id : ''
+    if (refId === '') return
+    let body = quoteBodyOf(raw?.referenced_message) ?? quoteBodyOf(raw?.message_snapshot?.message)
+    if (body === undefined) {
+      const channelId =
+        typeof ref?.channel_id === 'string' && ref.channel_id !== '' ? ref.channel_id : message.address.chatId
+      try {
+        const fetched = (await this.rest('GET', `/channels/${channelId}/messages/${refId}`)) as DiscordMessageLike
+        body = quoteBodyOf(fetched)
+      } catch (error) {
+        this.log(`discord 引用原文回取失败（保持截断现状）: ${(error as Error).message}`)
+        return
+      }
+    }
+    const merged = mergeQuote(message.quoteText, body, refId)
+    if (merged !== '') message.quoteText = merged
   }
 
   /**
@@ -510,6 +553,18 @@ function capLength(text: string): string {
   return `${text.slice(0, DISCORD_MAX_MESSAGE - 1)}…`
 }
 
+/**
+ * 被引用消息 → 引用正文（T3.6）：无文本（纯附件/贴纸等）回 undefined，
+ * 不编造占位（引擎侧 mergeQuote 会因此保持现状）。作者名可选（global_name 优先）。 */
+function quoteBodyOf(message: DiscordMessageLike | undefined): string | undefined {
+  const content = typeof message?.content === 'string' ? message.content.trim() : ''
+  if (content === '') return undefined
+  const globalName = typeof message?.author?.global_name === 'string' ? (message.author.global_name as string) : ''
+  const username = typeof message?.author?.username === 'string' ? (message.author.username as string) : ''
+  const author = globalName !== '' ? globalName : username
+  return author === '' ? content : `${author}: ${content}`
+}
+
 /** 极简 multipart（零依赖）：先文本字段，后文件部分。 */
 function buildMultipart(
   fields: Array<{ name: string; value: string }>,
@@ -609,4 +664,10 @@ interface DiscordMessageLike {
   timestamp?: string
   mentions?: Array<{ id?: string } | undefined>
   attachments?: Array<{ id?: string; filename?: string; content_type?: string; url?: string; proxy_url?: string; size?: number }>
+  /** 引用定位（公开面 Message Reference Object）：message_id/channel_id 为字符串雪花 id。 */
+  message_reference?: { type?: number; message_id?: string; channel_id?: string; guild_id?: string }
+  /** DEFAULT(0) 引用的耦合消息体（被引用消息在网关缓存内时才带）。 */
+  referenced_message?: DiscordMessageLike
+  /** FORWARD(1) 转发的耦合快照。 */
+  message_snapshot?: { message?: DiscordMessageLike }
 }
