@@ -37,6 +37,19 @@ window.__ModuleLoader__.load({
         'accounts.title': '账号管理',
         'accounts.empty': '暂无账号，在下方添加。',
         'accounts.add': '添加账号',
+        'accounts.qr.get': '获取登录二维码',
+        'accounts.qr.refresh': '重新获取二维码',
+        'accounts.qr.cancel': '取消扫码',
+        'accounts.qr.needid': '请先填写账号 ID 再获取二维码',
+        'accounts.qr.wait': '等待扫码…（用微信扫上方二维码）',
+        'accounts.qr.scaned': '已扫码，请在手机上确认授权',
+        'accounts.qr.expired': '二维码已过期，请重新获取',
+        'accounts.qr.need_verifycode': '请输入手机上显示的验证码',
+        'accounts.qr.verify_code_blocked': '验证码错误次数过多，请重新获取二维码',
+        'accounts.qr.binded_redirect': '该 Bot 已绑定其它实例',
+        'accounts.qr.scaned_but_redirect': '已扫码，正在重定向等待确认',
+        'accounts.qr.code.submit': '提交验证码',
+        'accounts.qr.confirmed': '扫码绑定完成，凭据已保存并连接',
         'accounts.save': '保存',
         'accounts.cancel': '取消',
         'accounts.check': '检查连接',
@@ -73,6 +86,19 @@ window.__ModuleLoader__.load({
         'accounts.title': 'Accounts',
         'accounts.empty': 'No accounts yet. Add one below.',
         'accounts.add': 'Add account',
+                'accounts.qr.get': 'Get login QR code',
+                'accounts.qr.refresh': 'Refresh QR code',
+                'accounts.qr.cancel': 'Cancel',
+                'accounts.qr.needid': 'Fill the account ID first, then get the QR code',
+                'accounts.qr.wait': 'Waiting for scan… (scan with WeChat)',
+                'accounts.qr.scaned': 'Scanned — confirm on your phone',
+                'accounts.qr.expired': 'QR expired, fetch a new one',
+                'accounts.qr.need_verifycode': 'Enter the code shown on your phone',
+                'accounts.qr.verify_code_blocked': 'Too many wrong codes, fetch a new QR',
+                'accounts.qr.binded_redirect': 'This bot is already bound to another instance',
+                'accounts.qr.scaned_but_redirect': 'Scanned — redirecting, waiting for confirm',
+                'accounts.qr.code.submit': 'Submit code',
+                'accounts.qr.confirmed': 'QR binding done — credentials saved and connected',
         'accounts.save': 'Save',
         'accounts.cancel': 'Cancel',
         'accounts.check': 'Check connection',
@@ -176,6 +202,10 @@ window.__ModuleLoader__.load({
       var allowHook = useState({});
       var allowDrafts = allowHook[0];
       var setAllowDrafts = allowHook[1];
+      // 微信扫码绑定态（T1.2）：null | {qrcode, qrDataUrl, accountId, status, verifyCode?}
+      var qrHook = useState(null);
+      var qr = qrHook[0];
+      var setQr = qrHook[1];
 
       var load = function () {
         getJSON('/accounts').then(function (result) {
@@ -242,6 +272,51 @@ window.__ModuleLoader__.load({
           });
         });
       };
+
+      var startQr = function () {
+        if (form.accountId === '') {
+          setNotice(t('accounts.qr.needid'));
+          return;
+        }
+        withBusy(function () {
+          return postJSON('/weixin/qr/start', {}).then(function (result) {
+            if (result.status === 200 && result.json && result.json.ok) {
+              setQr({ qrcode: result.json.qrcode, qrDataUrl: result.json.qrDataUrl, accountId: form.accountId, status: 'wait' });
+            } else {
+              setNotice((result.json && result.json.error) || 'HTTP ' + result.status);
+            }
+          });
+        });
+      };
+
+      // 状态驱动串行轮询：每次 setQr 产生新对象触发 effect 重跑下一拍；
+      // 服务端每请求 hold 最长 ~35s，前端不并发叠轮（cleanup 置活旗防串台）。
+      useEffect(function () {
+        if (qr === null) return undefined;
+        if (qr.status === 'confirmed' || qr.status === 'expired' || qr.status === 'need_verifycode' || qr.status === 'verify_code_blocked') return undefined;
+        var alive = true;
+        var payload = { qrcode: qr.qrcode, accountId: qr.accountId };
+        if (typeof qr.verifyCode === 'string' && qr.verifyCode !== '') payload.verifyCode = qr.verifyCode;
+        postJSON('/weixin/qr/status', payload).then(function (result) {
+          if (!alive) return;
+          if (result.status === 200 && result.json && result.json.ok) {
+            var status = result.json.status;
+            if (status === 'confirmed') {
+              setQr(Object.assign({}, qr, { status: 'confirmed' }));
+              setNotice(t('accounts.qr.confirmed'));
+              setAddOpen(false);
+              load();
+            } else {
+              setQr(Object.assign({}, qr, { status: status }));
+            }
+          } else if (alive) {
+            setQr(Object.assign({}, qr, { status: 'expired' })); // 请求异常保守收轮：引导重新取码而非假进度
+          }
+        }).catch(function () {
+          if (alive) setQr(Object.assign({}, qr, { status: 'expired' }));
+        });
+        return function () { alive = false; };
+      }, [qr]);
 
       var body = [];
       body.push(createElement('h4', null, t('accounts.title')));
@@ -350,6 +425,48 @@ window.__ModuleLoader__.load({
             )
           );
         });
+        var qrBlock = null;
+        if (form.channel === 'weixin') {
+          if (qr === null || qr.status === 'expired') {
+            qrBlock = createElement(
+              'div',
+              { key: 'qr-idle', style: { marginTop: 8 } },
+              createElement('button', { onClick: startQr, disabled: busy }, t(qr === null ? 'accounts.qr.get' : 'accounts.qr.refresh'))
+            );
+          } else if (qr.status === 'confirmed') {
+            qrBlock = createElement('p', { key: 'qr-done', style: { color: '#2a6' } }, t('accounts.qr.confirmed'));
+          } else {
+            var qrChildren = [
+              createElement('img', { key: 'img', src: qr.qrDataUrl, width: 200, height: 200, alt: 'login qr', style: { display: 'block' } }),
+              createElement('p', { key: 'st', style: { marginTop: 4 } }, t('accounts.qr.' + qr.status)),
+            ];
+            if (qr.status === 'need_verifycode') {
+              qrChildren.push(
+                createElement(
+                  'div',
+                  { key: 'vc' },
+                  createElement('input', {
+                    value: qr.verifyCode || '',
+                    onChange: function (event) { setQr(Object.assign({}, qr, { verifyCode: event.target.value })); },
+                  }),
+                  createElement(
+                    'button',
+                    { style: { marginLeft: 6 }, onClick: function () { setQr(Object.assign({}, qr, { status: 'wait' })); } },
+                    t('accounts.qr.code.submit')
+                  )
+                )
+              );
+            }
+            qrChildren.push(
+              createElement(
+                'button',
+                { key: 'cancel', style: { marginTop: 4 }, onClick: function () { setQr(null); } },
+                t('accounts.qr.cancel')
+              )
+            );
+            qrBlock = createElement('div', { key: 'qr-live', style: { marginTop: 8, padding: 8, border: '1px solid #ddd', borderRadius: 8 } }, qrChildren);
+          }
+        }
         body.push(
           createElement(
             'div',
@@ -393,6 +510,7 @@ window.__ModuleLoader__.load({
               })
             ),
             fieldInputs,
+            qrBlock,
             createElement(
               'div',
               { style: { marginTop: 8 } },
