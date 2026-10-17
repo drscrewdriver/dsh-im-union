@@ -109,6 +109,7 @@ test('MESSAGE_CREATE：群聊显式 @ 本机器人 → mentionedBot；回声丢�
     s: 3,
     d: { channel_id: '101', guild_id: '900', author: { id: '42' }, content: 'echo', mentions: [] },
   })
+  await new Promise((resolve) => setTimeout(resolve, 5))
   await adapter.disconnect()
   assert.equal(got.length, 1, 'bot 自发消息不产生入站')
   assert.equal(got[0].address.kind, 'group')
@@ -125,6 +126,7 @@ test('DM 判定与群聊未 @ 规则', async () => {
   adapter.onMessage((m) => got.push(m))
   socket.emit({ op: 0, t: 'MESSAGE_CREATE', s: 4, d: { channel_id: '202', author: { id: '7' }, content: 'hi' } })
   socket.emit({ op: 0, t: 'MESSAGE_CREATE', s: 5, d: { channel_id: '101', guild_id: '900', author: { id: '7' }, content: 'no mention', mentions: [] } })
+  await new Promise((resolve) => setTimeout(resolve, 5)) // 异步投递：等下载面落地
   assert.equal(got[0].address.kind, 'dm')
   assert.equal(got[0].mentionedBot, false, 'DM 不做 @ 判定')
   assert.equal(got.length, 2)

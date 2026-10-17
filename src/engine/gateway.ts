@@ -14,9 +14,10 @@ import type { CordisLike, LoggerLike } from '../types.js'
 import type { UnionCapabilities } from '../host-compat/services.js'
 import type { SessionApi } from '../host-compat/session-api.js'
 import { UnsupportedError } from '../host-compat/session-api.js'
-import { ChatRouter, shouldRespondToGroup, type Binding, type ChatAddress } from './router.js'
+import { ChatRouter, chatKey, shouldRespondToGroup, type Binding, type ChatAddress } from './router.js'
 import { chatOverrideKey, isCommandName, parseCommand, runCommand, type CommandDeps } from './commands.js'
 import { InteractionBroker, type ChatSessionRef } from './interactions.js'
+import { prepareImages, toPromptParts, visionSupported } from './media.js'
 import type { ApprovalOutcome, ApprovalRequest, QuestionAnswer, QuestionRequest } from '../host-compat/interaction.js'
 import type { ChannelAdapter, Receipt, ReplyStream, SemanticMessage } from '../channels/types.js'
 
@@ -249,6 +250,20 @@ export class ImUnionEngine {
     const canStream =
       (adapter.caps.editStream === true || adapter.caps.nativeStream === true) &&
       typeof adapter.beginStream === 'function'
+
+    // 图片输入（T1.7）：宿主 capability 元数据判视觉（E4，不按模型名猜）；
+    // notes 回给渠道用户，不混进模型 prompt。
+    let promptInput: string | unknown[] = message.text
+    const inboundImages = message.images ?? []
+    if (inboundImages.length > 0) {
+      const supported = await visionSupported(this.deps.caps, this.selections.get(chatKey(message.address)))
+      const prepared = prepareImages(
+        inboundImages.map((image) => ({ name: image.name, data: image.data, mimeType: image.mimeType })),
+        supported,
+      )
+      if (prepared.notes.length > 0) await adapter.reply(message.address, prepared.notes.join('\n'))
+      promptInput = toPromptParts(message.text, prepared)
+    }
     let stream: ReplyStream | undefined
     let streamBroken = false
     let progressChain: Promise<void> = Promise.resolve()
@@ -293,7 +308,7 @@ export class ImUnionEngine {
     const timerMs = this.deps.turnTimeoutMs ?? 10 * 60 * 1000
     let watchdog: ReturnType<typeof setTimeout> | undefined
     try {
-      await sessionApi.prompt(sessionId, message.text)
+      await sessionApi.prompt(sessionId, promptInput)
       await Promise.race([
         wake(),
         new Promise<void>((resolve) => {

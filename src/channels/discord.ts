@@ -55,6 +55,7 @@ interface FetchResponseLike {
   ok: boolean
   status: number
   json(): Promise<unknown>
+  arrayBuffer?(): Promise<ArrayBuffer>
 }
 type FetchLike = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<FetchResponseLike>
 
@@ -238,7 +239,12 @@ export class DiscordAdapter implements ChannelAdapter {
         }
         if (frame.t === 'MESSAGE_CREATE') {
           const message = this.normalize(frame.d)
-          if (message !== undefined) for (const listener of this.listeners) listener(message)
+          if (message !== undefined) {
+            // 图片入站（T1.7）：下载后投递；失败降级无图文本，不丢整条。
+            void this.fillAttachments(message, frame.d).then(() => {
+              for (const listener of this.listeners) listener(message)
+            })
+          }
         }
         return
       }
@@ -301,6 +307,31 @@ export class DiscordAdapter implements ChannelAdapter {
     // 协议事实：MESSAGE_CREATE 不带被引用消息正文，引用需额外 GET /messages/{id}；
     // 上下文增强归 T3.6，这里不伪填充。
     return semantic
+  }
+
+  /** 图片附件（content_type 判图）：url 优先（公开 CDN），proxy_url 回退；上限 4 张。 */
+  private async fillAttachments(message: SemanticMessage, raw: DiscordMessageLike | undefined): Promise<void> {
+    const attachments = raw?.attachments
+    if (!Array.isArray(attachments) || attachments.length === 0) return
+    const images: Array<{ name: string; data: Uint8Array; mimeType: string }> = []
+    for (const attachment of attachments) {
+      if (images.length >= 4) break
+      const contentType = typeof attachment?.content_type === 'string' ? attachment.content_type : ''
+      if (!contentType.startsWith('image/')) continue
+      const url =
+        typeof attachment?.url === 'string' ? attachment.url : typeof attachment?.proxy_url === 'string' ? attachment.proxy_url : undefined
+      if (url === undefined) continue
+      try {
+        const response = await this.fetchImpl(url)
+        const buffer = typeof response.arrayBuffer === 'function' ? await response.arrayBuffer() : undefined
+        if (buffer !== undefined && buffer.byteLength > 0) {
+          images.push({ name: String(attachment?.filename ?? 'image'), data: new Uint8Array(buffer), mimeType: contentType })
+        }
+      } catch (error) {
+        this.log(`图片下载失败（降级跳过）: ${(error as Error).message}`)
+      }
+    }
+    if (images.length > 0) message.images = images
   }
 
   // —— 出站 ——————————————————————————————————————————
@@ -521,4 +552,5 @@ interface DiscordMessageLike {
   content?: string
   timestamp?: string
   mentions?: Array<{ id?: string } | undefined>
+  attachments?: Array<{ id?: string; filename?: string; content_type?: string; url?: string; proxy_url?: string }>
 }

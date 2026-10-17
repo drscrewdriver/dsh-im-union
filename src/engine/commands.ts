@@ -11,6 +11,7 @@
  *   丢失时退 catalog.default——两种来源都缺则明示无法合并。
  */
 import type { ChatAddress, ChatRouter } from './router.js'
+import { chatKey } from './router.js'
 import type { ModelCatalogLike, SessionApi, SessionInfo } from '../host-compat/session-api.js'
 import type { UnionCapabilities } from '../host-compat/services.js'
 
@@ -18,7 +19,8 @@ export interface CommandDeps {
   sessionApi: SessionApi
   router: ChatRouter
   caps: UnionCapabilities
-  /** 按会话记忆最近一次模型选择（/reasoning 合并用）。 */
+  /** 宿主会话 id → 最近一次模型选择；键统一为 chatKey（与 runTurn 真 id 解耦，
+   *  否则 /model 记隐式 id、投递查宿主 id，两边永不相见）。 */
   selections: Map<string, { model?: string; provider?: string; reasoningEffort?: string }>
   /** 渠道会话 id → 工作区覆盖（/workspace 设定，createSession 消费）。 */
   workspaceOverrides: Map<string, string>
@@ -126,10 +128,14 @@ export async function runCommand(
       return catalog === undefined ? '当前宿主未暴露模型目录面，无法列模型。' : renderCatalog(catalog)
     }
     case 'model': {
-      if (command.arg === '') return '用法：/model <模型 id>（/models 查看列表）'
+      if (command.arg === '') return '用法：/model <id> 或 /model <provider>/<id>（/models 查看列表）'
+      const slash = command.arg.indexOf('/')
+      const selection = slash > 0
+        ? { provider: command.arg.slice(0, slash), model: command.arg.slice(slash + 1) }
+        : { model: command.arg }
       try {
-        await sessionApi.selectModel(sessionId, { model: command.arg })
-        deps.selections.set(sessionId, { ...(deps.selections.get(sessionId) ?? {}), model: command.arg })
+        await sessionApi.selectModel(sessionId, selection)
+        deps.selections.set(chatKey(address), selection)
         return `已切换模型：${command.arg}`
       } catch (error) {
         deps.logWarn(`selectModel 失败: ${(error as Error).message}`)
@@ -138,7 +144,7 @@ export async function runCommand(
     }
     case 'reasoning': {
       if (command.arg === '') return '用法：/reasoning <low|medium|high>（以宿主支持的档位为准）'
-      const current = deps.selections.get(sessionId)
+      const current = deps.selections.get(chatKey(address))
       const catalog = current?.model === undefined ? await sessionApi.modelCatalog() : undefined
       const model = current?.model ?? catalog?.default?.model
       if (typeof model !== 'string') return '无法确定当前模型，请先 /model <id> 再调思考强度。'
@@ -149,7 +155,7 @@ export async function runCommand(
           ...(provider !== undefined ? { provider } : {}),
           reasoningEffort: command.arg,
         })
-        deps.selections.set(sessionId, { model, ...(provider !== undefined ? { provider } : {}), reasoningEffort: command.arg })
+        deps.selections.set(chatKey(address), { model, ...(provider !== undefined ? { provider } : {}), reasoningEffort: command.arg })
         return `已设置思考强度：${command.arg}（模型 ${model}）`
       } catch (error) {
         deps.logWarn(`selectModel(reasoning) 失败: ${(error as Error).message}`)

@@ -115,17 +115,21 @@ test('/models：目录渲染含默认/通道/失败位；无面降级', async ()
   assert.match(none, /未暴露模型目录面/)
 })
 
-test('/model：成功记账 selections；失败回文案且原因进日志', async () => {
+test('/model：成功记账 selections（chatKey 统一）；provider 前缀解析；失败回文案', async () => {
   const a = fakeDeps()
   assert.match(await runCommand(a.deps, dm, 'sess', parseCommand('/model m-mini')), /已切换模型：m-mini/)
-  assert.deepEqual(a.deps.selections.get('sess'), { model: 'm-mini' })
-  const b = fakeDeps({ selectModelFails: true })
-  assert.match(await runCommand(b.deps, dm, 'sess', parseCommand('/model bad')), /模型切换失败：bad/)
+  assert.deepEqual(a.deps.selections.get('imu:telegram:dm:c1'), { model: 'm-mini' })
+  const b = fakeDeps()
+  await runCommand(b.deps, dm, 'sess', parseCommand('/model provX/m-main'))
+  assert.deepEqual(b.deps.selections.get('imu:telegram:dm:c1'), { provider: 'provX', model: 'm-main' })
+  assert.deepEqual(b.calls.at(-1)[2], { provider: 'provX', model: 'm-main' })
+  const c = fakeDeps({ selectModelFails: true })
+  assert.match(await runCommand(c.deps, dm, 'sess', parseCommand('/model bad')), /模型切换失败：bad/)
 })
 
 test('/reasoning：有当前模型直接合并；无则取 catalog.default；两缺给引导', async () => {
   const a = fakeDeps()
-  a.deps.selections.set('s1', { provider: 'p1', model: 'm-main' })
+  a.deps.selections.set('imu:telegram:dm:c1', { provider: 'p1', model: 'm-main' })
   const callsA = []
   a.deps.sessionApi.selectModel = async (sid, sel) => { callsA.push(sel) }
   assert.match(await runCommand(a.deps, dm, 's1', parseCommand('/reasoning low')), /已设置思考强度：low（模型 m-main）/)

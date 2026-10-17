@@ -28,7 +28,7 @@ const EDIT_THROTTLE_MS = 1100
 const POLL_TIMEOUT_S = 25
 
 /** 可注入的 fetch 形态（只声明用到的能力）。 */
-type FetchLike = (url: string, init?: RequestInitLike) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>
+type FetchLike = (url: string, init?: RequestInitLike) => Promise<{ ok: boolean; status: number; json(): Promise<unknown>; arrayBuffer?(): Promise<ArrayBuffer> }>
 interface RequestInitLike {
   method?: string
   body?: string | Uint8Array
@@ -158,6 +158,8 @@ export class TelegramAdapter implements ChannelAdapter {
           this.offset = Math.max(this.offset, update.update_id + 1)
           const message = this.normalize(update.message)
           if (message !== undefined) {
+            // 图片入站（T1.7）：下载失败降级为无图文本消息，不丢整条。
+            await this.fillImages(message, update.message)
             for (const listener of this.listeners) listener(message)
           }
         }
@@ -167,6 +169,24 @@ export class TelegramAdapter implements ChannelAdapter {
         await new Promise((resolve) => setTimeout(resolve, backoffMs))
         backoffMs = Math.min(backoffMs * 2, 30_000)
       }
+    }
+  }
+
+  /** photo 取最大档（数组末位）；telegram 服务端转 jpeg，mime 固定。 */
+  private async fillImages(message: SemanticMessage, raw: TelegramMessage | undefined): Promise<void> {
+    const photo = raw?.photo
+    if (!Array.isArray(photo) || photo.length === 0) return
+    try {
+      const largest = photo[photo.length - 1]
+      if (largest?.file_id === undefined) return
+      const ref = await this.resolveFileRef(largest.file_id, 'photo.jpg')
+      const response = await this.fetchImpl(this.downloadUrl(ref))
+      const buffer = typeof response.arrayBuffer === 'function' ? await response.arrayBuffer() : undefined
+      if (buffer !== undefined && buffer.byteLength > 0) {
+        message.images = [{ name: ref.name, data: new Uint8Array(buffer), mimeType: 'image/jpeg' }]
+      }
+    } catch (error) {
+      this.log(`图片下载失败（降级为纯文本）: ${(error as Error).message}`)
     }
   }
 
@@ -452,4 +472,5 @@ interface TelegramMessage extends TelegramMessageLike {
   reply_to_message?: { text?: string }
   is_topic_message?: boolean
   message_thread_id?: number
+  photo?: Array<{ file_id: string; file_size?: number; width?: number; height?: number }>
 }
