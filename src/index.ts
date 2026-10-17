@@ -55,6 +55,7 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
 
   // 渠道工厂懒加载：只有 accounts.json 真配了该渠道才会动态 import 适配器模块。
   registerChannel('telegram', async (options) => (await import('./channels/telegram.js')).createTelegramAdapter(options))
+  registerChannel('discord', async (options) => (await import('./channels/discord.js')).createDiscordAdapter(options))
 
   // M1 起步引导：文件态账号登记→凭据库解 secret→建适配器→入引擎→连接。
   // 账号 CRUD/扫码配对归 T1.8，管理面 POST 不在此处越界。
