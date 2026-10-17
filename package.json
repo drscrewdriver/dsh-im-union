@@ -103,5 +103,13 @@
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.76.0",
     "qrcode": "^1.5.4"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/drscrewdriver/dsh-im-union.git"
+  },
+  "bugs": {
+    "url": "https://github.com/drscrewdriver/dsh-im-union/issues"
+  },
+  "homepage": "https://github.com/drscrewdriver/dsh-im-union#readme"
 }
