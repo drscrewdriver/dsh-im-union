@@ -79,6 +79,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.6",
     "typescript": "^5.9.2"
   },
   "dsh": {
@@ -100,6 +101,7 @@
     "tag": "next"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.76.0"
+    "@larksuiteoapi/node-sdk": "^1.76.0",
+    "qrcode": "^1.5.4"
   }
 }

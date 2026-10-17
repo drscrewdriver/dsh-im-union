@@ -43,3 +43,4 @@ registerChannel('telegram', async (options) => (await import('./telegram.js')).c
 registerChannel('discord', async (options) => (await import('./discord.js')).createDiscordAdapter(options))
 registerChannel('feishu', async (options) => (await import('./feishu.js')).createFeishuAdapter(options))
 registerChannel('wecom', async (options) => (await import('./wecom.js')).createWecomAdapter(options))
+registerChannel('weixin', async (options) => (await import('./weixin.js')).createWeixinAdapter(options))

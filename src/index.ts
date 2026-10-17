@@ -20,6 +20,7 @@ import { ImUnionEngine } from './engine/gateway.js'
 import { AccountManager, AccountValidationError, type AccountRecord } from './engine/account-manager.js'
 import { CHANNEL_META, channelIds } from './channels/meta.js'
 import { implementedChannels } from './channels/registry.js'
+import { WeixinQrLogin } from './channels/weixin-qr.js'
 import { PLUGIN_NAME } from './host-compat/session-source.js'
 
 export const name = PLUGIN_NAME
@@ -80,6 +81,41 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
   void accounts.startAll()
 
   const accountRoutes = {
+    /** 微信扫码绑定（T1.2 bind:'qr'）：取码 + PNG data URL（零凭据零 token）。 */
+    '/weixin/qr/start': async ({ respond }: AdminRequest) => {
+      const qr = new WeixinQrLogin((globalThis as { fetch: any }).fetch, (m) => log.warn(m))
+      try {
+        const { qrcode, qrDataUrl } = await qr.start()
+        respond(200, { ok: true, qrcode, qrDataUrl })
+      } catch (error) {
+        respond(502, { ok: false, error: String((error as Error)?.message ?? error) })
+      }
+    },
+    /** 轮询扫码状态；confirmed 时 bot_token 单向写 vault（回包零值，D4）。 */
+    '/weixin/qr/status': async ({ body, respond }: AdminRequest) => {
+      const b = (body ?? {}) as { qrcode?: unknown; verifyCode?: unknown; accountId?: unknown }
+      const qrcode = String(b.qrcode ?? '')
+      const accountId = String(b.accountId ?? '')
+      if (qrcode === '' || accountId === '') {
+        respond(400, { ok: false, error: 'qrcode 与 accountId 必填' })
+        return
+      }
+      const qr = new WeixinQrLogin((globalThis as { fetch: any }).fetch, (m) => log.warn(m))
+      try {
+        const result = await qr.pollStatus(qrcode, typeof b.verifyCode === 'string' ? b.verifyCode : undefined)
+        if (result.status !== 'confirmed') {
+          respond(200, { ok: true, status: result.status })
+          return
+        }
+        // 已有记录保留其配置再写 token（upsert 整值替换语义）；无记录建最小记录。
+        const existing = accounts.list().find((r) => r.accountId === accountId && r.channel === 'weixin')
+        const record: AccountRecord = existing ?? { accountId, channel: 'weixin' }
+        await accounts.upsert(record, { botToken: result.account.botToken })
+        respond(200, { ok: true, status: 'confirmed', bound: true })
+      } catch (error) {
+        respond(502, { ok: false, error: String((error as Error)?.message ?? error) })
+      }
+    },
     /** 脱敏列表（零 secret 值，D4）。 */
     '/accounts': async ({ respond }: AdminRequest) => {
       respond(200, { ok: true, accounts: await accounts.listPublic() })

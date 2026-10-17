@@ -48,7 +48,11 @@ export const CHANNEL_META: Record<string, ChannelMeta> = {
     id: 'weixin',
     label: { zh: '微信', en: 'WeChat (iLink)' },
     bind: 'qr',
-    fields: [plain('accountNote', '账号备注', 'Account note')],
+    fields: [
+      // botToken 由扫码授权流程自动写入（advanced 粘贴亦可），非用户必填。
+      { key: 'botToken', label: { zh: 'Bot Token（扫码自动获取）', en: 'Bot Token (auto via QR login)' }, secret: true, required: false },
+      plain('accountNote', '账号备注', 'Account note'),
+    ],
   },
   telegram: {
     id: 'telegram',
