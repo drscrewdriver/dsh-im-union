@@ -274,6 +274,29 @@ test('extractAssistantText：只取 text 块，多块拼接', () => {
 
 // —— 路由衔接回归 —————————————————————
 
+// —— 多账号独立性（E3）——————————————————————
+
+test('同渠道双账号：白名单各自独立，入站由来源账号适配器投递', async () => {
+  const ctx = { logger: fakeLogger, get: () => undefined }
+  const caps = { settingsGeneration: 'gen3', sessionBackend: 'none' }
+  const sessionApi = { backend: 'none', async createSession() { throw new Error('u') }, async prompt() { throw new Error('u') }, follow() { return () => {} }, async cancel() {}, async listSessions() { return [] }, async selectModel() {}, async steer() { return false }, async modelCatalog() { return undefined }, async presetsList() { return [] }, async presetSelect() { return { ok: false } } }
+  const router = new ChatRouter()
+  const engine = new ImUnionEngine({ ctx, caps, sessionApi, router })
+  const a = fakeAdapter()
+  const b = fakeAdapter()
+  engine.registerAccount(a, 'acct-a', { dmAllowlist: new Set() })
+  engine.registerAccount(b, 'acct-b', { dmAllowlist: new Set(['u1']) })
+  const msg = dmMessage('/help')
+  await engine.handleInbound('acct-a', msg)
+  assert.equal(a.replies.length, 0, 'acct-a 空白名单即拒')
+  await engine.handleInbound('acct-b', msg)
+  assert.equal(b.replies.length, 1, 'acct-b 白名单内放行且回到自己适配器')
+  assert.equal(a.replies.length, 0, '不被同渠道账号串台')
+  engine.unregister('acct-b')
+  await engine.handleInbound('acct-b', msg)
+  assert.equal(b.replies.length, 1, '注销后账号消息整体丢弃')
+})
+
 test('/new 解除绑定后下一条重开宿主真会话并复用', async () => {
   const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
   const session = liveSession()

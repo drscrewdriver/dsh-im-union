@@ -6,19 +6,20 @@
  * 这是"装不上"与"装上静默失效"的分界：硬 inject 缺失服务 = Cordis 载入即抛，
  * 硬 inject 已删服务（settingsScope 类）= client 半永不 apply 且无红字。
  */
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { CordisLike } from './types.js'
 import { detectCapabilities } from './host-compat/services.js'
 import { createSessionApi } from './host-compat/session-api.js'
 import { attachInteraction } from './host-compat/interaction.js'
-import { createVault, credentialRef } from './credentials/vault.js'
-import { registerAdminApi } from './admin/api.js'
+import { createVault } from './credentials/vault.js'
+import { registerAdminApi, type AdminRequest } from './admin/api.js'
 import { ChatRouter } from './engine/router.js'
 import { ImUnionEngine } from './engine/gateway.js'
+import { AccountManager, AccountValidationError, type AccountRecord } from './engine/account-manager.js'
 import { CHANNEL_META, channelIds } from './channels/meta.js'
-import { implementedChannels, registerChannel, createAdapter } from './channels/registry.js'
+import { implementedChannels } from './channels/registry.js'
 import { PLUGIN_NAME } from './host-compat/session-source.js'
 
 export const name = PLUGIN_NAME
@@ -30,13 +31,27 @@ export interface UnionPluginConfig {
   stateDir: string
 }
 
-/** 账号登记（T1.8 设置页落地前的文件态；secret 只存 credentialRef 指向的凭据库）。 */
-interface AccountRecord {
-  accountId: string
-  channel: string
-  config?: Record<string, string>
-  dmAllowlist?: string[]
-  groupEnabled?: boolean
+function accountRecordFromBody(body: unknown): { record: AccountRecord; secrets: Record<string, string> } {
+  if (body === null || typeof body !== 'object') throw new AccountValidationError('请求体需为 JSON 对象')
+  const b = body as Record<string, unknown>
+  const raw = b.record ?? b
+  const r = raw as Record<string, unknown>
+  const record: AccountRecord = {
+    accountId: String(r.accountId ?? ''),
+    channel: String(r.channel ?? ''),
+  }
+  if (typeof r.alias === 'string' && r.alias !== '') record.alias = r.alias
+  if (r.config !== null && typeof r.config === 'object') record.config = r.config as Record<string, string>
+  if (Array.isArray(r.dmAllowlist)) record.dmAllowlist = r.dmAllowlist.map((v) => String(v))
+  if (typeof r.groupEnabled === 'boolean') record.groupEnabled = r.groupEnabled
+  if (typeof r.paused === 'boolean') record.paused = r.paused
+  const secrets: Record<string, string> = {}
+  if (b.secrets !== null && typeof b.secrets === 'object') {
+    for (const [k, v] of Object.entries(b.secrets as Record<string, unknown>)) {
+      if (typeof v === 'string' && v !== '') secrets[k] = v
+    }
+  }
+  return { record, secrets }
 }
 
 export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): void {
@@ -53,49 +68,70 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
   const sessionApi = createSessionApi(ctx, caps)
   const engine = new ImUnionEngine({ ctx, caps, sessionApi, router, vaultKind: vault.kind })
 
-  // 渠道工厂懒加载：只有 accounts.json 真配了该渠道才会动态 import 适配器模块。
-  registerChannel('telegram', async (options) => (await import('./channels/telegram.js')).createTelegramAdapter(options))
-  registerChannel('discord', async (options) => (await import('./channels/discord.js')).createDiscordAdapter(options))
+  // 渠道工厂表在 registry.ts 模块加载时静态登记（懒加载不变）。
 
-  // M1 起步引导：文件态账号登记→凭据库解 secret→建适配器→入引擎→连接。
-  // 账号 CRUD/扫码配对归 T1.8，管理面 POST 不在此处越界。
-  const accountsFile = join(stateDir, 'accounts.json')
-  void (async () => {
-    if (!existsSync(accountsFile)) return
-    let records: AccountRecord[]
-    try {
-      const parsed = JSON.parse(readFileSync(accountsFile, 'utf8')) as unknown
-      records = Array.isArray(parsed) ? (parsed as AccountRecord[]) : []
-    } catch (error) {
-      log.warn(`accounts.json 解析失败，跳过账号引导: ${(error as Error).message}`)
-      return
-    }
-    for (const record of records) {
-      const meta = CHANNEL_META[record.channel]
-      if (meta === undefined || !implementedChannels().includes(record.channel)) continue
+  // T1.8 账号管理：文件态存储 + 生命周期（启动全连 + 管理面 CRUD）。
+  const accounts = new AccountManager({
+    stateFile: join(stateDir, 'accounts.json'),
+    vault,
+    engine,
+    logWarn: (msg) => log.warn(msg),
+  })
+  void accounts.startAll()
+
+  const accountRoutes = {
+    /** 脱敏列表（零 secret 值，D4）。 */
+    '/accounts': async ({ respond }: AdminRequest) => {
+      respond(200, { ok: true, accounts: await accounts.listPublic() })
+    },
+    '/accounts/save': async ({ body, respond }: AdminRequest) => {
       try {
-        const secrets: Record<string, string | undefined> = {}
-        for (const field of meta.fields.filter((f) => f.secret)) {
-          secrets[field.key] = await vault.resolve(credentialRef(record.channel, `${record.accountId}.${field.key}`))
-        }
-        const adapter = await createAdapter(record.channel, {
-          accountId: record.accountId,
-          config: record.config ?? {},
-          secrets,
-        })
-        engine.registerAccount(adapter, record.accountId, {
-          dmAllowlist: new Set(record.dmAllowlist ?? []),
-          groupEnabled: record.groupEnabled ?? true,
-        })
-        await adapter.connect()
-        log.info(`渠道 ${record.channel} 账号 ${record.accountId} 已连接`)
+        const { record, secrets } = accountRecordFromBody(body)
+        await accounts.upsert(record, secrets)
+        respond(200, { ok: true })
       } catch (error) {
-        log.warn(`渠道 ${record.channel} 账号 ${record.accountId} 启动失败: ${(error as Error).message}`)
+        if (error instanceof AccountValidationError) {
+          respond(400, { ok: false, error: error.message })
+          return
+        }
+        throw error
       }
-    }
-  })()
+    },
+    '/accounts/remove': async ({ body, respond }: AdminRequest) => {
+      const accountId = String((body as { accountId?: unknown })?.accountId ?? '')
+      const removed = await accounts.remove(accountId)
+      respond(removed ? 200 : 404, { ok: removed, error: removed ? undefined : '账号不存在' })
+    },
+    '/accounts/pause': async ({ body, respond }: AdminRequest) => {
+      const b = (body ?? {}) as { accountId?: unknown; paused?: unknown }
+      const ok = await accounts.setPaused(String(b.accountId ?? ''), b.paused !== false)
+      respond(ok ? 200 : 404, { ok, error: ok ? undefined : '账号不存在' })
+    },
+    '/accounts/allowlist': async ({ body, respond }: AdminRequest) => {
+      const b = (body ?? {}) as { accountId?: unknown; userIds?: unknown }
+      if (!Array.isArray(b.userIds)) {
+        respond(400, { ok: false, error: 'userIds 需为数组' })
+        return
+      }
+      const ok = await accounts.setAllowlist(String(b.accountId ?? ''), b.userIds.map((v) => String(v)))
+      respond(ok ? 200 : 404, { ok, error: ok ? undefined : '账号不存在' })
+    },
+    /** 检查连接：诊断面逐账号，回包已过脱敏纪律（E5）。 */
+    '/accounts/check': async ({ body, respond }: AdminRequest) => {
+      try {
+        const accountId = String((body as { accountId?: unknown })?.accountId ?? '')
+        respond(200, { ok: true, checks: await accounts.check(accountId) })
+      } catch (error) {
+        if (error instanceof AccountValidationError) {
+          respond(404, { ok: false, error: error.message })
+          return
+        }
+        throw error
+      }
+    },
+  }
 
-  // M0 管理面：只读探针。账号 CRUD / 扫码配对 / 连接诊断随 M1 渠道层落地。
+  // 管理面：只读探针 + 账号 CRUD（T1.8 服务侧；扫码配对归各渠道后续迭代）。
   const admin = registerAdminApi(ctx, {
     '/ping': ({ respond }) => {
       respond(200, { ok: true, plugin: PLUGIN_NAME })
@@ -119,6 +155,7 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
         })),
       })
     },
+    ...accountRoutes,
   })
 
   // M0 先占审批/提问的接管位（handler 在 M1 接通渠道）：
@@ -127,6 +164,7 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
 
   const dispose = ctx.effect?.(() => {
     return () => {
+      void accounts.stopAll()
       admin.dispose()
       detachInteraction()
     }

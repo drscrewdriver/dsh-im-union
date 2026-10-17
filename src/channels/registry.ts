@@ -1,7 +1,8 @@
 /**
  * 渠道注册表：id → 懒加载工厂。适配器文件动态 import，
  * 未配置的渠道 SDK 永不进 require 缓存（P0 运行时依赖懒加载纪律）。
- * M0 无渠道实现——工厂表随 M1 逐渠道填充，注册表本身先立契约。
+ * 已实现渠道的工厂表在模块加载时静态登记——「实现度」是代码事实，
+ * 不依赖运行时初始化顺序（校验/设置页灰显都读它）。新渠道随实现追加。
  */
 import type { ChannelAdapter, ChannelFactory } from './types.js'
 import { CHANNEL_META } from './meta.js'
@@ -36,3 +37,7 @@ export async function createAdapter(
 export function implementedChannels(): string[] {
   return [...factories.keys()]
 }
+
+// 已实现渠道（懒加载工厂；import 只拉注册表本体，适配器模块首次 createAdapter 才进缓存）。
+registerChannel('telegram', async (options) => (await import('./telegram.js')).createTelegramAdapter(options))
+registerChannel('discord', async (options) => (await import('./discord.js')).createDiscordAdapter(options))

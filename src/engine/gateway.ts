@@ -86,8 +86,8 @@ export function extractAssistantText(event: SessionEventLike): string {
 }
 
 export class ImUnionEngine {
-  private adapters = new Map<string, ChannelAdapter>()
-  private policies = new Map<string, AccountPolicy>()
+  /** 按 accountId 键控（E3：同渠道多账号互不覆盖；入站由产生消息的账号适配器投递）。 */
+  private accounts = new Map<string, { adapter: ChannelAdapter; policy: AccountPolicy }>()
   private turns = new Map<string, TurnState>()
   private selections = new Map<string, { model?: string; provider?: string; reasoningEffort?: string }>()
   private workspaceOverrides = new Map<string, string>()
@@ -98,39 +98,39 @@ export class ImUnionEngine {
   }
 
   registerAccount(adapter: ChannelAdapter, accountId: string, policy?: Partial<AccountPolicy>): void {
-    this.adapters.set(adapter.id, adapter)
-    this.policies.set(accountId, {
-      dmAllowlist: new Set(policy?.dmAllowlist ?? []),
-      groupEnabled: policy?.groupEnabled ?? true,
+    this.accounts.set(accountId, {
+      adapter,
+      policy: {
+        dmAllowlist: new Set(policy?.dmAllowlist ?? []),
+        groupEnabled: policy?.groupEnabled ?? true,
+      },
     })
     adapter.onMessage((message) => void this.handleInbound(accountId, message))
   }
 
   unregister(accountId: string): void {
-    this.policies.delete(accountId)
+    this.accounts.delete(accountId)
   }
 
   private admitted(accountId: string, message: SemanticMessage): boolean {
-    const adapter = this.adapters.get(message.address.channel)
-    if (adapter === undefined) return false
+    const account = this.accounts.get(accountId)
+    if (account === undefined) return false
+    const adapter = account.adapter
     if (typeof adapter.authorize === 'function') {
       const verdict = adapter.authorize(message)
       if (verdict === true) return true
       if (verdict === false) return false
     }
     if (message.address.kind === 'group') {
-      const policy = this.policies.get(accountId)
-      return (policy?.groupEnabled ?? true) && shouldRespondToGroup(message.mentionedBot)
+      return account.policy.groupEnabled && shouldRespondToGroup(message.mentionedBot)
     }
-    const policy = this.policies.get(accountId)
-    if (policy === undefined) return false
-    return policy.dmAllowlist.has(message.userId)
+    return account.policy.dmAllowlist.has(message.userId)
   }
 
   /** 入站主流程：命令面板（T1.1）先分派，非命令入会话队列。 */
   async handleInbound(accountId: string, message: SemanticMessage): Promise<void> {
-    if (!this.admitted(accountId, message)) return
-    const adapter = this.adapters.get(message.address.channel)!
+    const adapter = this.accounts.get(accountId)?.adapter
+    if (adapter === undefined || !this.admitted(accountId, message)) return
     const key = `${message.address.channel}:${message.address.chatId}`
 
     const text = message.text.trim()
