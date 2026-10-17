@@ -20,6 +20,29 @@ export class UnsupportedError extends Error {
 export interface SessionInfo {
   id: string
   title?: string
+  running?: boolean
+  /** 工作区位置（/workspaces 聚合键）。 */
+  cwd?: string
+  updatedAt?: number
+}
+
+/** 宿主 ModelCatalog 的宽松形（@0.2.x api/session-controller types 锚点，缺位即降级）。 */
+export interface ModelCatalogLike {
+  default?: { provider?: string; model?: string; reasoningEffort?: string }
+  groups?: Array<{ id?: string; name?: string; models?: Array<{ id?: string; name?: string }> }>
+  failures?: Array<{ id?: string; name?: string; message?: string }>
+  routableProviders?: readonly string[]
+}
+
+export interface ModelSelectionInput {
+  model: string
+  provider?: string
+  reasoningEffort?: string
+}
+
+export interface PresetInfo {
+  id: string
+  name: string
 }
 
 export interface CreateSessionOptions {
@@ -34,11 +57,17 @@ export interface SessionApi {
   backend: 'native' | 'none'
   createSession(options: CreateSessionOptions): Promise<SessionInfo>
   prompt(sessionId: string, input: string | unknown[]): Promise<void>
+  /** /steer 插话：宿主 prompt 面 mode:'steer'；面不可用返回 false（调用方转排队文案）。 */
+  steer(sessionId: string, text: string): Promise<boolean>
   /** 订阅会话事件流；返回退订函数。 */
   follow(sessionId: string, onEvent: (event: unknown) => void): () => void
   cancel(sessionId: string): Promise<void>
   listSessions(workspace?: string): Promise<SessionInfo[]>
-  selectModel(sessionId: string, model: string): Promise<void>
+  selectModel(sessionId: string, selection: ModelSelectionInput): Promise<void>
+  /** 模型目录；无面返回 undefined（/models 降级）。 */
+  modelCatalog(): Promise<ModelCatalogLike | undefined>
+  presetsList(): Promise<PresetInfo[]>
+  presetSelect(nameOrId: string): Promise<{ ok: boolean; message?: string }>
 }
 
 function asFn<T extends object>(value: unknown, key: string): T[keyof T] | undefined {
@@ -60,6 +89,9 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
       async prompt(): Promise<void> {
         throw new UnsupportedError('sessionController.prompt')
       },
+      async steer(): Promise<boolean> {
+        return false
+      },
       follow(): () => void {
         throw new UnsupportedError('session follow')
       },
@@ -72,6 +104,15 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
       async selectModel(): Promise<void> {
         throw new UnsupportedError('model selection')
       },
+      async modelCatalog(): Promise<ModelCatalogLike | undefined> {
+        return undefined
+      },
+      async presetsList(): Promise<PresetInfo[]> {
+        return []
+      },
+      async presetSelect(): Promise<{ ok: boolean; message?: string }> {
+        return { ok: false, message: '当前宿主无预设面' }
+      },
     }
   }
 
@@ -81,6 +122,41 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
   const cancelFn = asFn<{ cancel(...args: any[]): any }>(sessionController, 'cancel')
   const listFn = asFn<{ list(...args: any[]): any }>(sessionPersistence, 'list')
   const wfFollowFn = asFn<{ follow(...args: any[]): any }>(workspaceController, 'follow')
+  const sessionListFn = asFn<{ list(...args: any[]): any }>(sessionController, 'list')
+  const selectModelFn = asFn<{ selectModel(...args: any[]): any }>(sessionController, 'selectModel')
+  const catalogFn = asFn<{ modelCatalog(...args: any[]): any }>(sessionController, 'modelCatalog')
+  const presetsListFn = asFn<{ list(...args: any[]): any }>(caps.agentPresets, 'list')
+  const presetSelectFn = asFn<{ select(...args: any[]): any }>(caps.agentPresets, 'select')
+
+  /**
+   * 形态归一：宿主 @Remote 面收 request 对象（@0.2.x 锚点 api/session-controller），
+   * 老线/位置参变体作为运行时回退——探测不了的形态差异用调用试探+回退收敛，
+   * 两形都失败时抛首错（保留真实错误面供矩阵取证）。
+   */
+  async function callWithShapeFallback<T>(
+    primary: () => Promise<T>,
+    fallback: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await primary()
+    } catch (firstError) {
+      try {
+        return await fallback()
+      } catch {
+        throw firstError
+      }
+    }
+  }
+
+  function promptRequest(sessionId: string, mode: 'queue' | 'steer', input: string | unknown[]): Record<string, unknown> {
+    const content =
+      typeof input === 'string'
+        ? [{ type: 'text', text: input }]
+        : Array.isArray(input)
+          ? input
+          : [{ type: 'text', text: String(input) }]
+    return { sessionId, mode, content, requestId: `imu-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` }
+  }
 
   return {
     backend: 'native',
@@ -101,7 +177,25 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
     },
     async prompt(sessionId, input) {
       if (!promptFn) throw new UnsupportedError('sessionController.prompt')
-      await promptFn.call(sessionController, sessionId, input)
+      const request = promptRequest(sessionId, 'queue', input)
+      await callWithShapeFallback(
+        () => promptFn.call(sessionController, request) as Promise<void>,
+        () => promptFn.call(sessionController, sessionId, input) as Promise<void>,
+      )
+    },
+    async steer(sessionId, text) {
+      if (!promptFn) return false
+      const request = promptRequest(sessionId, 'steer', text)
+      try {
+        await callWithShapeFallback(
+          () => promptFn.call(sessionController, request) as Promise<void>,
+          () => promptFn.call(sessionController, sessionId, [{ type: 'text', text }]) as Promise<void>,
+        )
+        return true
+      } catch {
+        // mode:'steer' 面不存在/被拒：调用方转排队提示，不伪装成功。
+        return false
+      }
     },
     follow(sessionId, onEvent) {
       // sessionController.follow 优先，缺失退到 workspaceController.follow。
@@ -113,9 +207,36 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
     },
     async cancel(sessionId) {
       if (!cancelFn) throw new UnsupportedError('session cancel')
-      await cancelFn.call(sessionController, sessionId)
+      await callWithShapeFallback(
+        () => cancelFn.call(sessionController, { sessionId }) as Promise<void>,
+        () => cancelFn.call(sessionController, sessionId) as Promise<void>,
+      )
     },
     async listSessions(workspace) {
+      // 首选 sessionController.list（摘要带 running/cwd，命令面需要），缺位退 sessionPersistence.list。
+      if (sessionListFn) {
+        const value = (await sessionListFn.call(sessionController, workspace !== undefined && workspace !== '' ? { workspace } : {})) as unknown
+        const items = value !== null && typeof value === 'object' && Array.isArray((value as { items?: unknown }).items)
+          ? (value as { items: unknown[] }).items
+          : Array.isArray(value)
+            ? value
+            : []
+        return items
+          .map((row): SessionInfo | undefined => {
+            if (row === null || typeof row !== 'object') return undefined
+            const r = row as Record<string, unknown>
+            const id = typeof r.sessionId === 'string' ? r.sessionId : typeof r.id === 'string' ? r.id : undefined
+            if (id === undefined) return undefined
+            return {
+              id,
+              title: typeof r.title === 'string' ? r.title : undefined,
+              running: typeof r.running === 'boolean' ? r.running : undefined,
+              cwd: typeof r.cwd === 'string' ? r.cwd : undefined,
+              updatedAt: typeof r.updatedAt === 'number' ? r.updatedAt : undefined,
+            }
+          })
+          .filter((row): row is SessionInfo => row !== undefined)
+      }
       if (!listFn) return []
       const rows = (await listFn.call(sessionPersistence, workspace)) as unknown
       if (!Array.isArray(rows)) return []
@@ -131,10 +252,54 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
         })
         .filter((row): row is SessionInfo => row !== undefined)
     },
-    async selectModel(sessionId, model) {
-      const selectFn = asFn<{ selectModel(...args: any[]): any }>(sessionController, 'selectModel')
-      if (!selectFn) throw new UnsupportedError('model selection')
-      await selectFn.call(sessionController, sessionId, model)
+    async selectModel(sessionId, selection) {
+      if (!selectModelFn) throw new UnsupportedError('model selection')
+      await callWithShapeFallback(
+        () => selectModelFn.call(sessionController, { sessionId, ...selection }) as Promise<void>,
+        () => selectModelFn.call(sessionController, sessionId, selection.model) as Promise<void>,
+      )
+    },
+    async modelCatalog() {
+      if (!catalogFn) return undefined
+      try {
+        const catalog = await catalogFn.call(sessionController)
+        return catalog !== null && typeof catalog === 'object' ? (catalog as ModelCatalogLike) : undefined
+      } catch {
+        return undefined
+      }
+    },
+    async presetsList() {
+      if (!presetsListFn) return []
+      try {
+        const value = await presetsListFn.call(caps.agentPresets)
+        const rows =
+          Array.isArray(value) ? value : value !== null && typeof value === 'object' && Array.isArray((value as { items?: unknown }).items) ? (value as { items: unknown[] }).items : []
+        return rows
+          .map((row): PresetInfo | undefined => {
+            if (row === null || typeof row !== 'object') return undefined
+            const r = row as Record<string, unknown>
+            const id = typeof r.id === 'string' ? r.id : typeof r.name === 'string' ? r.name : undefined
+            if (id === undefined) return undefined
+            return { id, name: typeof r.name === 'string' ? r.name : id }
+          })
+          .filter((row): row is PresetInfo => row !== undefined)
+      } catch {
+        return []
+      }
+    },
+    async presetSelect(nameOrId) {
+      if (!presetSelectFn) return { ok: false, message: '当前宿主无预设选择面' }
+      try {
+        await presetSelectFn.call(caps.agentPresets, { id: nameOrId })
+        return { ok: true }
+      } catch (error) {
+        try {
+          await presetSelectFn.call(caps.agentPresets, nameOrId)
+          return { ok: true }
+        } catch {
+          return { ok: false, message: `预设切换失败：${(error as Error).message}` }
+        }
+      }
     },
   }
 }

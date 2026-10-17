@@ -274,7 +274,7 @@ test('extractAssistantText：只取 text 块，多块拼接', () => {
 
 // —— 路由衔接回归 —————————————————————
 
-test('/new 解除绑定后下一条重开隐式会话', async () => {
+test('/new 解除绑定后下一条重开宿主真会话并复用', async () => {
   const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
   const session = liveSession()
   const { engine, router } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session })
@@ -285,6 +285,11 @@ test('/new 解除绑定后下一条重开隐式会话', async () => {
   await waitUntil(() => session.state.prompted.length === 1)
   session.emit(turnEnd())
   await inflight
-  // prompt 用回 imu: 隐式 id 而非 legacy
-  assert.equal(session.state.prompted[0].sessionId, 'imu:telegram:dm:c1')
+  // T1.1 后：隐式 imu: id 首次使用时 createSession 换宿主真 id（stub 回 'x'）
+  assert.equal(session.state.prompted[0].sessionId, 'x')
+  const second = engine.handleInbound('acct-1', dmMessage('again'))
+  await waitUntil(() => session.state.prompted.length === 2)
+  session.emit(turnEnd())
+  await second
+  assert.equal(session.state.prompted[1].sessionId, 'x', '真 id 已绑定，后续消息复用')
 })

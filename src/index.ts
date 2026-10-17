@@ -51,7 +51,7 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
   const vault = createVault(caps.credentials, stateDir)
   const router = new ChatRouter()
   const sessionApi = createSessionApi(ctx, caps)
-  const engine = new ImUnionEngine({ ctx, caps, sessionApi, router })
+  const engine = new ImUnionEngine({ ctx, caps, sessionApi, router, vaultKind: vault.kind })
 
   // 渠道工厂懒加载：只有 accounts.json 真配了该渠道才会动态 import 适配器模块。
   registerChannel('telegram', async (options) => (await import('./channels/telegram.js')).createTelegramAdapter(options))

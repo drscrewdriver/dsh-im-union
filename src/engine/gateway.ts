@@ -14,7 +14,8 @@ import type { CordisLike, LoggerLike } from '../types.js'
 import type { UnionCapabilities } from '../host-compat/services.js'
 import type { SessionApi } from '../host-compat/session-api.js'
 import { UnsupportedError } from '../host-compat/session-api.js'
-import { ChatRouter, shouldRespondToGroup, type ChatAddress } from './router.js'
+import { ChatRouter, shouldRespondToGroup, type Binding, type ChatAddress } from './router.js'
+import { chatOverrideKey, isCommandName, parseCommand, runCommand, type CommandDeps } from './commands.js'
 import type { ChannelAdapter, Receipt, ReplyStream, SemanticMessage } from '../channels/types.js'
 
 export interface AccountPolicy {
@@ -31,6 +32,8 @@ export interface EngineDeps {
   router: ChatRouter
   /** turn/end 丢失时的投递看门狗（默认 10 分钟，测试可缩短）。 */
   turnTimeoutMs?: number
+  /** 凭据载体形态（/status 展示：service=宿主凭据库 / file=文件 vault）。 */
+  vaultKind?: string
 }
 
 interface TurnState {
@@ -86,6 +89,8 @@ export class ImUnionEngine {
   private adapters = new Map<string, ChannelAdapter>()
   private policies = new Map<string, AccountPolicy>()
   private turns = new Map<string, TurnState>()
+  private selections = new Map<string, { model?: string; provider?: string; reasoningEffort?: string }>()
+  private workspaceOverrides = new Map<string, string>()
   private readonly log: LoggerLike
 
   constructor(private readonly deps: EngineDeps) {
@@ -122,20 +127,19 @@ export class ImUnionEngine {
     return policy.dmAllowlist.has(message.userId)
   }
 
-  /** 入站主流程（M0：/help /status /new 三个命令 + 直通会话）。 */
+  /** 入站主流程：命令面板（T1.1）先分派，非命令入会话队列。 */
   async handleInbound(accountId: string, message: SemanticMessage): Promise<void> {
     if (!this.admitted(accountId, message)) return
     const adapter = this.adapters.get(message.address.channel)!
     const key = `${message.address.channel}:${message.address.chatId}`
 
     const text = message.text.trim()
-    if (text === '/help' || text === '/status') {
-      await adapter.reply(message.address, this.helpText(text))
-      return
-    }
-    if (text === '/new') {
-      this.deps.router.unbind(message.address)
-      await adapter.reply(message.address, '已解除会话绑定，下一条消息将开启新会话。')
+    const command = parseCommand(text)
+    if (command !== undefined && isCommandName(command.name)) {
+      // resolve 对未绑定聊天登记的隐式绑定与 runTurn 惰性解析同值，无额外副作用。
+      const sessionId = this.deps.router.resolve(message.address).sessionId
+      const reply = await runCommand(this.commandDeps(), message.address, sessionId, command)
+      if (reply !== '') await adapter.reply(message.address, reply)
       return
     }
 
@@ -157,10 +161,43 @@ export class ImUnionEngine {
     }
   }
 
+  private commandDeps(): CommandDeps {
+    return {
+      sessionApi: this.deps.sessionApi,
+      router: this.deps.router,
+      caps: this.deps.caps,
+      selections: this.selections,
+      workspaceOverrides: this.workspaceOverrides,
+      vaultKind: this.deps.vaultKind ?? 'file',
+      logWarn: (msg) => this.log.warn(msg),
+    }
+  }
+
+  /**
+   * 隐式 imu: 形 id → 宿主真会话 id：首次使用时 createSession 并绑定；
+   * 失败则继续用隐式 id（老线/降级面下 follow/prompt 自有报错路径，不阻断命令面）。
+   */
+  private async ensureSessionId(address: ChatAddress, binding: Binding): Promise<string> {
+    const { sessionApi, router } = this.deps
+    if (sessionApi.backend !== 'native' || !binding.sessionId.startsWith('imu:')) return binding.sessionId
+    try {
+      const workspace = this.workspaceOverrides.get(chatOverrideKey(address))
+      const info = await sessionApi.createSession({
+        sessionIdHint: binding.sessionId,
+        ...(workspace !== undefined ? { workspace } : {}),
+      })
+      router.bind(address, info.id)
+      return info.id
+    } catch (error) {
+      this.log.warn(`createSession 失败，继续使用隐式 id: ${(error as Error).message}`)
+      return binding.sessionId
+    }
+  }
+
   private async runTurn(adapter: ChannelAdapter, message: SemanticMessage): Promise<void> {
     const { router, sessionApi } = this.deps
     const binding = router.resolve(message.address)
-    const sessionId = binding.sessionId
+    const sessionId = await this.ensureSessionId(message.address, binding)
     if (sessionApi.backend === 'none') {
       await adapter.reply(message.address, new UnsupportedError('会话后端').message)
       return
@@ -296,19 +333,6 @@ export class ImUnionEngine {
   private async deliverOne(adapter: ChannelAdapter, message: SemanticMessage, text: string): Promise<void> {
     const receipt = await adapter.reply(message.address, text)
     this.noteUncertain(receipt, adapter.id)
-  }
-
-  private helpText(command: string): string {
-    if (command === '/status') {
-      const caps = this.deps.caps
-      return [
-        'dsh-im-union 状态',
-        `设置面代际: ${caps.settingsGeneration}`,
-        `会话后端: ${this.deps.sessionApi.backend}`,
-        `凭据: ${caps.credentials ? '宿主凭据库' : '文件 vault'}`,
-      ].join('\n')
-    }
-    return ['可用命令（M0 骨架）：', '/help 本帮助', '/status 连接状态', '/new 重开会话'].join('\n')
   }
 }
 
