@@ -194,6 +194,17 @@ export class AccountManager {
     return this.records.map((r) => ({ ...r }))
   }
 
+  /** 指定渠道的在位适配器（第三方回调路由分发给各账号实例用）。 */
+  liveAdapters(channel: string): ChannelAdapter[] {
+    const out: ChannelAdapter[] = []
+    for (const record of this.records) {
+      if (record.channel !== channel || record.paused === true) continue
+      const adapter = this.live.get(record.accountId)?.adapter
+      if (adapter !== undefined) out.push(adapter)
+    }
+    return out
+  }
+
   /** 脱敏视图：零 secret 值，只报 configured（D4）。 */
   async listPublic(): Promise<PublicAccount[]> {
     const rows: PublicAccount[] = []

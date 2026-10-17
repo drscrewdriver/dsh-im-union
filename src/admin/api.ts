@@ -27,6 +27,10 @@ export interface AdminRequest {
   url: URL
   body: unknown
   respond: AdminResponder
+  /** raw 路由（第三方回调）专用：原文 body 文本 + 查询参数表 + 非 JSON 应答面。 */
+  rawBody?: string
+  query?: Record<string, string>
+  respondText?: (status: number, text: string) => void
 }
 
 export type AdminHandler = (request: AdminRequest) => void | Promise<void>
@@ -71,6 +75,19 @@ export interface AdminApiHandle {
 }
 
 /**
+ * 第三方回调路由白名单（T3.4 企微自建应用等 inbound webhook）。
+ * 口径登记：D2/D3 的 requestRejection/JSON 闸适用于**管理面**（浏览器/本机调用）；
+ * 平台回调来自厂商服务器、无登录 Cookie，其认证就是签名验证（SHA1+AES，
+ * fail-closed）——因此命中的路径跳过 requestRejection 与 JSON 前置闸，
+ * 改由 handler 自身验签；仍走同一前缀注册、no-store、体积上限与错误零回显纪律。
+ */
+export interface RawRoute {
+  path: string
+  /** 允许 GET 回明文（echostr 验证面原样输出，不包 JSON）。 */
+  plainText?: boolean
+}
+
+/**
  * 注册管理面。routes 用精确路径匹配（M0 只挂 /ping 与 /state 两个只读探针，
  * 账号 CRUD 随 M1 渠道层落地）。webServer 缺失（非 web profile）→ 不注册，
  * 记日志不抛错——CLI/TUI 宿主上插件其余部分照常。
@@ -78,7 +95,9 @@ export interface AdminApiHandle {
 export function registerAdminApi(
   ctx: CordisLike,
   routes: Record<string, AdminHandler>,
+  opts?: { rawRoutes?: RawRoute[] },
 ): AdminApiHandle {
+  const rawPaths = new Map((opts?.rawRoutes ?? []).map((r) => [r.path, r]))
   const log = ctx.logger('dsh-im-union')
   const webServer = optionalService<WebServerLike>(ctx, 'webServer')
   if (webServer === undefined || typeof webServer.register !== 'function') {
@@ -91,7 +110,66 @@ export function registerAdminApi(
     path: BASE_PATH,
     handler: async (req, res) => {
       try {
-        // 动态读取，不缓存认证实例（HMR/重启后实例会变）。
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const method = (req.method ?? 'GET').toUpperCase()
+        if (url.pathname !== BASE_PATH && !url.pathname.startsWith(BASE_PATH + '/')) {
+          send(res, 404, { ok: false, error: 'not found' })
+          return
+        }
+        const path = url.pathname.slice(BASE_PATH.length) || '/'
+        const handler = routes[path]
+        if (handler === undefined) {
+          send(res, 404, { ok: false, error: 'not found' })
+          return
+        }
+        const rawRoute = rawPaths.get(path)
+        if (rawRoute !== undefined) {
+          // 第三方回调面：验签即认证，读原文 body（≤1 MiB）后交 handler 处置。
+          let rawBody = ''
+          if (method !== 'GET' && method !== 'HEAD') {
+            const chunks: Buffer[] = []
+            let total = 0
+            for await (const chunk of req) {
+              const buf = chunk as Buffer
+              total += buf.length
+              if (total > MAX_BODY_BYTES) {
+                send(res, 413, { ok: false, error: '请求体超限' })
+                return
+              }
+              chunks.push(buf)
+            }
+            rawBody = Buffer.concat(chunks).toString('utf8')
+          }
+          const query: Record<string, string> = {}
+          url.searchParams.forEach((value, key) => {
+            query[key] = value
+          })
+          let settled = false
+          await handler({
+            method,
+            path,
+            url,
+            body: query,
+            rawBody,
+            query,
+            respond: (status, payload) => {
+              settled = true
+              send(res, status, payload)
+            },
+            respondText: rawRoute.plainText
+              ? (status, text) => {
+                  settled = true
+                  res.statusCode = status
+                  res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+                  res.setHeader('Cache-Control', 'no-store')
+                  res.end(text)
+                }
+              : undefined,
+          })
+          if (!settled) send(res, 200, { ok: true })
+          return
+        }
+        // 以下 requestRejection/JSON 闸只约束管理面（动态读取，不缓存认证实例）。
         const connection = optionalService<{
           requestRejection?: (request: { headers: IncomingMessage['headers'] }) => 401 | 403 | undefined
         }>(ctx, 'connection')
@@ -112,19 +190,7 @@ export function registerAdminApi(
           send(res, mutationError, { ok: false, error: '写请求需 application/json 与客户端标识头' })
           return
         }
-        const url = new URL(req.url ?? '/', 'http://localhost')
-        if (url.pathname !== BASE_PATH && !url.pathname.startsWith(BASE_PATH + '/')) {
-          send(res, 404, { ok: false, error: 'not found' })
-          return
-        }
-        const path = url.pathname.slice(BASE_PATH.length) || '/'
-        const handler = routes[path]
-        if (handler === undefined) {
-          send(res, 404, { ok: false, error: 'not found' })
-          return
-        }
         let body: unknown = {}
-        const method = (req.method ?? 'GET').toUpperCase()
         if (method !== 'GET' && method !== 'HEAD') {
           try {
             body = await readJson(req)

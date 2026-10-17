@@ -47,3 +47,7 @@ registerChannel('weixin', async (options) => (await import('./weixin.js')).creat
 registerChannel('dingtalk', async (options) => (await import('./dingtalk.js')).createDingtalkAdapter(options))
 registerChannel('qq', async (options) => (await import('./qq.js')).createQqAdapter(options))
 registerChannel('slack', async (options) => (await import('./slack.js')).createSlackAdapter(options))
+registerChannel('whatsapp', async (options) => (await import('./whatsapp.js')).createWhatsappAdapter(options))
+registerChannel('matrix', async (options) => (await import('./matrix.js')).createMatrixAdapter(options))
+registerChannel('imessage', async (options) => (await import('./imessage.js')).createImessageAdapter(options))
+registerChannel('wecom-app', async (options) => (await import('./wecom-app.js')).createWecomAppAdapter(options))

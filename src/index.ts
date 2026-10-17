@@ -14,13 +14,14 @@ import { detectCapabilities } from './host-compat/services.js'
 import { createSessionApi } from './host-compat/session-api.js'
 import { attachInteraction } from './host-compat/interaction.js'
 import { createVault } from './credentials/vault.js'
-import { registerAdminApi, type AdminRequest } from './admin/api.js'
+import { registerAdminApi, type AdminRequest, type AdminHandler } from './admin/api.js'
 import { ChatRouter } from './engine/router.js'
 import { ImUnionEngine } from './engine/gateway.js'
 import { AccountManager, AccountValidationError, type AccountRecord } from './engine/account-manager.js'
 import { CHANNEL_META, channelIds } from './channels/meta.js'
 import { implementedChannels } from './channels/registry.js'
 import { WeixinQrLogin } from './channels/weixin-qr.js'
+import type { WecomAppAdapter, CallbackQuery } from './channels/wecom-app.js'
 import { PLUGIN_NAME } from './host-compat/session-source.js'
 
 export const name = PLUGIN_NAME
@@ -168,7 +169,38 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     },
   }
 
-  // 管理面：只读探针 + 账号 CRUD（T1.8 服务侧；扫码配对归各渠道后续迭代）。
+  // 管理面：只读探针 + 账号 CRUD + 微信扫码 + 企微自建应用回调（T3.4）。
+  const wecomAppCallback: AdminHandler = async ({ method, query, rawBody, respond, respondText }) => {
+    // 认证即验签（admin 框已在 rawRoutes 分流；此处 fail-closed：无命中一律 403）。
+    const adapters = accounts.liveAdapters('wecom-app') as unknown as WecomAppAdapter[]
+    if (adapters.length === 0) {
+      respond(404, { ok: false, error: '未配置企微自建应用账号' })
+      return
+    }
+    const q = (query ?? {}) as CallbackQuery
+    if (method === 'GET') {
+      for (const adapter of adapters) {
+        const echo = adapter.verifyUrl(q)
+        if (echo !== null) {
+          if (respondText !== undefined) respondText(200, echo)
+          else respond(200, { ok: true, echo })
+          return
+        }
+      }
+      respond(403, { ok: false, error: '回调验签未通过' })
+      return
+    }
+    for (const adapter of adapters) {
+      const result = adapter.handleXmlCallback(q, rawBody ?? '')
+      if (result.ok) {
+        // 企微要求 5s 内响应；消息已同步入队，回 success 即签收。
+        if (respondText !== undefined) respondText(200, 'success')
+        else respond(200, { ok: true })
+        return
+      }
+    }
+    respond(403, { ok: false, error: '回调验签/解密未通过' })
+  }
   const admin = registerAdminApi(ctx, {
     '/ping': ({ respond }) => {
       respond(200, { ok: true, plugin: PLUGIN_NAME })
@@ -201,6 +233,10 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
       })
     },
     ...accountRoutes,
+    '/wecom-app/callback': wecomAppCallback,
+  }, {
+    // 第三方回调白名单：跳登录态/JSON 闸（厂商无 Cookie，验签即认证）。
+    rawRoutes: [{ path: '/wecom-app/callback', plainText: true }],
   })
 
   // 审批/提问接管（T1.9）：waterfall 返回值即裁决——查不到发起聊天的请求

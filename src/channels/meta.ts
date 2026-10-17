@@ -90,6 +90,45 @@ export const CHANNEL_META: Record<string, ChannelMeta> = {
     bind: 'credentials',
     fields: [cred('botToken', 'Bot Token（xoxb-）', 'Bot Token (xoxb-)'), cred('appToken', 'App Token（xapp-，需 Socket Mode）', 'App Token (xapp-, Socket Mode)')],
   },
+  whatsapp: {
+    id: 'whatsapp',
+    label: { zh: 'WhatsApp', en: 'WhatsApp' },
+    bind: 'qr',
+    // 配对型渠道：creds 落 auth 目录（config.authDir），无手工 secret 字段；重配同目录即恢复。
+    fields: [plain('authDir', '凭据目录（缺省账号子目录）', 'Auth dir (defaults per account)'), plain('accountNote', '账号备注', 'Account note')],
+    hostRequirement: 'none',
+  },
+  matrix: {
+    id: 'matrix',
+    label: { zh: 'Matrix', en: 'Matrix' },
+    bind: 'credentials',
+    fields: [
+      cred('accessToken', 'Access Token', 'Access Token'),
+      { key: 'homeserverBaseUrl', label: { zh: ' homeserver 地址', en: 'Homeserver base URL' }, secret: false, required: true },
+      plain('encryption', 'E2EE 模式 optional/required（首版解密面未接）', 'E2EE mode (decrypt not wired)'),
+      plain('dmRoomList', '私聊房间表（逗号分隔）', 'DM room list (comma separated)'),
+    ],
+  },
+  imessage: {
+    id: 'imessage',
+    label: { zh: 'iMessage', en: 'iMessage' },
+    bind: 'credentials',
+    // 本机条件渠道：非 macOS 装载侧明确拒载（构造期抛）。
+    fields: [plain('selfHandle', '本机 Apple ID/手机号', 'Self handle'), plain('chatDbPath', 'chat.db 路径（缺省标准位置）', 'chat.db path (optional)')],
+    hostRequirement: 'macos',
+  },
+  'wecom-app': {
+    id: 'wecom-app',
+    label: { zh: '企业微信（自建应用）', en: 'WeCom (self-built app)' },
+    bind: 'credentials',
+    fields: [
+      cred('corpId', '企业 ID (CorpID)', 'Corp ID'),
+      cred('corpSecret', '应用 Secret', 'App Secret'),
+      cred('encodingAesKey', '回调 EncodingAESKey', 'Callback EncodingAESKey'),
+      cred('callbackToken', '回调 Token', 'Callback Token'),
+      { key: 'agentId', label: { zh: '应用 AgentId', en: 'App AgentId' }, secret: false, required: true },
+    ],
+  },
 }
 
 export function channelIds(): string[] {
