@@ -1,6 +1,6 @@
 {
   "name": "dsh-im-union",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Union IM bridge for DeepSeek Harness — clean-room merge of dsh-im and dsh-im-connect capabilities, compatible across 0.1.2-rc.1 .. 0.2.1-alpha.3 hosts.",
   "type": "module",
   "license": "MIT",
@@ -98,7 +98,7 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/",
-    "tag": "next"
+    "tag": "latest"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.76.0",

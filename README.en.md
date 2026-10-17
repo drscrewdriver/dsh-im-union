@@ -8,13 +8,21 @@ A union IM bridge for DeepSeek Harness — a clean-room reimplementation merging
 
 ## Status
 
-Under development (M0 cross-version skeleton). See `tasks.md` for phasing.
+**0.1.0 feature release**: all 14 P0/P1/P2 channel protocol layers, the cross-version narrow waist, session engine, approval/question IM loop and multi-account management are delivered (574 unit tests; host-farm smoke green on 0.1.2 / 0.1.5 / 0.1.7 / 0.2.1 lines). Outstanding real-device acceptance items are registered in CHANGELOG.
 
-## Install (npm package available after M1)
+Highlights:
+
+- **Channels**: WeChat (official iLink QR bind), Feishu/Lark (long-connection, streaming cards, optional voice tier), Telegram, Discord, WeCom intelligent bot, DingTalk (stream + AI Card), QQ official bot, Slack (Socket Mode, zero SDK), WhatsApp (Baileys QR pairing), Matrix, iMessage (macOS only), WeCom self-built app (signed callback webhook), and more; unconfigured channels load nothing (lazy imports).
+- **In-chat loop**: 24 commands (`/help /status /new /stop /steer /model(s) /reasoning /preset(s) /session(s) /workspace(s) /fork /rename /queue /mute /unbind /goal /delivery /export /speak /menu`); tool approvals and agent questions answered in the originating chat (deny-by-default, 5-minute expiry, initiator only).
+- **Cross-version**: settings surface auto-adapts gen1/gen2/gen3; capability probing only, never version branches.
+
+## Install
 
 ```sh
 dsh plugin --profile web add dsh-im-union@latest --registry=https://registry.npmjs.org/
 ```
+
+Then add accounts in the "IM union bridge" panel: most channels use credential binding (secrets are one-way into the vault and never echoed back); WeChat/WhatsApp use QR pairing; the WeCom self-built app channel requires pointing your callback URL (`/api/dsh-im-union/wecom-app/callback`) in its console. See `SECURITY.md` for the non-negotiable privacy red lines and `THIRD_PARTY_NOTICES.md` for the clean-room provenance.
 
 ## Development
 

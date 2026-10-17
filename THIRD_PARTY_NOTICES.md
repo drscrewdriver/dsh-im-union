@@ -16,12 +16,22 @@ dependencies only.
 
 ## Runtime npm dependencies (consumed as-is, licenses per their packages)
 
-- @larksuiteoapi/node-sdk (MIT) — Feishu/Lark bot long-connection SDK
-- dingtalk-stream (MIT) — DingTalk Stream mode SDK
-- @wecom/aibot-node-sdk — WeCom intelligent-bot WebSocket SDK
-- @tencent-connect/qqbot-connector — QQ bot QR pairing helper (declared
-  UNLICENSED upstream; used as an external dependency only, never vendored)
-- qrcode (MIT) — QR rendering for scan-to-bind flows
+- @larksuiteoapi/node-sdk (MIT) — Feishu/Lark bot long-connection SDK (its WS
+  handshake/signature surface is a private protocol, so the official SDK is used
+  instead of a clean-room reimplementation; lazily imported)
+- @whiskeysockets/baileys (MPL-2.0) — WhatsApp Web multi-device protocol library
+  (lazily imported; only the WhatsApp channel touches it)
+- qrcode (MIT) — QR PNG data-URL rendering for the WeChat iLink / WhatsApp
+  scan-to-bind flows (lazily imported)
 
-P1/P2 additions will be listed here as they land (Baileys, @matrix-org/olm,
-imapflow/nodemailer, sharp — none are dependencies at M0).
+Everything else (Telegram, Discord, Slack, QQ, DingTalk, WeCom bot long-connection,
+WeCom self-built app callback crypto, WeChat iLink transport, Matrix CS API) is
+implemented directly against public protocol documents with ZERO runtime
+dependencies (Node >= 22 global fetch/WebSocket + node:crypto/node:zlib only).
+Earlier drafts of this file listed dingtalk-stream, @wecom/aibot-node-sdk and
+@tencent-connect/qqbot-connector; those SDKs were never adopted — the respective
+channels are zero-dependency clean-room implementations (corrected at 0.1.0).
+
+Optional external tools: ffmpeg (system binary, spawned only when the Feishu
+voice tier is explicitly enabled; never bundled, never assumed present — the
+feature degrades honestly when missing).

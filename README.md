@@ -8,13 +8,21 @@ DeepSeek Harness 的 IM 联合桥——净室重写，能力合集来自社区�
 
 ## 状态
 
-开发中（M0 跨版本骨架）。能力分期见根目录 `tasks.md`。
+**0.1.0 功能版**：P0/P1/P2 十四渠道协议层、跨版本窄腰、会话引擎、审批/提问 IM 闭环、多账号管理面均已交付（单测 574 项；宿主农场 0.1.2/0.1.5/0.1.7/0.2.1 四线冒烟全绿）。真机验收项逐项登记在 CHANGELOG；能力分期见开发仓计划台账。
 
-## 安装（M1 后提供 npm 包）
+能力总览：
+
+- **渠道**：微信（官方 iLink 扫码）、飞书（长连/流式卡片/语音档可选）、Telegram、Discord、企微智能机器人（长连）、钉钉（stream+AI Card）、QQ 官方机器人、Slack（Socket Mode）、WhatsApp（Baileys 扫码）、Matrix、iMessage（仅 macOS）、企微自建应用（回调）等；未配置渠道零依赖零加载（懒 import）。
+- **IM 内闭环**：24 命令面板（/help /status /new /stop /steer /model(s) /reasoning /preset(s) /session(s) /workspace(s) /fork /rename /queue /mute /unbind /goal /delivery /export /speak /menu）；工具审批与交互提问原聊天回答（默认拒绝、5 分钟超时、发起者限定）。
+- **跨版本**：设置面 gen1/gen2/gen3 三态自适配；能力探测优先，禁版本号分支。
+
+## 安装
 
 ```sh
 dsh plugin --profile web add dsh-im-union@latest --registry=https://registry.npmjs.org/
 ```
+
+装好后在宿主侧栏/设置页的「IM 联合桥」面板添加账号：大部分渠道走凭据绑定（Bot Token/App 凭据，secret 字段只单向入库不回显）；微信/WhatsApp 走扫码绑定；企微自建应用需将本插件管理面回调 URL（`/api/dsh-im-union/wecom-app/callback`）配入后台接收服务器。隐私与凭据红线见 `SECURITY.md`；第三方依赖声明见 `THIRD_PARTY_NOTICES.md`（净室重实现，不复制任何上游源码）。
 
 ## 开发
 
