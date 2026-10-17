@@ -123,8 +123,9 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     '/accounts/save': async ({ body, respond }: AdminRequest) => {
       try {
         const { record, secrets } = accountRecordFromBody(body)
-        await accounts.upsert(record, secrets)
-        respond(200, { ok: true })
+        const skipConnect = (body as { skipConnect?: unknown } | null)?.skipConnect === true
+        await accounts.upsert(record, secrets, { skipConnect })
+        respond(200, { ok: true, connected: !skipConnect && record.paused !== true })
       } catch (error) {
         if (error instanceof AccountValidationError) {
           respond(400, { ok: false, error: error.message })

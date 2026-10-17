@@ -50,6 +50,7 @@ window.__ModuleLoader__.load({
         'accounts.qr.scaned_but_redirect': '已扫码，正在重定向等待确认',
         'accounts.qr.code.submit': '提交验证码',
         'accounts.qr.confirmed': '扫码绑定完成，凭据已保存并连接',
+        'accounts.saved.bindhint': '已保存（未连接）：请用「获取登录二维码」完成扫码授权后自动连接',
         'accounts.save': '保存',
         'accounts.cancel': '取消',
         'accounts.check': '检查连接',
@@ -99,6 +100,7 @@ window.__ModuleLoader__.load({
                 'accounts.qr.scaned_but_redirect': 'Scanned — redirecting, waiting for confirm',
                 'accounts.qr.code.submit': 'Submit code',
                 'accounts.qr.confirmed': 'QR binding done — credentials saved and connected',
+        'accounts.saved.bindhint': 'Saved (disconnected): use "Get login QR code" to bind, it connects automatically',
         'accounts.save': 'Save',
         'accounts.cancel': 'Cancel',
         'accounts.check': 'Check connection',
@@ -232,10 +234,14 @@ window.__ModuleLoader__.load({
       }
 
       var submitNew = function () {
+        // 微信扫码账号：表单存而连——凭据由扫码流程写入，保存时必须跳过
+        // 适配器构建（否则 botToken 缺失工厂即抛 → 被当校验错 400，UI 假报）。
+        var payload = { record: form, secrets: form.secrets };
+        if (form.channel === 'weixin' && (form.secrets.botToken || '') === '') payload.skipConnect = true;
         withBusy(function () {
-          return postJSON('/accounts/save', { record: form, secrets: form.secrets }).then(function (result) {
+          return postJSON('/accounts/save', payload).then(function (result) {
             if (result.status === 200) {
-              setNotice(t('accounts.saved'));
+              setNotice(form.channel === 'weixin' && payload.skipConnect ? t('accounts.saved.bindhint') : t('accounts.saved'));
               setAddOpen(false);
               setForm({ channel: form.channel, accountId: '', alias: '', secrets: {} });
               load();

@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AccountManager, AccountValidationError } from '../lib/engine/account-manager.js'
+import { CHANNEL_META } from '../lib/channels/meta.js'
 import { credentialRef } from '../lib/credentials/vault.js'
 
 function fakeVault() {
@@ -124,7 +125,14 @@ test('校验：accountId 形态/未知渠道/未实现渠道三路拒', async ()
   const { manager } = makeManager()
   await assert.rejects(manager.upsert(rec({ accountId: 'bad id!' })), AccountValidationError)
   await assert.rejects(manager.upsert(rec({ channel: 'myspace' })), /未知渠道/)
-  await assert.rejects(manager.upsert(rec({ channel: 'slack' })), /尚未实现/)
+  // 未实现样本动态构造（meta 登记但 registry 无工厂）：P1/P2 渠道逐个落地后
+  // 自然样本会耗尽（slack 即最后一个是实证），静态写死渠道名必漂移。
+  CHANNEL_META.imaginary = { id: 'imaginary', label: { zh: '假想', en: 'Imaginary' }, bind: 'credentials', fields: [] }
+  try {
+    await assert.rejects(manager.upsert(rec({ channel: 'imaginary' })), /尚未实现/)
+  } finally {
+    delete CHANNEL_META.imaginary
+  }
 })
 
 test('重复 upsert：旧适配器先断后重建（重启生效）', async () => {

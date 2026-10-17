@@ -118,8 +118,9 @@ export class AccountManager {
 
   // —— CRUD ——————————————————————————————————————————
 
-  /** 新增或整体替换账号；secrets 单向入 vault（键=meta 的 secret 字段名）；随后重启生效。 */
-  async upsert(record: AccountRecord, secrets?: Record<string, string>): Promise<void> {
+  /** 新增或整体替换账号；secrets 单向入 vault（键=meta 的 secret 字段名）；随后重启生效。
+   * skipConnect：扫码类渠道先建档后取凭据（微信 iLink），建档期不建适配器。 */
+  async upsert(record: AccountRecord, secrets?: Record<string, string>, opts?: { skipConnect?: boolean }): Promise<void> {
     this.validate(record)
     const index = this.records.findIndex((r) => r.accountId === record.accountId)
     if (index >= 0) {
@@ -138,7 +139,7 @@ export class AccountManager {
       }
     }
     this.persist()
-    if (record.paused !== true) {
+    if (record.paused !== true && opts?.skipConnect !== true) {
       await this.ensureConnected(record.accountId)
     }
   }

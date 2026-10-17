@@ -44,3 +44,6 @@ registerChannel('discord', async (options) => (await import('./discord.js')).cre
 registerChannel('feishu', async (options) => (await import('./feishu.js')).createFeishuAdapter(options))
 registerChannel('wecom', async (options) => (await import('./wecom.js')).createWecomAdapter(options))
 registerChannel('weixin', async (options) => (await import('./weixin.js')).createWeixinAdapter(options))
+registerChannel('dingtalk', async (options) => (await import('./dingtalk.js')).createDingtalkAdapter(options))
+registerChannel('qq', async (options) => (await import('./qq.js')).createQqAdapter(options))
+registerChannel('slack', async (options) => (await import('./slack.js')).createSlackAdapter(options))
