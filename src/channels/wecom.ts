@@ -21,9 +21,17 @@
  * - 单连接排他：同一机器人新订阅踢旧连接，旧连接收 disconnected_event
  *   ——被踢后禁自动重连（防互踢乒乓）。
  *
- * 首档诚实能力位：纯文本/markdown 收发 + stream 编辑流式；
- * 图片入站（url+aeskey AES-256-CBC 解密，密钥编码细节待真机核）、模板卡片
- * 按钮、文件（需 REST 上传临时素材，长连接 bot 无 corpid 面）均声明 false。
+ * 首档诚实能力位：纯文本/markdown 收发 + stream 编辑流式。
+ *
+ * 文件面（T2.4 渠道侧判定，声明=实装 E1）：
+ * - 出站 fileOut=false：长连接公开帧只到 aibot_respond_msg / aibot_send_msg，
+ *   其 msgtype 枚举集为 text/markdown/image/stream/template_card——**无文件外发
+ *   公开帧**；文件上传需企业应用 REST（get access_token + media/upload），而长
+ *   连接机器人只有 bot_id/secret、无 corpid/corpsecret 面，拿不到该 REST 资格。
+ *   因此本适配器不实现 sendFile（引擎按 caps 走文字降级回退）。
+ * - 入站 fileIn=false：回调的 image/file 类型虽带 url + aeskey（AES-256-CBC），
+ *   但密钥编码/填充细节属待真机核口径（与 imageIn 同因）——未实证即不声明。
+ * - 模板卡片按钮未开（nativeChoices=false）；文件需 REST 上传临时素材同上。
  *
  * 运行时依赖零：Node≥22 全局 WebSocket；测试注入 WebSocketImpl。
  */
@@ -497,7 +505,7 @@ export class WecomAdapter implements ChannelAdapter {
       {
         name: 'roundtrip',
         status: 'unverified',
-        hint: '收发 round-trip 需真机（企微客户端给机器人发消息）验证',
+        hint: '收发 round-trip 需真机（企微客户端给机器人发消息）验证；长连接无文件外发公开帧，文件回传恒走文字降级',
       },
     ]
     return checks

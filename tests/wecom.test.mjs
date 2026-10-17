@@ -243,3 +243,16 @@ test('工厂：secrets 缺位即构造期抛（不静默降级）', async () => 
   assert.throws(() => createWecomAdapter({ accountId: 'a1', config: {}, secrets: { botId: 'B' } }), /secret 缺失/)
   assert.ok(implementedChannels().includes('wecom'))
 })
+
+// —— 文件面声明一致性（T2.4，E1：声明=实装）————————————————
+
+test('文件面未实装：caps.fileIn/fileOut=false 且不挂 sendFile（协议无文件外发帧）', async () => {
+  const { adapter } = await connectedAdapter()
+  assert.equal(adapter.caps.fileOut, false, '长连接无文件外发公开帧 → 不得声明 fileOut')
+  assert.equal(typeof adapter.sendFile, 'undefined', '未实装即不挂方法（引擎按 caps 走文字降级）')
+  assert.equal(adapter.caps.fileIn, false, '入站 file 的 aeskey 解密未实证 → 不声明 fileIn')
+  const checks = await adapter.diagnose()
+  const roundtrip = checks.find((c) => c.name === 'roundtrip')
+  assert.match(roundtrip.hint, /无文件外发公开帧/)
+  await adapter.disconnect()
+})

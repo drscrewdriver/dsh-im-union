@@ -21,7 +21,7 @@ function fakeRest(route) {
         body = { raw: true }
       }
     }
-    calls.push({ url, method: init?.method ?? 'GET', body, headers: init?.headers })
+    calls.push({ url, method: init?.method ?? 'GET', body, headers: init?.headers, raw: init?.body })
     return route(url, init?.method ?? 'GET', body)
   }
   return { impl, calls }
@@ -285,4 +285,159 @@ test('长文截断到 2000 并以省略号收尾', async () => {
 
 test('createDiscordAdapter：token 缺失即抛', () => {
   assert.throws(() => createDiscordAdapter({ accountId: 'a', config: {}, secrets: {} }), /botToken 未入库/)
+})
+
+// —— 文件输入/输出面（T2.4 渠道侧）——————————————————————————————————————
+
+const binResp = (status, body, bytes) => ({
+  ok: status >= 200 && status < 300,
+  status,
+  json: async () => body,
+  arrayBuffer: async () => Uint8Array.from(bytes ?? []).buffer,
+})
+
+test('声明一致性：fileIn/fileOut=true 且 sendFile 为函数', async () => {
+  const { adapter } = await connectedAdapter()
+  assert.equal(adapter.caps.fileIn, true)
+  assert.equal(adapter.caps.fileOut, true)
+  assert.equal(typeof adapter.sendFile, 'function')
+  await adapter.disconnect()
+})
+
+test('sendFile：multipart payload_json + files[0]（走注入 fetch 面，不发真实请求）', async () => {
+  const { adapter, rest } = await connectedAdapter((url, method) => {
+    if (method === 'POST' && url.endsWith('/messages')) return resp(200, { id: 'att-1' })
+    return GATEWAY_ROUTES(url)
+  })
+  const receipt = await adapter.sendFile(
+    { channel: 'discord', kind: 'dm', chatId: '202' },
+    { name: 'report.pdf', data: Uint8Array.from([1, 2, 3]), mimeType: 'application/pdf' },
+  )
+  assert.equal(receipt.platformMessageId, 'att-1')
+  assert.equal(receipt.uncertain, false)
+  const call = rest.calls.at(-1)
+  assert.equal(call.url, 'https://api.test/channels/202/messages')
+  assert.equal(call.method, 'POST')
+  assert.equal(call.headers.authorization, 'Bot DTOK')
+  assert.match(call.headers['content-type'], /^multipart\/form-data; boundary=/)
+  const raw = Buffer.from(call.raw).toString('latin1')
+  assert.ok(raw.includes('name="payload_json"'), 'payload_json 字段')
+  assert.ok(raw.includes('name="files[0]"'), '文件字段名固定 files[0]')
+  assert.ok(raw.includes('filename="report.pdf"'), '文件名透传')
+  assert.ok(raw.includes('Content-Type: application/pdf'))
+  assert.ok(raw.includes('allowed_mentions'), 'payload_json 携消息体')
+  await adapter.disconnect()
+})
+
+test('sendFile：403 确定性抛（非 uncertain）', async () => {
+  const { adapter } = await connectedAdapter((url, method) => {
+    if (method === 'POST' && url.endsWith('/messages')) return resp(403, { message: 'Missing Permissions' })
+    return GATEWAY_ROUTES(url)
+  })
+  await assert.rejects(
+    adapter.sendFile({ channel: 'discord', kind: 'dm', chatId: '1' }, { name: 'a', data: Uint8Array.from([0]) }),
+    (e) => e.constructor.name === 'DiscordApiError' && /Missing Permissions/.test(e.message),
+  )
+  await adapter.disconnect()
+})
+
+test('sendFile：网络错/5xx/回包不可解析 = uncertain', async () => {
+  const net = await connectedAdapter((url, method) => {
+    if (method === 'POST' && url.endsWith('/messages')) throw new TypeError('socket hang up')
+    return GATEWAY_ROUTES(url)
+  })
+  await assert.rejects(
+    net.adapter.sendFile({ channel: 'discord', kind: 'dm', chatId: '1' }, { name: 'a', data: Uint8Array.from([0]) }),
+    (e) => e.constructor.name.includes('Uncertain'),
+  )
+  await net.adapter.disconnect()
+
+  const srv = await connectedAdapter((url, method) => {
+    if (method === 'POST' && url.endsWith('/messages')) return resp(503, {})
+    return GATEWAY_ROUTES(url)
+  })
+  await assert.rejects(
+    srv.adapter.sendFile({ channel: 'discord', kind: 'dm', chatId: '1' }, { name: 'a', data: Uint8Array.from([0]) }),
+    (e) => e.constructor.name.includes('Uncertain'),
+  )
+  await srv.adapter.disconnect()
+
+  const broken = await connectedAdapter((url, method) => {
+    if (method === 'POST' && url.endsWith('/messages')) return { ok: true, status: 200, json: async () => { throw new Error('bad json') } }
+    return GATEWAY_ROUTES(url)
+  })
+  await assert.rejects(
+    broken.adapter.sendFile({ channel: 'discord', kind: 'dm', chatId: '1' }, { name: 'a', data: Uint8Array.from([0]) }),
+    (e) => e.constructor.name.includes('Uncertain'),
+  )
+  await broken.adapter.disconnect()
+})
+
+test('入站 attachments：图进 images、非图进 files；单件失败不丢整条', async () => {
+  const { adapter, socket } = await connectedAdapter((url) => {
+    if (url.includes('cdn.test/cat.png')) return binResp(200, {}, [7, 7, 7])
+    if (url.includes('cdn.test/doc.pdf')) return binResp(200, {}, [9, 9])
+    if (url.includes('cdn.test/broken.bin')) throw new Error('cdn down')
+    return GATEWAY_ROUTES(url)
+  })
+  const got = []
+  adapter.onMessage((m) => got.push(m))
+  socket.emit({
+    op: 0,
+    t: 'MESSAGE_CREATE',
+    s: 9,
+    d: {
+      channel_id: '202',
+      author: { id: '7', username: 'bob' },
+      content: '多个附件',
+      attachments: [
+        { id: 'a1', filename: 'cat.png', content_type: 'image/png', url: 'https://cdn.test/cat.png' },
+        { id: 'a2', filename: 'doc.pdf', content_type: 'application/pdf', url: 'https://cdn.test/doc.pdf', size: 2 },
+        { id: 'a3', filename: 'broken.bin', content_type: 'application/octet-stream', url: 'https://cdn.test/broken.bin' },
+      ],
+    },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(got.length, 1)
+  assert.equal(got[0].images.length, 1)
+  assert.equal(got[0].files.length, 1, '非图附件入 files')
+  assert.equal(got[0].files[0].name, 'doc.pdf')
+  assert.deepEqual([...got[0].files[0].data], [9, 9])
+  assert.equal(got[0].text, '多个附件', '下载失败件不影响正文投递')
+  await adapter.disconnect()
+})
+
+test('入站文件超 20 MiB 声明体积：不下载（不自设更大限额）', async () => {
+  const { adapter, socket, rest } = await connectedAdapter((url) => {
+    if (url.includes('cdn.test/big.zip')) return binResp(200, {}, [1])
+    return GATEWAY_ROUTES(url)
+  })
+  const got = []
+  adapter.onMessage((m) => got.push(m))
+  socket.emit({
+    op: 0,
+    t: 'MESSAGE_CREATE',
+    s: 10,
+    d: {
+      channel_id: '202',
+      author: { id: '7' },
+      content: '大包',
+      attachments: [
+        { id: 'b1', filename: 'big.zip', content_type: 'application/zip', url: 'https://cdn.test/big.zip', size: 21 * 1024 * 1024 },
+      ],
+    },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(got.length, 1)
+  assert.equal(got[0].files, undefined)
+  assert.ok(!rest.calls.some((c) => String(c.url).includes('cdn.test/big.zip')), '超限件不发下载请求')
+  await adapter.disconnect()
+})
+
+test('diagnose：文件面未实证 = unverified', async () => {
+  const { adapter } = await connectedAdapter()
+  const checks = await adapter.diagnose()
+  const file = checks.find((c) => c.name === 'file-surface')
+  assert.equal(file.status, 'unverified')
+  await adapter.disconnect()
 })

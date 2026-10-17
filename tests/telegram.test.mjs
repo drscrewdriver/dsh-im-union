@@ -12,6 +12,13 @@ const resp = (status, body) => ({
 const success = (result) => resp(200, { ok: true, result })
 const apiErr = (description, status = 400) => resp(status, { ok: false, description, error_code: status })
 const abortError = () => Object.assign(new Error('aborted'), { name: 'AbortError' })
+/** 下载面响应（带 arrayBuffer）。 */
+const binResp = (bytes, status = 200) => ({
+  ok: status >= 200 && status < 399,
+  status,
+  json: async () => ({}),
+  arrayBuffer: async () => Uint8Array.from(bytes).buffer,
+})
 
 /** 通用 fake：route(method, body, init) → 响应或 Promise。calls 记录请求。 */
 function fakeFetch(route) {
@@ -26,7 +33,7 @@ function fakeFetch(route) {
         body = { raw: true }
       }
     }
-    calls.push({ url, method, body })
+    calls.push({ url, method, body, init })
     return route(method, body, init)
   }
   impl.calls = calls
@@ -321,4 +328,133 @@ test('createTelegramAdapter：token 缺失即抛；apiBaseUrl 覆写生效', asy
   } finally {
     globalThis.fetch = prevFetch
   }
+})
+
+// —— 文件输入/输出面（T2.4 渠道侧）——————————————————————————————————————
+
+test('声明一致性：fileIn/fileOut=true 且 sendFile 为函数', () => {
+  const adapter = newAdapter(connectFetch())
+  assert.equal(adapter.caps.fileIn, true)
+  assert.equal(adapter.caps.fileOut, true)
+  assert.equal(typeof adapter.sendFile, 'function')
+})
+
+test('sendFile：sendDocument multipart 形（url/method/content-type/字段名）+ 回执', async () => {
+  const fetchImpl = fakeFetch((method) => (method === 'sendDocument' ? success({ message_id: 55 }) : success({})))
+  const adapter = newAdapter(fetchImpl)
+  const receipt = await adapter.sendFile(
+    { channel: 'telegram', kind: 'dm', chatId: '111' },
+    { name: 'report.txt', data: Uint8Array.from([1, 2, 3]), mimeType: 'text/plain' },
+  )
+  assert.equal(receipt.platformMessageId, '55')
+  assert.equal(receipt.uncertain, false)
+  const call = fetchImpl.calls.at(-1)
+  assert.equal(call.url, 'https://api.test/botTOK/sendDocument')
+  assert.equal(call.method, 'sendDocument')
+  assert.equal(call.init.method, 'POST')
+  const headers = call.init.headers
+  assert.ok(headers['content-type'].startsWith('multipart/form-data; boundary='), '内容型声明 boundary')
+  const raw = Buffer.from(call.init.body).toString('latin1')
+  assert.ok(raw.includes('name="chat_id"'), '同页表单必须带 chat_id')
+  assert.ok(raw.includes('111'), 'chat_id 值入页')
+  assert.ok(raw.includes('name="document"'), '文件字段名固定 document')
+  assert.ok(raw.includes('filename="report.txt"'), '文件名透传')
+  assert.ok(raw.includes('Content-Type: text/plain'), 'mime 优先使用调用方声明')
+})
+
+test('sendFile：4xx = 确定性失败抛（非 uncertain，不重发）', async () => {
+  const fetchImpl = fakeFetch((method) =>
+    method === 'sendDocument' ? apiErr('file too big', 400) : success({}),
+  )
+  const adapter = newAdapter(fetchImpl)
+  await assert.rejects(
+    adapter.sendFile({ channel: 'telegram', kind: 'dm', chatId: '1' }, { name: 'a.bin', data: Uint8Array.from([0]) }),
+    (error) => !error.constructor.name.includes('Uncertain') && /too big/.test(error.message),
+  )
+})
+
+test('sendFile：网络错/5xx/回包不可解析 = uncertain', async () => {
+  const net = newAdapter(fakeFetch(() => {
+    throw new TypeError('socket hang up')
+  }))
+  await assert.rejects(
+    net.sendFile({ channel: 'telegram', kind: 'dm', chatId: '1' }, { name: 'a', data: Uint8Array.from([0]) }),
+    (error) => error.constructor.name.includes('Uncertain'),
+  )
+  const srv = newAdapter(fakeFetch(() => resp(502, {})))
+  await assert.rejects(
+    srv.sendFile({ channel: 'telegram', kind: 'dm', chatId: '1' }, { name: 'a', data: Uint8Array.from([0]) }),
+    (error) => error.constructor.name.includes('Uncertain'),
+  )
+  const broken = newAdapter(
+    fakeFetch(() => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new Error('unterminated json')
+      },
+    })),
+  )
+  await assert.rejects(
+    broken.sendFile({ channel: 'telegram', kind: 'dm', chatId: '1' }, { name: 'a', data: Uint8Array.from([0]) }),
+    (error) => error.constructor.name.includes('Uncertain'),
+  )
+})
+
+test('入站 document：getFile → 下载面填 files（名称取 file_name）', async () => {
+  const received = []
+  const adapter = newAdapter(
+    connectFetch(
+      [
+        {
+          update_id: 3,
+          message: privateMsg({
+            text: undefined,
+            caption: '看下报告',
+            document: { file_id: 'DOC1', file_name: 'report.pdf', mime_type: 'application/pdf', file_size: 3 },
+          }),
+        },
+      ],
+      (method) => {
+        if (method === 'getFile') return success({ file_id: 'DOC1', file_path: 'documents/report.pdf' })
+        if (method === 'report.pdf') return binResp([7, 7, 7])
+        return success({})
+      },
+    ),
+  )
+  adapter.onMessage((m) => received.push(m))
+  await withConnected(adapter)
+  await waitUntil(() => received.length > 0)
+  adapter.disconnect()
+  const m = received[0]
+  assert.equal(m.text, '看下报告')
+  assert.equal(m.files.length, 1)
+  assert.equal(m.files[0].name, 'report.pdf')
+  assert.deepEqual(Array.from(m.files[0].data), [7, 7, 7])
+})
+
+test('入站 document：无 file_name 时合成名；下载失败不丢整条消息', async () => {
+  const received = []
+  const adapter = newAdapter(
+    connectFetch(
+      [{ update_id: 4, message: privateMsg({ text: undefined, caption: undefined, document: { file_id: 'DOCX' } }) }],
+      (method) => {
+        if (method === 'getFile') return apiErr('file id is invalid', 400)
+        return success({})
+      },
+    ),
+  )
+  adapter.onMessage((m) => received.push(m))
+  await withConnected(adapter)
+  await waitUntil(() => received.length > 0)
+  adapter.disconnect()
+  assert.equal(received[0].text, '')
+  assert.equal(received[0].files, undefined, '下载失败降级为无附件，消息照常投递')
+})
+
+test('diagnose：文件面未实证 = unverified（不谎报）', async () => {
+  const adapter = newAdapter(connectFetch())
+  const checks = await adapter.diagnose()
+  const file = checks.find((c) => c.name === 'file-surface')
+  assert.equal(file.status, 'unverified')
 })

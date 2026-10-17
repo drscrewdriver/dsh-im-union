@@ -71,10 +71,12 @@ import type {
   ChannelCaps,
   ChannelDiagnosisCheck,
   MessageListener,
+  OutboundFile,
   Receipt,
   ReplyStream,
   SemanticMessage,
 } from './types.js'
+import { FILE_BUDGET } from '../engine/files.js'
 
 /** E2EE 档位：optional=加密房间降级占位；required=加密房间拒连。 */
 export type MatrixE2eeMode = 'optional' | 'required'
@@ -97,10 +99,25 @@ const SELF_EVENT_LIMIT = 2_000
 
 /** 无解密面时的占位文案（协议事实：m.room.encrypted 在本包不可解）。 */
 export const ENCRYPTED_PLACEHOLDER = '[加密消息：E2EE 解密面未接]'
-/** 媒体下载面（mxc + /_matrix/client/v1/media/download）本期未接 → 非文本 msgtype 占位。 */
+
+/**
+ * 时间线事件 → 可下载的明文 m.file content（编辑取 m.new_content）；
+ * 非 m.file / 加密附件（file 带 key|iv）返回 undefined。
+ */
+function plainFileContent(ev: MatrixEvent | undefined): Record<string, any> | undefined {
+  if (ev === undefined || ev.type !== 'm.room.message') return undefined
+  const content = asRecord(ev.content)
+  const relates = asRecord(content['m.relates_to'])
+  const effective = relates.rel_type === 'm.replace' ? asRecord(content['m.new_content']) : content
+  if (effective.msgtype !== 'm.file') return undefined
+  const fileObj = asRecord(effective.file)
+  if (fileObj.key !== undefined || fileObj.iv !== undefined) return undefined
+  return effective
+}
+/** 非文本 msgtype 占位文案（m.file 另有下载面 → 文本仅做可读标注）。 */
 const NON_TEXT_PLACEHOLDER: Record<string, string> = {
   'm.image': '[图片消息：媒体下载面未接]',
-  'm.file': '[文件消息：媒体下载面未接]',
+  'm.file': '[文件消息]',
   'm.audio': '[语音消息：媒体下载面未接]',
   'm.video': '[视频消息：媒体下载面未接]',
 }
@@ -118,11 +135,12 @@ interface MatrixFetchResponse {
   ok: boolean
   status: number
   json(): Promise<unknown>
+  arrayBuffer?(): Promise<ArrayBuffer>
   headers?: { get(name: string): string | null }
 }
 interface RequestInitLike {
   method?: string
-  body?: string
+  body?: string | Uint8Array
   headers?: Record<string, string>
   signal?: AbortSignal
 }
@@ -186,10 +204,10 @@ export class MatrixAdapter implements ChannelAdapter {
     statusReaction: false,
     /** PUT /rooms/{roomId}/typing 公开 API */
     typing: true,
-    /** 媒体下载面（mxc URI + /media/download）本期未接：入站图片/文件只给占位文案 */
+    /** 媒体下载面只接了 m.file（m.image 仍不拉字节） */
     imageIn: false,
-    fileIn: false,
-    fileOut: false,
+    fileIn: true,
+    fileOut: true,
     /** 未接 thread 关系（m.thread） */
     threads: false,
     voice: false,
@@ -366,6 +384,9 @@ export class MatrixAdapter implements ChannelAdapter {
         }
         const message = this.normalizeEvent(roomId, ev)
         if (message === undefined) continue
+        // 异步 fill 范式：m.file 先拉字节再投递（失败只降级，不丢整条消息）。
+        const fileContent = plainFileContent(ev)
+        if (fileContent !== undefined) await this.fillFiles(message, fileContent)
         for (const listener of this.listeners) listener(message)
       }
     }
@@ -596,6 +617,110 @@ export class MatrixAdapter implements ChannelAdapter {
   }
 
   /**
+   * 文件回传（公开 REST，规范 v1.9 §Media Repository）：
+   * 1) POST /_matrix/media/v3/upload?filename=… （原始字节 + Content-Type）→ {content_uri: mxc://}
+   *    https://spec.matrix.org/v1.9/client-server-api/#post_matrixmediav3upload
+   * 2) PUT /rooms/{roomId}/send/m.room.message/{txnId} 发 m.file 事件
+   *    （body=文件名、url=mxc、file={url,mimetype,size} 为 OEP-0008 新形）。
+   * 判型沿用 requestJson 口径：网络/5xx/体不可解 → uncertain（D7 禁重发，
+   * 上传与发送任一步结果不明都不能盲重传，否则会投两条）；其余非 2xx → MatrixApiError。
+   */
+  async sendFile(address: ChatAddress, file: OutboundFile, signal?: AbortSignal): Promise<Receipt> {
+    const path = `/_matrix/media/v3/upload?filename=${encodeURIComponent(file.name)}`
+    let response: MatrixFetchResponse
+    try {
+      response = await this.fetchImpl(`${this.base}${path}`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${this.accessToken}`,
+          'content-type': file.mimeType ?? 'application/octet-stream',
+        },
+        body: file.data,
+        ...(signal === undefined ? {} : { signal }),
+      })
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') throw error
+      throw new MatrixUncertainError(`matrix POST /_matrix/media/v3/upload: 网络异常 ${describe(error)}，结果不明`)
+    }
+    if (response.status >= 500) throw new MatrixUncertainError(`matrix POST /_matrix/media/v3/upload: HTTP ${response.status}`)
+    if (!response.ok) {
+      const payload = await readJson(response)
+      const errcode = typeof payload?.errcode === 'string' ? payload.errcode : ''
+      throw new MatrixApiError(
+        `matrix POST /_matrix/media/v3/upload: ${errcode === '' ? `HTTP ${response.status}` : `${errcode} ${String(payload?.error ?? '')}`}`,
+        response.status,
+        errcode,
+      )
+    }
+    const uploaded = await readJson(response)
+    const contentUri = typeof uploaded?.content_uri === 'string' ? uploaded.content_uri : ''
+    if (!contentUri.startsWith('mxc://')) {
+      throw new MatrixApiError('matrix POST /_matrix/media/v3/upload: 成功体缺 content_uri', response.status, 'IMU_NO_CONTENT_URI')
+    }
+    const eventId = await this.sendEvent(
+      address.chatId,
+      {
+        msgtype: 'm.file',
+        body: file.name,
+        url: contentUri,
+        file: { url: contentUri, mimetype: file.mimeType ?? 'application/octet-stream', size: file.data.byteLength },
+      },
+      signal,
+    )
+    return eventId === undefined ? { uncertain: false } : { platformMessageId: eventId, uncertain: false }
+  }
+
+  /** mxc://serverName/mediaId → 下载路径（v1.11 起媒体走 client 而非 media 域）。 */
+  private mediaDownloadPath(mxc: string): string | undefined {
+    const matched = /^mxc:\/\/([^/]+)\/(.+)$/.exec(mxc)
+    if (matched === null) return undefined
+    return `/_matrix/client/v1/media/download/${encodeURIComponent(matched[1])}/${encodeURIComponent(matched[2])}`
+  }
+
+  /**
+   * 入站 m.file 字节下载：GET /_matrix/client/v1/media/download/{serverName}/{mediaId}（带 Bearer）。
+   * 加密附件（file.key 在位）无 olm 面 → 只记日志降级；限额跟引擎 FILE_BUDGET。
+   */
+  private async fillFiles(message: SemanticMessage, content: Record<string, any>): Promise<void> {
+    const name = typeof content.body === 'string' && content.body !== '' ? content.body : 'matrix-file'
+    const fileObj = asRecord(content.file)
+    const mxc = typeof content.url === 'string' ? content.url : typeof fileObj.url === 'string' ? fileObj.url : ''
+    if (fileObj.key !== undefined || fileObj.iv !== undefined) {
+      // 加密附件（OEP-3 形：file 带 key/iv）无 olm 解密面 → 不伪称可用
+      this.log(`matrix: 加密附件未接解密，降级为无附件：${name}`)
+      return
+    }
+    if (mxc === '') {
+      this.log(`matrix: m.file 无 mxc 地址，降级为无附件：${name}`)
+      return
+    }
+    if (typeof content.size === 'number' && content.size > FILE_BUDGET.perFileMaxBytes) {
+      this.log(`matrix: 文件超 20 MiB 上限，未下载：${name}`)
+      return
+    }
+    const path = this.mediaDownloadPath(mxc)
+    if (path === undefined) {
+      this.log(`matrix: mxc 地址形不可解，降级为无附件：${mxc}`)
+      return
+    }
+    try {
+      const response = await this.fetchImpl(`${this.base}${path}`, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${this.accessToken}` },
+      })
+      if (!response.ok || response.arrayBuffer === undefined) {
+        this.log(`matrix: 媒体下载被拒（HTTP ${response.status}），降级为无附件：${name}`)
+        return
+      }
+      const data = new Uint8Array(await response.arrayBuffer())
+      if (data.byteLength === 0) this.log(`matrix: 媒体下载为空，降级为无附件：${name}`)
+      else message.files = [{ name, data }]
+    } catch (error) {
+      this.log(`matrix: 媒体下载失败（${describe(error)}），降级为无附件：${name}`)
+    }
+  }
+
+  /**
    * 编辑流式：首发取 event_id 作为原始事件，后续 update 以 m.replace 编辑同一条。
    * 确定性拒绝（权限/事件被删）→ 补发新消息接替；结果不明 → 上抛（引擎不盲重试）。
    */
@@ -726,6 +851,13 @@ export class MatrixAdapter implements ChannelAdapter {
       name: 'roundtrip',
       status: 'unverified',
       hint: '真实收发 round-trip 需真机验证（Matrix 客户端在本 bot 所在房间发消息）',
+    })
+    checks.push({
+      // 上传/下载 REST 面已接，但 homeserver 可能禁用媒体仓储（M_UNKNOWN/404）或
+      // 要求认证下载域 → 未实证即 unverified，不谎报 passed。
+      name: 'file-surface',
+      status: 'unverified',
+      hint: '媒体上传 POST /_matrix/media/v3/upload + 下载 GET /_matrix/client/v1/media/download 需 homeserver 实探',
     })
     return checks
   }

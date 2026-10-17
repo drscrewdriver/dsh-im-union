@@ -145,6 +145,7 @@ function fakeFetch(route, syncScript = [], options = {}) {
       path: u.pathname,
       query: u.searchParams,
       body,
+      raw: init?.body,
       headers: init?.headers ?? {},
       signal: init?.signal,
       at: Date.now(),
@@ -898,8 +899,8 @@ test('诊断三态：token-valid/sync/e2ee/roundtrip，passed|failed|unverified 
   const adapter = new MatrixAdapter({ accessToken: TOKEN, homeserverBaseUrl: BASE, fetchImpl: fetch.impl })
   await adapter.connect()
   const checks = await adapter.diagnose()
-  assert.deepEqual(checks.map((c) => c.name), ['token-valid', 'sync', 'e2ee', 'roundtrip'])
-  assert.deepEqual(checks.map((c) => c.status), ['passed', 'passed', 'unverified', 'unverified'])
+  assert.deepEqual(checks.map((c) => c.name), ['token-valid', 'sync', 'e2ee', 'roundtrip', 'file-surface'])
+  assert.deepEqual(checks.map((c) => c.status), ['passed', 'passed', 'unverified', 'unverified', 'unverified'])
   assert.equal(checks[0].hint, BOT, 'hint 只回显 user_id')
   assert.ok(typeof checks[0].elapsedMs === 'number')
   assert.match(checks[1].hint, /已观测房间 1 个，游标已滚动/)
@@ -961,15 +962,208 @@ test('能力位与准入：editStream true / nativeStream false / imageIn false 
     statusReaction: false,
     typing: true,
     imageIn: false,
-    fileIn: false,
-    fileOut: false,
+    fileIn: true,
+    fileOut: true,
     threads: false,
     voice: false,
     maxMessageLength: 4000,
   })
   assert.equal(adapter.authorize(), undefined, '私聊裁决归网关白名单（红线 D6），渠道不越权')
-  assert.equal(adapter.sendFile, undefined, '本期无文件面')
+  assert.equal(typeof adapter.sendFile, 'function', 'fileOut=true ⇒ 必须真挂了方法（声明=实装）')
   assert.equal(adapter.askChoices, undefined, '本期无按钮面')
+})
+
+// —— 文件面（T2.4）——————————————————————————————————
+
+const binRes = (status, bytes) => ({
+  ok: status >= 200 && status < 399,
+  status,
+  json: async () => undefined,
+  arrayBuffer: async () => new Uint8Array(bytes).buffer,
+  headers: { get: () => null },
+})
+
+/** 媒体面路由：上传/下载 可逐例接管，其余走默认面。 */
+function mediaRoute(over = {}) {
+  const base = makeRoute()
+  const state = { uploads: 0, downloads: 0 }
+  const route = (entry, calls) => {
+    if (entry.path.startsWith('/_matrix/media/v3/upload')) {
+      state.uploads += 1
+      return over.upload !== undefined ? over.upload(entry, state) : res(200, { content_uri: 'mxc://example.org/MEDIA1' })
+    }
+    if (entry.path.startsWith('/_matrix/client/v1/media/download/')) {
+      state.downloads += 1
+      return over.download !== undefined ? over.download(entry, state) : binRes(200, [9, 8, 7])
+    }
+    return base(entry, calls)
+  }
+  route.state = state
+  return route
+}
+
+test('sendFile：POST /_matrix/media/v3/upload 原始字节 → PUT m.file 事件（url/file 同 mxc）', async () => {
+  const route = mediaRoute()
+  const fetch = fakeFetch(route)
+  const { adapter } = newAdapter({ fetch })
+  const receipt = await adapter.sendFile(
+    { channel: 'matrix', kind: 'dm', chatId: ROOM },
+    { name: 'data.csv', data: new Uint8Array([1, 2, 3]), mimeType: 'text/csv' },
+  )
+  const up = fetch.calls.find((c) => c.path === '/_matrix/media/v3/upload')
+  assert.equal(up.method, 'POST')
+  assert.equal(up.query.get('filename'), 'data.csv', 'filename 走查询参')
+  assert.equal(up.headers.authorization, `Bearer ${TOKEN}`, '上传带 access token')
+  assert.equal(up.headers['content-type'], 'text/csv')
+  assert.ok(up.raw instanceof Uint8Array, '原始字节直传（不包 JSON/multipart）')
+  assert.deepEqual([...up.raw], [1, 2, 3])
+  assert.equal(up.body, undefined, '上传体不作 JSON 解析')
+  assert.deepEqual(fetch.sends()[0].body, {
+    msgtype: 'm.file',
+    body: 'data.csv',
+    url: 'mxc://example.org/MEDIA1',
+    file: { url: 'mxc://example.org/MEDIA1', mimetype: 'text/csv', size: 3 },
+  })
+  assert.equal(fetch.sends()[0].method, 'PUT', '事件发送走 PUT + txnId（幂等位）')
+  assert.deepEqual(receipt, { platformMessageId: 'EV1', uncertain: false })
+})
+
+test('sendFile：mimeType 缺省 → application/octet-stream（不伪造类型）', async () => {
+  const route = mediaRoute()
+  const fetch = fakeFetch(route)
+  const { adapter } = newAdapter({ fetch })
+  await adapter.sendFile({ channel: 'matrix', kind: 'dm', chatId: ROOM }, { name: 'a.bin', data: new Uint8Array([1]) })
+  assert.equal(fetch.calls.find((c) => c.path === '/_matrix/media/v3/upload').headers['content-type'], 'application/octet-stream')
+  assert.equal(fetch.sends()[0].body.file.mimetype, 'application/octet-stream')
+})
+
+test('sendFile：上传 4xx → MatrixApiError（确定性，不再发事件）', async () => {
+  const route = mediaRoute({ upload: () => res(400, { errcode: 'M_TOO_LARGE', error: 'file too large' }) })
+  const fetch = fakeFetch(route)
+  const { adapter } = newAdapter({ fetch })
+  await assert.rejects(
+    adapter.sendFile({ channel: 'matrix', kind: 'dm', chatId: ROOM }, { name: 'a.bin', data: new Uint8Array([1]) }),
+    (error) => error instanceof MatrixApiError && error.errcode === 'M_TOO_LARGE',
+  )
+  assert.equal(fetch.sends().length, 0, '上传未成即不发事件')
+  assert.equal(route.state.uploads, 1, '确定性失败不自作重试')
+})
+
+test('sendFile：上传 5xx / 传输错 → uncertain（D7 禁自动重发）', async () => {
+  const five = fakeFetch(mediaRoute({ upload: () => res(503, {}) }))
+  const a1 = newAdapter({ fetch: five }).adapter
+  await assert.rejects(
+    a1.sendFile({ channel: 'matrix', kind: 'dm', chatId: ROOM }, { name: 'a.bin', data: new Uint8Array([1]) }),
+    MatrixUncertainError,
+  )
+  assert.equal(five.calls.filter((c) => c.path === '/_matrix/media/v3/upload').length, 1, '结果不明也不重传（D7）')
+  assert.equal(five.sends().length, 0, '上传未落即不发事件')
+  const boom = fakeFetch(mediaRoute({ upload: () => { throw new Error('socket hang up') } }))
+  const a2 = newAdapter({ fetch: boom }).adapter
+  await assert.rejects(
+    a2.sendFile({ channel: 'matrix', kind: 'dm', chatId: ROOM }, { name: 'a.bin', data: new Uint8Array([1]) }),
+    MatrixUncertainError,
+  )
+})
+
+test('sendFile：200 但无 content_uri → 确定性抛（不伪称已投）', async () => {
+  const fetch = fakeFetch(mediaRoute({ upload: () => res(200, {}) }))
+  const { adapter } = newAdapter({ fetch })
+  await assert.rejects(
+    adapter.sendFile({ channel: 'matrix', kind: 'dm', chatId: ROOM }, { name: 'a.bin', data: new Uint8Array([1]) }),
+    (error) => error instanceof MatrixApiError && error.errcode === 'IMU_NO_CONTENT_URI',
+  )
+  assert.equal(fetch.sends().length, 0)
+})
+
+test('入站 m.file：走 /media/download 拉字节填 files（文本仅做可读标注）', async () => {
+  const route = mediaRoute()
+  const fetch = fakeFetch(
+    route,
+    [
+      () => syncBody({ join: { [ROOM]: roomFace([]) } }, 's1'),
+      () =>
+        syncBody(
+          {
+            join: {
+              [ROOM]: roomFace([
+                msgEvent({
+                  event_id: 'F1',
+                  content: { msgtype: 'm.file', body: 'data.json', url: 'mxc://example.org/M1', size: 3 },
+                }),
+              ]),
+            },
+          },
+          's2',
+        ),
+    ],
+    { holdMs: 0 },
+  )
+  const got = []
+  const adapter = new MatrixAdapter({ accessToken: TOKEN, homeserverBaseUrl: BASE, fetchImpl: fetch.impl })
+  adapter.onMessage((m) => got.push(m))
+  await adapter.connect()
+  await waitUntil(() => got.length === 1)
+  assert.equal(got[0].text, '[文件消息]')
+  assert.equal(got[0].files.length, 1)
+  assert.equal(got[0].files[0].name, 'data.json')
+  assert.deepEqual([...got[0].files[0].data], [9, 8, 7])
+  const dl = fetch.calls.find((c) => c.path.startsWith('/_matrix/client/v1/media/download/'))
+  assert.equal(dl.path, '/_matrix/client/v1/media/download/example.org/M1', 'mxc → 服务名/媒体id 分段')
+  assert.equal(dl.headers.authorization, `Bearer ${TOKEN}`, '下载带 token')
+  await adapter.disconnect()
+})
+
+test('入站文件降级：下载被拒/加密附件/超 20 MiB → 不丢消息且不填 files', async () => {
+  const route = mediaRoute({ download: () => res(403, {}) })
+  const fetch = fakeFetch(
+    route,
+    [
+      () => syncBody({ join: { [ROOM]: roomFace([]) } }, 's1'),
+      () =>
+        syncBody(
+          {
+            join: {
+              [ROOM]: roomFace([
+                msgEvent({ event_id: 'F1', content: { msgtype: 'm.file', body: 'no.csv', url: 'mxc://example.org/M1' } }),
+                msgEvent({
+                  event_id: 'F2',
+                  content: { msgtype: 'm.file', body: 'enc.csv', url: 'mxc://example.org/M2', file: { key: { kty: 'A256CTR' } } },
+                }),
+                msgEvent({
+                  event_id: 'F3',
+                  content: {
+                    msgtype: 'm.file',
+                    body: 'big.csv',
+                    url: 'mxc://example.org/M3',
+                    size: 21 * 1024 * 1024,
+                  },
+                }),
+              ]),
+            },
+          },
+          's2',
+        ),
+    ],
+    { holdMs: 0 },
+  )
+  const got = []
+  const adapter = new MatrixAdapter({ accessToken: TOKEN, homeserverBaseUrl: BASE, fetchImpl: fetch.impl })
+  adapter.onMessage((m) => got.push(m))
+  await adapter.connect()
+  await waitUntil(() => got.length === 3)
+  assert.deepEqual(got.map((m) => m.files), [undefined, undefined, undefined], '三种降级均不填字节')
+  assert.deepEqual(got.map((m) => m.text), ['[文件消息]', '[文件消息]', '[文件消息]'], '降级不丢整条消息')
+  assert.equal(route.state.downloads, 1, '仅第一个发起下载（加密/超限不拉）')
+  await adapter.disconnect()
+})
+
+test('诊断：file-surface 恒 unverified（媒体面未实证不谎报 passed）', async () => {
+  const { adapter } = newAdapter()
+  const checks = await adapter.diagnose()
+  const fileSurface = checks.find((c) => c.name === 'file-surface')
+  assert.equal(fileSurface.status, 'unverified')
+  assert.match(fileSurface.hint, /media\/v3\/upload/)
 })
 
 // —— 构造与工厂 ——————————————————————————————————————

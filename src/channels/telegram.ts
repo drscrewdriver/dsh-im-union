@@ -7,7 +7,11 @@
  *   ~1s/条，"message is not modified" 400 是幂等成功不是错误）；
  * - 富文本回退链：parse_mode Markdown（legacy，容忍度高）→ 400 即纯文本重发；
  * - Receipt 语义：网络错/5xx/超时 = uncertain（禁自动重发）；4xx 确定性失败 = 抛；
- * - 私聊白名单裁决在网关 dmAllowlist（红线 D6），本适配器 authorize 恒交全局。
+ * - 私聊白名单裁决在网关 dmAllowlist（红线 D6），本适配器 authorize 恒交全局；
+ * - 文件面（T2.4 渠道侧）：出站 sendDocument（multipart，chat_id 与 document 同页
+ *   表单）；入站 message.document → getFile → /file/bot{token}/{file_path} 下载。
+ *   Bot API 对本地上传文件的服务端上限是 50 MiB，但本渠道不自设限额——
+ *   统一受引擎 FILE_BUDGET（单文件 20 MiB / ≤4 个）约束，只下不超。
  *
  * 零运行时依赖：只用宿主 Node≥22 的全局 fetch（测试注入 fetchImpl）。
  */
@@ -158,8 +162,9 @@ export class TelegramAdapter implements ChannelAdapter {
           this.offset = Math.max(this.offset, update.update_id + 1)
           const message = this.normalize(update.message)
           if (message !== undefined) {
-            // 图片入站（T1.7）：下载失败降级为无图文本消息，不丢整条。
+            // 图片/文件入站（T1.7 / T2.4）：下载失败降级为无附件文本消息，不丢整条。
             await this.fillImages(message, update.message)
+            await this.fillFiles(message, update.message)
             for (const listener of this.listeners) listener(message)
           }
         }
@@ -180,14 +185,41 @@ export class TelegramAdapter implements ChannelAdapter {
       const largest = photo[photo.length - 1]
       if (largest?.file_id === undefined) return
       const ref = await this.resolveFileRef(largest.file_id, 'photo.jpg')
-      const response = await this.fetchImpl(this.downloadUrl(ref))
-      const buffer = typeof response.arrayBuffer === 'function' ? await response.arrayBuffer() : undefined
-      if (buffer !== undefined && buffer.byteLength > 0) {
-        message.images = [{ name: ref.name, data: new Uint8Array(buffer), mimeType: 'image/jpeg' }]
+      const data = await this.downloadBytes(this.downloadUrl(ref))
+      if (data !== undefined && data.byteLength > 0) {
+        message.images = [{ name: ref.name, data, mimeType: 'image/jpeg' }]
       }
     } catch (error) {
       this.log(`图片下载失败（降级为纯文本）: ${(error as Error).message}`)
     }
+  }
+
+  /**
+   * 入站非图文件（message.document）：getFile → 下载字节填 files。
+   * 失败只降级为无附件（文本/caption 照常），不丢整条消息。
+   */
+  private async fillFiles(message: SemanticMessage, raw: TelegramMessage | undefined): Promise<void> {
+    const doc = raw?.document
+    if (doc?.file_id === undefined) return
+    const name = doc.file_name && doc.file_name !== '' ? doc.file_name : `telegram-${doc.file_id}`
+    try {
+      const ref = await this.resolveFileRef(doc.file_id, name)
+      const data = await this.downloadBytes(this.downloadUrl(ref))
+      if (data !== undefined && data.byteLength > 0) {
+        message.files = [{ name, data }]
+      } else {
+        this.log(`文件下载为空（降级为无附件）: ${name}`)
+      }
+    } catch (error) {
+      this.log(`文件下载失败（降级为无附件）: ${(error as Error).message}`)
+    }
+  }
+
+  /** 下载面：无 arrayBuffer 或空体时返回 undefined（调用方降级）。 */
+  private async downloadBytes(url: string): Promise<Uint8Array | undefined> {
+    const response = await this.fetchImpl(url)
+    const buffer = typeof response.arrayBuffer === 'function' ? await response.arrayBuffer() : undefined
+    return buffer === undefined ? undefined : new Uint8Array(buffer)
   }
 
   /** update.message → SemanticMessage；非会话类（channel_post 等）返回 undefined。 */
@@ -317,8 +349,13 @@ export class TelegramAdapter implements ChannelAdapter {
     }
   }
 
+  /**
+   * 出站文件：sendDocument multipart（同页表单带 chat_id）。
+   * 引擎已按 FILE_BUDGET 裁额，本渠道不再自设上限；语义同 call()：
+   * 网络/5xx/结果不明 = TelegramUncertainError（禁重发）；4xx/ok=false = TelegramApiError。
+   */
   async sendFile(address: ChatAddress, file: OutboundFile, signal?: AbortSignal): Promise<Receipt> {
-    const form = buildMultipart(file)
+    const form = buildMultipart({ chat_id: address.chatId }, file)
     let response: { ok: boolean; status: number; json(): Promise<unknown> }
     try {
       response = await this.fetchImpl(this.api('sendDocument'), {
@@ -328,13 +365,24 @@ export class TelegramAdapter implements ChannelAdapter {
         signal,
       })
     } catch (error) {
+      if ((error as Error).name === 'AbortError') throw error
       throw new TelegramUncertainError(`telegram sendDocument: 网络异常 ${(error as Error).message}`)
     }
-    if (response.status >= 500 || response.status >= TELEGRAM_ERROR_UNCERTAIN_STATUS) {
+    if (response.status >= TELEGRAM_ERROR_UNCERTAIN_STATUS) {
       throw new TelegramUncertainError(`telegram sendDocument: HTTP ${response.status}`)
     }
-    const body = (await response.json()) as { ok?: boolean; result?: TelegramMessageLike; description?: string }
-    if (body.ok !== true) throw new TelegramApiError(`telegram sendDocument: ${body.description ?? '未知错误'}`, '')
+    let body: { ok?: boolean; result?: TelegramMessageLike; description?: string } | undefined
+    try {
+      body = (await response.json()) as typeof body
+    } catch {
+      body = undefined
+    }
+    if (body === undefined) {
+      throw new TelegramUncertainError('telegram sendDocument: 回包不可解析（结果不明）')
+    }
+    if (response.status >= 400 || body.ok !== true) {
+      throw new TelegramApiError(`telegram sendDocument: ${body.description ?? '未知错误'}`, String(body.description ?? ''))
+    }
     return receipt(body.result)
   }
 
@@ -371,6 +419,13 @@ export class TelegramAdapter implements ChannelAdapter {
       name: 'long-poll',
       status: this.connected ? 'passed' : 'unverified',
       hint: this.connected ? `offset=${this.offset}` : '未连接',
+    })
+    // 文件面（sendDocument / getFile）与主 API 同 token，无额外权限档位；
+    // 但未发起过真实文件调用 = 不谎报 passed。
+    checks.push({
+      name: 'file-surface',
+      status: 'unverified',
+      hint: 'sendDocument/getFile 与主 API 同 token（无额外权限）；首次文件收发时实证',
     })
     return checks
   }
@@ -428,16 +483,35 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-/** 极简 multipart（无第三方依赖；仅 sendDocument 用）。 */
-function buildMultipart(file: OutboundFile): { body: Uint8Array; contentType: string } {
+/**
+ * 极简 multipart（无第三方依赖；仅 sendDocument 用）。
+ * fields 先置（chat_id 等为必需项，Bot API multipart 允同页文本字段），
+ * 文件部分字段名固定 document。
+ */
+function buildMultipart(
+  fields: Record<string, string>,
+  file: OutboundFile,
+): { body: Uint8Array; contentType: string } {
   const boundary = `----imu${Date.now().toString(16)}`
-  const head = Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${file.name.replace(/"/g, '')}"\r\n` +
-      `Content-Type: ${file.mimeType ?? 'application/octet-stream'}\r\n\r\n`,
-    'utf8',
+  const parts: Buffer[] = []
+  for (const [name, value] of Object.entries(fields)) {
+    parts.push(
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
+        'utf8',
+      ),
+    )
+  }
+  parts.push(
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${file.name.replace(/"/g, '')}"\r\n` +
+        `Content-Type: ${file.mimeType ?? 'application/octet-stream'}\r\n\r\n`,
+      'utf8',
+    ),
   )
-  const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8')
-  return { body: Buffer.concat([head, Buffer.from(file.data), tail]), contentType: `multipart/form-data; boundary=${boundary}` }
+  parts.push(Buffer.from(file.data))
+  parts.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'))
+  return { body: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` }
 }
 
 /** 工厂挂 registry：懒加载（本文件被动态 import 时 SDK 面只有全局 fetch）。 */
@@ -473,4 +547,5 @@ interface TelegramMessage extends TelegramMessageLike {
   is_topic_message?: boolean
   message_thread_id?: number
   photo?: Array<{ file_id: string; file_size?: number; width?: number; height?: number }>
+  document?: { file_id: string; file_name?: string; mime_type?: string; file_size?: number }
 }

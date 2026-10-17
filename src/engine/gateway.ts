@@ -10,6 +10,8 @@
  *   `assistant/message` 每 step 落定一次（非 token 级增量，投递粒度由宿主
  *   事件协议决定），`turn/end{reason}` 收轮；订阅先于 prompt（防首事件丢失）。
  */
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { CordisLike, LoggerLike } from '../types.js'
 import type { UnionCapabilities } from '../host-compat/services.js'
 import type { SessionApi } from '../host-compat/session-api.js'
@@ -18,6 +20,12 @@ import { ChatRouter, chatKey, shouldRespondToGroup, type Binding, type ChatAddre
 import { chatOverrideKey, isCommandName, parseCommand, runCommand, type CommandDeps } from './commands.js'
 import { InteractionBroker, type ChatSessionRef } from './interactions.js'
 import { prepareImages, toPromptParts, visionSupported } from './media.js'
+import { prepareFiles, filesUnavailableNote, fileOutUnavailableNote } from './files.js'
+import { filePromptPart, type UploadsCompat } from '../host-compat/uploads-compat.js'
+import { extractDeliverables, type DeliverableRef, type DeliverablesCompat } from '../host-compat/deliverables-compat.js'
+import { DeliveryLog, MAX_RETRY, type DeliveryStatus } from './delivery-log.js'
+import { FragmentBuffer } from './fragments.js'
+import { zipSync } from './zip.js'
 import type { ApprovalOutcome, ApprovalRequest, QuestionAnswer, QuestionRequest } from '../host-compat/interaction.js'
 import type { ChannelAdapter, Receipt, ReplyStream, SemanticMessage } from '../channels/types.js'
 
@@ -39,6 +47,16 @@ export interface EngineDeps {
   approvalTimeoutMs?: number
   /** 凭据载体形态（/status 展示：service=宿主凭据库 / file=文件 vault）。 */
   vaultKind?: string
+  // —— M2 能力包（T2.4/T2.5/T2.8/T2.9；缺位=相应命令/链路降级，E1）——
+  deliveryLog?: DeliveryLog
+  uploads?: UploadsCompat
+  deliverables?: DeliverablesCompat
+  fragments?: FragmentBuffer
+  /** 私聊入站观察（主动投递 T2.6 双向同步：admitted 前也要喂，
+   *  白名单外的私聊正是 syncBack 候选来源）。 */
+  onInboundDm?: (accountId: string, message: SemanticMessage) => void
+  /** /export 渠道文件面缺位时的本地落盘目录。 */
+  exportDir?: string
 }
 
 interface TurnState {
@@ -100,6 +118,16 @@ export class ImUnionEngine {
   private workspaceOverrides = new Map<string, string>()
   /** 宿主会话 id → 最近发起任务的聊天（审批/提问的回路由表，T1.9）。 */
   private sessionChats = new Map<string, ChatSessionRef>()
+  /** 静音聊天（/mute，T2.8）：admitted 后、命令前静默丢弃。 */
+  private muted = new Set<string>()
+  /** /goal 目标备忘（chatKey → 文本，IM 侧存储不碰宿主）。 */
+  private goals = new Map<string, string>()
+  /** 投递 seq → 原文全文（/delivery retry 补发用；重启即清，摘要在盘）。 */
+  private outbox = new Map<number, string>()
+  /** 碎片合并的上一次私聊消息上下文（submit 回调重建 SemanticMessage）。 */
+  private fragmentLast = new Map<string, { accountId: string; message: SemanticMessage }>()
+  /** 超时后的迟到结果订阅（T2.9，每聊天一个，新回合覆盖旧的）。 */
+  private lateFollows = new Map<string, { dispose: () => void }>()
   private readonly broker: InteractionBroker
   private readonly log: LoggerLike
 
@@ -131,6 +159,13 @@ export class ImUnionEngine {
     for (const [sid, ref] of [...this.sessionChats]) {
       if (ref.accountId === accountId) this.sessionChats.delete(sid)
     }
+    for (const [key, last] of [...this.fragmentLast]) {
+      if (last.accountId === accountId) {
+        this.fragmentLast.delete(key)
+        this.deps.fragments?.drop(key)
+        this.lateFollows.get(key)?.dispose()
+      }
+    }
   }
 
   /** 审批接管入口（index.ts 传给 attachInteraction）。 */
@@ -160,7 +195,11 @@ export class ImUnionEngine {
   /** 入站主流程：命令面板（T1.1）先分派，非命令入会话队列。 */
   async handleInbound(accountId: string, message: SemanticMessage): Promise<void> {
     const adapter = this.accounts.get(accountId)?.adapter
-    if (adapter === undefined || !this.admitted(accountId, message)) return
+    if (adapter === undefined) return
+    // 主动投递双向同步观察（T2.6）：必须在 admitted 之前——白名单外的私聊
+    // 正是 syncBack 候选来源；只喂 dm。
+    if (message.address.kind === 'dm') this.deps.onInboundDm?.(accountId, message)
+    if (!this.admitted(accountId, message)) return
     // 审批/提问回复优先消费（发起者限定在 broker 内裁决，D5）。
     if (this.broker.consumeInbound(accountId, message.address, message.userId, message.text)) return
     const key = `${message.address.channel}:${message.address.chatId}`
@@ -168,11 +207,25 @@ export class ImUnionEngine {
     const text = message.text.trim()
     const command = parseCommand(text)
     if (command !== undefined && isCommandName(command.name)) {
+      // 命令在静音判定之前：静音期必须还能 /mute 解除（否则永久静默）。
       // resolve 对未绑定聊天登记的隐式绑定与 runTurn 惰性解析同值，无额外副作用。
       const sessionId = this.deps.router.resolve(message.address).sessionId
       const reply = await runCommand(this.commandDeps(), message.address, sessionId, command)
       if (reply !== '') await adapter.reply(message.address, reply)
       return
+    }
+    // 静音聊天：非命令消息静默丢弃（T2.8）。
+    if (this.muted.has(chatKey(message.address))) return
+
+    // 碎片续写前置（T2.8，仅私聊；群聊多用户串碎片=事故）。
+    if (this.deps.fragments !== undefined && message.address.kind === 'dm') {
+      const verdict = await this.deps.fragments.accept(chatKey(message.address), message.text, true)
+      if (verdict.handled) {
+        this.fragmentLast.set(chatKey(message.address), { accountId, message })
+        if (verdict.action === 'empty') await adapter.reply(message.address, '没有待提交的碎片。')
+        else if (verdict.action === 'held') await adapter.reply(message.address, `🧩 已挂起 ${verdict.count} 段：以 .. 结尾继续，单独发 !! 立即提交。`)
+        return
+      }
     }
 
     // 每聊天串行：运行中则排队。
@@ -202,6 +255,23 @@ export class ImUnionEngine {
       workspaceOverrides: this.workspaceOverrides,
       vaultKind: this.deps.vaultKind ?? 'file',
       logWarn: (msg) => this.log.warn(msg),
+      deliveryLog: this.deps.deliveryLog,
+      retryDelivery: (seq) => this.retryDelivery(seq),
+      exportChat: (address, sessionId) => this.exportChat(address, sessionId),
+      queueInfo: (address) => {
+        const state = this.turns.get(`${address.channel}:${address.chatId}`)
+        return { running: state?.running === true, pending: state?.queue.length ?? 0 }
+      },
+      toggleMute: (address) => {
+        const key = chatKey(address)
+        if (this.muted.has(key)) {
+          this.muted.delete(key)
+          return '本聊天已恢复接收。'
+        }
+        this.muted.add(key)
+        return '本聊天已静音：宿主不再处理你的消息（/mute 再次切换恢复）；投递日志与网页端不受影响。'
+      },
+      goals: this.goals,
     }
   }
 
@@ -266,6 +336,34 @@ export class ImUnionEngine {
       if (prepared.notes.length > 0) await adapter.reply(message.address, prepared.notes.join('\n'))
       promptInput = toPromptParts(message.text, prepared)
     }
+    // 文件输入（T2.4）：上传面在位→{type:'file',receiptId} parts；
+    // 缺位→纯文本回退（文件名/大小清单进 prompt，不假装内容已可读）。
+    const inboundFiles = message.files ?? []
+    if (inboundFiles.length > 0) {
+      const preparedFiles = prepareFiles(inboundFiles.map((f) => ({ name: f.name, data: f.data })))
+      if (preparedFiles.notes.length > 0) await adapter.reply(message.address, preparedFiles.notes.join('\n'))
+      const fileParts: Array<Record<string, unknown>> = []
+      const degraded: Array<{ name: string; data: Uint8Array }> = []
+      const uploadsApi = this.deps.uploads
+      for (const file of preparedFiles.accepted) {
+        if (uploadsApi !== undefined && uploadsApi.mode !== 'none') {
+          const result = await uploadsApi.upload(sessionId, file)
+          if (result.receiptId !== undefined) fileParts.push(filePromptPart(result.receiptId))
+          else degraded.push(file)
+        } else {
+          degraded.push(file)
+        }
+      }
+      const baseParts: unknown[] =
+        typeof promptInput === 'string' ? [{ type: 'text', text: promptInput }] : promptInput
+      if (degraded.length > 0) {
+        const note = filesUnavailableNote(degraded)
+        const head = baseParts[0] as { type?: string; text?: string } | undefined
+        if (head !== undefined && head.type === 'text') head.text = `${head.text ?? ''}\n\n${note}`.trim()
+        else baseParts.unshift({ type: 'text', text: note })
+      }
+      if (fileParts.length > 0 || degraded.length > 0) promptInput = [...baseParts, ...fileParts]
+    }
     let stream: ReplyStream | undefined
     let streamBroken = false
     let progressChain: Promise<void> = Promise.resolve()
@@ -294,9 +392,12 @@ export class ImUnionEngine {
     }
 
     let unsubscribe: (() => void) | undefined
+    const pendingDeliverables: DeliverableRef[] = []
+    let lastTurn: number | undefined
     try {
       unsubscribe = sessionApi.follow(sessionId, (raw) => {
         const event = raw as SessionEventLike
+        if (typeof event?.data?.turn === 'number') lastTurn = event.data.turn
         if (event?.type === 'assistant/message') {
           const text = extractAssistantText(event)
           if (text !== '') {
@@ -304,6 +405,9 @@ export class ImUnionEngine {
             segments.push(text)
             if (!streamBroken) pushProgress()
           }
+        } else if (event?.type === 'deliverables/presented') {
+          // 产物回传源（T2.4）：present 事件给工作区路径，收轮后再读字节送渠道。
+          for (const ref of extractDeliverables(event)) pendingDeliverables.push(ref)
         } else if (event?.type === 'tool/call') {
           const toolName = String(event.data?.name ?? '工具')
           noteProgress(`🔧 正在执行：${toolName}`)
@@ -346,21 +450,32 @@ export class ImUnionEngine {
           : ''
       const finalText = (snapshot() + suffix).trim() === '' ? '本轮无可见输出。' : (snapshot() + suffix).trim()
       const parts = splitText(finalText, adapter.caps.maxMessageLength ?? 0)
+      const meta: DeliverMeta = { accountId, sessionId, turn: lastTurn }
 
       if (canStream && !streamBroken && stream !== undefined) {
         const receipt = await stream.finish(parts[0]).catch((error: Error) => {
           this.log.warn(`流式 finish 失败，降级补发: ${error.message}`)
           return undefined
         })
-        if (receipt !== undefined) this.noteUncertain(receipt, '流式收尾')
+        if (receipt !== undefined) {
+          this.noteUncertain(receipt, '流式收尾')
+          this.recordDelivery(message, parts[0], receipt.uncertain ? 'uncertain' : 'delivered', meta)
+        }
         if (receipt === undefined) {
-          await this.deliverParts(adapter, message, parts)
+          await this.deliverParts(adapter, message, parts, meta)
         } else {
-          for (const extra of parts.slice(1)) await this.deliverOne(adapter, message, extra)
+          for (const extra of parts.slice(1)) await this.deliverOne(adapter, message, extra, meta)
         }
       } else {
-        await this.deliverParts(adapter, message, parts)
+        await this.deliverParts(adapter, message, parts, meta)
       }
+      // 产物回传（T2.4）：正文投递完再送文件，缺面退文字清单。
+      if (pendingDeliverables.length > 0) {
+        await this.deliverablesToChannel(adapter, message, accountId, sessionId, pendingDeliverables)
+      }
+      // 超时迟到补投（T2.9）：本轮以 timeout 收轮——保留订阅直到真 turn/end，
+      // 迟到结果一次性补投（dedupKey 防重复投递）。
+      if (endReason === 'timeout') this.startLateHarvest(adapter, message, accountId, sessionId)
     } catch (error) {
       if (error instanceof UnsupportedError) {
         await adapter.reply(message.address, error.message)
@@ -389,14 +504,221 @@ export class ImUnionEngine {
     if (receipt.uncertain) this.log.warn(`${what} 投递结果不明，不自动重发（D7）`)
   }
 
-  private async deliverParts(adapter: ChannelAdapter, message: SemanticMessage, parts: string[]): Promise<void> {
-    for (const part of parts) await this.deliverOne(adapter, message, part)
+  private async deliverParts(adapter: ChannelAdapter, message: SemanticMessage, parts: string[], meta?: DeliverMeta): Promise<void> {
+    for (const part of parts) await this.deliverOne(adapter, message, part, meta)
   }
 
-  private async deliverOne(adapter: ChannelAdapter, message: SemanticMessage, text: string): Promise<void> {
-    const receipt = await adapter.reply(message.address, text)
-    this.noteUncertain(receipt, adapter.id)
+  private async deliverOne(adapter: ChannelAdapter, message: SemanticMessage, text: string, meta?: DeliverMeta): Promise<void> {
+    try {
+      const receipt = await adapter.reply(message.address, text)
+      this.noteUncertain(receipt, adapter.id)
+      this.recordDelivery(message, text, receipt.uncertain ? 'uncertain' : 'delivered', meta)
+    } catch (error) {
+      // 确定性失败入可补发集（≤3 次）；抛出给调用方保持原语义。
+      this.recordDelivery(message, text, 'failed', { ...meta, error: 'send-error' })
+      throw error
+    }
   }
+
+  /** 投递记录（T2.5）：未启用 deliveryLog 时零开销；failed 原文进内存 outbox。 */
+  private recordDelivery(
+    message: SemanticMessage,
+    text: string,
+    status: DeliveryStatus,
+    opts?: DeliverMeta,
+  ): void {
+    const log = this.deps.deliveryLog
+    if (log === undefined) return
+    const rec = log.append({
+      direction: 'out',
+      accountId: opts?.accountId,
+      channel: message.address.channel,
+      kind: message.address.kind,
+      chatId: message.address.chatId,
+      sessionId: opts?.sessionId,
+      turn: opts?.turn,
+      status,
+      summary: text,
+      ...(opts?.dedupKey !== undefined ? { dedupKey: opts.dedupKey } : {}),
+      ...(opts?.error !== undefined ? { error: opts.error } : {}),
+    })
+    if (status === 'failed') this.outbox.set(rec.seq, text)
+  }
+
+  /** /delivery retry：确定性失败且 <MAX_RETRY 才可补；uncertain 绝不补（D7）。 */
+  async retryDelivery(seq: number): Promise<string> {
+    const log = this.deps.deliveryLog
+    if (log === undefined) return '投递日志未启用，无法补发。'
+    const rec = log.get(seq)
+    if (rec === undefined) return `未找到投递记录 #${seq}（7 天/1000 条窗口外）。`
+    if (rec.status !== 'failed') return `#${seq} 当前状态 ${rec.status}；仅确定性失败可补发（D7）。`
+    if (rec.attempts >= MAX_RETRY) return `#${seq} 已达补发上限（${MAX_RETRY} 次）。`
+    const entry = rec.accountId !== undefined ? this.accounts.get(rec.accountId) : undefined
+    if (entry === undefined) return `#${seq} 对应账号已注销/未在本机，无法补发。`
+    if (rec.chatId === undefined) return `#${seq} 缺少目标聊天，无法补发。`
+    const text = this.outbox.get(seq)
+    if (text === undefined) return `#${seq} 原文不在本机内存（插件重启后仅存摘要），无法补发全文。`
+    const address: ChatAddress = { channel: rec.channel, kind: rec.kind ?? 'dm', chatId: rec.chatId }
+    try {
+      const receipt = await entry.adapter.reply(address, text)
+      const attempts = rec.attempts + 1
+      if (receipt.uncertain) {
+        log.mark(seq, { status: 'uncertain', attempts })
+        return `#${seq} 补发结果不明，已停止后续补发（D7）。`
+      }
+      log.mark(seq, { status: 'delivered', attempts })
+      return `#${seq} 补发成功。`
+    } catch (error) {
+      log.mark(seq, { attempts: rec.attempts + 1, error: 'send-error' })
+      this.log.warn(`补发 #${seq} 失败: ${(error as Error).message}`)
+      return `#${seq} 补发失败（已计数 ${rec.attempts + 1}/${MAX_RETRY}）。`
+    }
+  }
+
+  /** 产物文件出站（T2.4 后半）：读面+fileOut 双在位才送文件，否则文字替代清单。 */
+  private async deliverablesToChannel(
+    adapter: ChannelAdapter,
+    message: SemanticMessage,
+    accountId: string,
+    sessionId: string,
+    refs: DeliverableRef[],
+  ): Promise<void> {
+    const compat = this.deps.deliverables
+    const canSend = compat?.mode === 'workspace' && adapter.caps.fileOut === true && typeof adapter.sendFile === 'function'
+    if (!canSend) {
+      const note = fileOutUnavailableNote(refs.map((r) => ({ name: r.name })))
+      if (note !== '') await adapter.reply(message.address, note)
+      return
+    }
+    const workspace = this.workspaceOverrides.get(chatOverrideKey(message.address))
+    for (const ref of refs) {
+      const bytes = await compat!.read(sessionId, ref, workspace)
+      if (bytes === undefined) {
+        await adapter.reply(message.address, `产物「${ref.name}」读取失败，未回传（请在网页端查看）。`)
+        continue
+      }
+      try {
+        const receipt = await adapter.sendFile!(message.address, { name: bytes.name, data: bytes.data, mimeType: 'application/octet-stream' })
+        this.noteUncertain(receipt, '产物回传')
+        this.recordDelivery(message, `file:${bytes.name}`, receipt.uncertain ? 'uncertain' : 'delivered', { accountId, sessionId })
+      } catch (error) {
+        this.log.warn(`产物回传失败（${ref.name}）: ${(error as Error).message}`)
+        await adapter.reply(message.address, `产物回传失败：${bytes.name}（请在网页端下载）`)
+      }
+    }
+  }
+
+  /** 超时后的迟到结果收割（T2.9，防重复投递：dedupKey+seen）。 */
+  private startLateHarvest(adapter: ChannelAdapter, message: SemanticMessage, accountId: string, sessionId: string): void {
+    const key = chatKey(message.address)
+    this.lateFollows.get(key)?.dispose()
+    const graceMs = this.deps.turnTimeoutMs ?? 10 * 60 * 1000
+    const collected: string[] = []
+    let disposed = false
+    let unsubscribe: (() => void) | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const dispose = (): void => {
+      if (disposed) return
+      disposed = true
+      if (timer !== undefined) clearTimeout(timer)
+      if (this.lateFollows.get(key)?.dispose === dispose) this.lateFollows.delete(key)
+      try {
+        unsubscribe?.()
+      } catch {
+        // 退订失败留给宿主生命周期。
+      }
+    }
+    try {
+      unsubscribe = this.deps.sessionApi.follow(sessionId, (raw) => {
+        const event = raw as SessionEventLike
+        if (event?.type === 'assistant/message') {
+          const text = extractAssistantText(event)
+          if (text !== '') collected.push(text)
+        } else if (event?.type === 'turn/end') {
+          dispose()
+          const text = collected.join('\n\n').trim()
+          if (text !== '') void this.deliverLateResult(adapter, message, accountId, sessionId, text)
+        }
+      })
+    } catch {
+      return // follow 面缺位：无迟到收割，如实放弃不伪装。
+    }
+    timer = setTimeout(dispose, graceMs)
+    this.lateFollows.set(key, { dispose })
+  }
+
+  private async deliverLateResult(
+    adapter: ChannelAdapter,
+    message: SemanticMessage,
+    accountId: string,
+    sessionId: string,
+    text: string,
+  ): Promise<void> {
+    const dedupKey = `${sessionId}:late`
+    if (this.deps.deliveryLog?.seen(dedupKey) === true) return
+    const parts = splitText(`📦 迟到的任务结果：\n\n${text}`, adapter.caps.maxMessageLength ?? 0)
+    for (const part of parts) {
+      try {
+        await this.deliverOne(adapter, message, part, { accountId, sessionId, dedupKey })
+      } catch {
+        return
+      }
+    }
+  }
+
+  /** 碎片合并提交回调（index.ts 接线 FragmentBuffer.submit）：重建上下文走正常回合。 */
+  submitFragment(key: string, text: string): void {
+    const last = this.fragmentLast.get(key)
+    if (last === undefined) return
+    void this.handleInbound(last.accountId, { ...last.message, text })
+  }
+
+  /** /export：本聊天投递记录打 ZIP，渠道文件面可用则发送，缺位落盘导出目录。 */
+  private async exportChat(address: ChatAddress, sessionId: string): Promise<string> {
+    const log = this.deps.deliveryLog
+    if (log === undefined) return '投递日志未启用，无内容可导出。'
+    const rows = log.recent(500, { chatId: address.chatId, channel: address.channel })
+    if (rows.length === 0) return '本聊天暂无投递记录可导出。'
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const fileName = `imu-export-${address.channel}-${address.chatId.replace(/[^\w-]/g, '_')}-${stamp}.zip`
+    const json = JSON.stringify({ sessionId, exportedAt: new Date().toISOString(), records: rows }, null, 2)
+    const bytes = zipSync([
+      { name: 'deliveries.json', data: json },
+      { name: 'README.txt', data: 'dsh-im-union 投递记录导出：仅摘要/状态/计数，零正文全文零凭据。\n' },
+    ])
+    // 适配器选择：按记录里的 accountId，缺退本聊天已登记账号（E3 同渠道歧义时取最近登记）。
+    let adapter: ChannelAdapter | undefined
+    for (const [accountId, entry] of this.accounts) {
+      if (entry.adapter.id !== address.channel) continue
+      adapter = entry.adapter
+      if (rows[0]?.accountId === accountId) break
+    }
+    if (adapter !== undefined && adapter.caps.fileOut === true && typeof adapter.sendFile === 'function') {
+      try {
+        const receipt = await adapter.sendFile(address, { name: fileName, data: bytes, mimeType: 'application/zip' })
+        this.noteUncertain(receipt, '导出投递')
+        return `导出完成（${rows.length} 条）：${fileName}`
+      } catch (error) {
+        this.log.warn(`导出 sendFile 失败: ${(error as Error).message}`)
+      }
+    }
+    if (this.deps.exportDir !== undefined) {
+      mkdirSync(this.deps.exportDir, { recursive: true })
+      const path = join(this.deps.exportDir, fileName)
+      writeFileSync(path, bytes)
+      return `渠道文件面不可用，ZIP 已写到本机：${path}`
+    }
+    return '渠道文件面不可用且未配置导出目录，导出中止。'
+  }
+}
+
+/** 投递记录元信息（deliverOne/recordDelivery 透传）。 */
+interface DeliverMeta {
+  accountId?: string
+  sessionId?: string
+  turn?: number
+  dedupKey?: string
+  error?: string
 }
 
 /** 给渠道层用的地址构造便利函数。 */

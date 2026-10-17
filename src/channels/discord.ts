@@ -14,11 +14,16 @@
  *   kind 判定 = 有无 guild_id（DM 无 guild）。
  * - 群触发（红线 D6）：只认 mentions 显式 @ 本机器人。
  * - Receipt：网络/5xx = uncertain 禁重发；4xx 确定性抛错。
+ * - 文件面（T2.4 渠道侧）：出站 POST /channels/{id}/messages 的 multipart/form-data
+ *   （payload_json + files[0]，字段名为 Discord 公开约定）；入站 attachments 非图项
+ *   按 content_type 判型进 SemanticMessage.files（图仍走 images）。
+ *   本渠道不自设限额：张数/体积上限归引擎 FILE_BUDGET（20 MiB / ≤4 个）。
  *
  * 运行时依赖零：Node≥22 全局 fetch/WebSocket/AbortController（宿主 engines 已锁），
  * 测试全量注入 fetchImpl/WebSocketImpl。
  */
 import type { ChatAddress } from '../engine/router.js'
+import { FILE_BUDGET } from '../engine/files.js'
 import type {
   ChannelAdapter,
   ChannelCaps,
@@ -57,7 +62,11 @@ interface FetchResponseLike {
   json(): Promise<unknown>
   arrayBuffer?(): Promise<ArrayBuffer>
 }
-type FetchLike = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<FetchResponseLike>
+type FetchBody = string | Uint8Array
+type FetchLike = (
+  url: string,
+  init?: { method?: string; headers?: Record<string, string>; body?: FetchBody; signal?: AbortSignal },
+) => Promise<FetchResponseLike>
 
 interface WSLike {
   send(data: string): void
@@ -309,29 +318,41 @@ export class DiscordAdapter implements ChannelAdapter {
     return semantic
   }
 
-  /** 图片附件（content_type 判图）：url 优先（公开 CDN），proxy_url 回退；上限 4 张。 */
+  /**
+   * 附件入站（T1.7 图 / T2.4 非图文件）：content_type 判型。
+   * 图→images（上限 4 张）；其余→files（上限 FILE_BUDGET.maxCount，
+   * 声明体积超单文件上限的不拉）；单件下载失败只跳过该件，不丢整条消息。
+   */
   private async fillAttachments(message: SemanticMessage, raw: DiscordMessageLike | undefined): Promise<void> {
     const attachments = raw?.attachments
     if (!Array.isArray(attachments) || attachments.length === 0) return
     const images: Array<{ name: string; data: Uint8Array; mimeType: string }> = []
+    const files: Array<{ name: string; data: Uint8Array }> = []
     for (const attachment of attachments) {
-      if (images.length >= 4) break
       const contentType = typeof attachment?.content_type === 'string' ? attachment.content_type : ''
-      if (!contentType.startsWith('image/')) continue
+      const isImage = contentType.startsWith('image/')
+      if (isImage ? images.length >= 4 : files.length >= FILE_BUDGET.maxCount) continue
       const url =
         typeof attachment?.url === 'string' ? attachment.url : typeof attachment?.proxy_url === 'string' ? attachment.proxy_url : undefined
       if (url === undefined) continue
+      const name = String(attachment?.filename ?? (isImage ? 'image' : 'file'))
+      if (!isImage && typeof attachment?.size === 'number' && attachment.size > FILE_BUDGET.perFileMaxBytes) {
+        this.log(`文件超过 20 MiB 上限，未下载：${name}`)
+        continue
+      }
       try {
         const response = await this.fetchImpl(url)
         const buffer = typeof response.arrayBuffer === 'function' ? await response.arrayBuffer() : undefined
-        if (buffer !== undefined && buffer.byteLength > 0) {
-          images.push({ name: String(attachment?.filename ?? 'image'), data: new Uint8Array(buffer), mimeType: contentType })
-        }
+        if (buffer === undefined || buffer.byteLength === 0) continue
+        const data = new Uint8Array(buffer)
+        if (isImage) images.push({ name, data, mimeType: contentType })
+        else files.push({ name, data })
       } catch (error) {
-        this.log(`图片下载失败（降级跳过）: ${(error as Error).message}`)
+        this.log(`附件下载失败（降级跳过）: ${(error as Error).message}`)
       }
     }
     if (images.length > 0) message.images = images
+    if (files.length > 0) message.files = files
   }
 
   // —— 出站 ——————————————————————————————————————————
@@ -439,46 +460,81 @@ export class DiscordAdapter implements ChannelAdapter {
       status: this.connected ? 'passed' : 'unverified',
       hint: this.connected ? `seq=${this.lastSeq ?? 'n/a'}` : '未连接',
     })
+    // 文件面依赖频道「Attach Files」权限（与 token 不同层），本层无法事前实证。
+    checks.push({
+      name: 'file-surface',
+      status: 'unverified',
+      hint: '出站上传需目标频道 Attach Files 权限；首次文件发送时由 4xx 判定',
+    })
     return checks
   }
 
-  /** 文件回传：multipart（payload_json + files[0]），无 FormData 面时明确抛（不静默）。 */
+  /**
+   * 文件回传：multipart/form-data（payload_json + files[0]）——走可注入 fetch 面。
+   * 限额不在本层重定（引擎 FILE_BUDGET 已裁）；语义同 rest()：
+   * 网络/5xx = DiscordUncertainError（禁重发）；4xx = DiscordApiError。
+   */
   async sendFile(address: ChatAddress, file: OutboundFile, signal?: AbortSignal): Promise<Receipt> {
-    const FormDataCtor = (globalThis as { FormData?: typeof FormData }).FormData
-    const BlobCtor = (globalThis as { Blob?: typeof Blob }).Blob
-    if (typeof globalThis.fetch !== 'function' || FormDataCtor === undefined || BlobCtor === undefined) {
-      throw new Error('discord sendFile: 宿主运行时缺 fetch/FormData/Blob 面')
-    }
-    const form = new FormDataCtor()
-    form.append(
-      'payload_json',
-      JSON.stringify({ content: file.name, allowed_mentions: { parse: [] } }),
+    const boundary = `----imu${Date.now().toString(16)}`
+    const payload = JSON.stringify({ content: file.name, allowed_mentions: { parse: [] } })
+    const body = buildMultipart(
+      [{ name: 'payload_json', value: payload }],
+      { field: 'files[0]', filename: file.name, mimeType: file.mimeType ?? 'application/octet-stream', data: file.data },
+      boundary,
     )
-    form.append('files[0]', new BlobCtor([file.data], { type: file.mimeType ?? 'application/octet-stream' }), file.name)
+    const path = `/channels/${address.chatId}/messages`
     let response: FetchResponseLike
     try {
-      response = await (globalThis.fetch as unknown as (u: string, i?: unknown) => Promise<FetchResponseLike>)(
-        `${this.apiBase}/channels/${address.chatId}/messages`,
-        {
-          method: 'POST',
-          headers: { authorization: `Bot ${this.token}` },
-          body: form,
-          signal: signal ?? this.closeController.signal,
-        },
-      )
+      response = await this.fetchImpl(`${this.apiBase}${path}`, {
+        method: 'POST',
+        headers: { authorization: `Bot ${this.token}`, 'content-type': `multipart/form-data; boundary=${boundary}` },
+        body,
+        signal: signal ?? this.closeController.signal,
+      })
     } catch (error) {
-      throw new DiscordUncertainError(`discord sendFile: 网络异常 ${(error as Error).message}`)
+      if ((error as Error).name === 'AbortError') throw error
+      throw new DiscordUncertainError(`discord sendFile POST ${path}: 网络异常 ${(error as Error).message}`)
     }
-    if (response.status >= 500) throw new DiscordUncertainError(`discord sendFile: HTTP ${response.status}`)
-    const payload = (await response.json().catch(() => undefined)) as { id?: string; message?: string } | undefined
-    if (!response.ok) throw new DiscordApiError(`discord sendFile: ${payload?.message ?? '被拒'}`, response.status)
-    return typeof payload?.id === 'string' ? { platformMessageId: payload.id, uncertain: false } : { uncertain: false }
+    if (response.status >= 500) throw new DiscordUncertainError(`discord sendFile POST ${path}: HTTP ${response.status}`)
+    const created = (await response.json().catch(() => undefined)) as { id?: string; message?: string } | undefined
+    if (created === undefined) {
+      throw new DiscordUncertainError(`discord sendFile POST ${path}: 回包不可解析（结果不明）`)
+    }
+    if (!response.ok) throw new DiscordApiError(`discord sendFile: ${created.message ?? `HTTP ${response.status}`}`, response.status)
+    return typeof created.id === 'string' ? { platformMessageId: created.id, uncertain: false } : { uncertain: false }
   }
 }
 
 function capLength(text: string): string {
   if (text.length <= DISCORD_MAX_MESSAGE) return text
   return `${text.slice(0, DISCORD_MAX_MESSAGE - 1)}…`
+}
+
+/** 极简 multipart（零依赖）：先文本字段，后文件部分。 */
+function buildMultipart(
+  fields: Array<{ name: string; value: string }>,
+  file: { field: string; filename: string; mimeType: string; data: Uint8Array },
+  boundary: string,
+): Uint8Array {
+  const parts: Buffer[] = []
+  for (const field of fields) {
+    parts.push(
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${field.name}"\r\n\r\n${field.value}\r\n`,
+        'utf8',
+      ),
+    )
+  }
+  parts.push(
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${file.field}"; filename="${file.filename.replace(/"/g, '')}"\r\n` +
+        `Content-Type: ${file.mimeType}\r\n\r\n`,
+      'utf8',
+    ),
+  )
+  parts.push(Buffer.from(file.data))
+  parts.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'))
+  return Buffer.concat(parts)
 }
 
 /**
@@ -552,5 +608,5 @@ interface DiscordMessageLike {
   content?: string
   timestamp?: string
   mentions?: Array<{ id?: string } | undefined>
-  attachments?: Array<{ id?: string; filename?: string; content_type?: string; url?: string; proxy_url?: string }>
+  attachments?: Array<{ id?: string; filename?: string; content_type?: string; url?: string; proxy_url?: string; size?: number }>
 }

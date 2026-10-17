@@ -14,6 +14,7 @@ import type { ChatAddress, ChatRouter } from './router.js'
 import { chatKey } from './router.js'
 import type { ModelCatalogLike, SessionApi, SessionInfo } from '../host-compat/session-api.js'
 import type { UnionCapabilities } from '../host-compat/services.js'
+import type { DeliveryLog } from './delivery-log.js'
 
 export interface CommandDeps {
   sessionApi: SessionApi
@@ -26,6 +27,18 @@ export interface CommandDeps {
   workspaceOverrides: Map<string, string>
   vaultKind: string
   logWarn: (msg: string) => void
+  // —— M2 能力包挂点（缺位=命令降级文案，E1）——
+  deliveryLog?: DeliveryLog
+  /** /delivery retry：网关用原 adapter+outbox 补发，回用户文案。 */
+  retryDelivery?: (seq: number) => Promise<string>
+  /** /export：网关打 ZIP 并尽量 sendFile，回文案。 */
+  exportChat?: (address: ChatAddress, sessionId: string) => Promise<string>
+  /** /queue：本聊天队列快照（引擎态）。 */
+  queueInfo?: (address: ChatAddress) => { running: boolean; pending: number }
+  /** /mute：切换本聊天静音，回文案。 */
+  toggleMute?: (address: ChatAddress) => string
+  /** /goal：IM 侧目标备忘（chatKey → 文本）。 */
+  goals: Map<string, string>
 }
 
 export interface ParsedCommand {
@@ -49,6 +62,14 @@ const COMMAND_TABLE: Array<{ name: string; usage: string; desc: string }> = [
   { name: 'session', usage: '/session <id|序号>', desc: '绑定既有会话' },
   { name: 'workspaces', usage: '/workspaces', desc: '列出工作区' },
   { name: 'workspace', usage: '/workspace <路径|序号>', desc: '设定新会话工作区' },
+  { name: 'fork', usage: '/fork', desc: '分叉当前会话另起新会话' },
+  { name: 'rename', usage: '/rename <标题>', desc: '重命名当前会话' },
+  { name: 'queue', usage: '/queue', desc: '查看本聊天排队状态' },
+  { name: 'mute', usage: '/mute', desc: '静音/恢复本聊天（静音期只读）' },
+  { name: 'unbind', usage: '/unbind', desc: '解除会话绑定（不新开会话）' },
+  { name: 'goal', usage: '/goal <文本|->', desc: '设定/清除本聊天目标备忘' },
+  { name: 'delivery', usage: '/delivery [retry <序号>]', desc: '投递日志/补发失败项' },
+  { name: 'export', usage: '/export', desc: '导出本聊天投递记录 ZIP' },
 ]
 
 /** 行首 `/词` 才是命令；`/path` 之类文本不触发（群聊粘贴路径的误触面）。 */
@@ -223,6 +244,60 @@ export async function runCommand(
       deps.workspaceOverrides.set(key, command.arg)
       return `新会话将使用工作区：${command.arg}`
     }
+    case 'fork': {
+      try {
+        const newId = await sessionApi.fork(sessionId)
+        deps.router.bind(address, newId)
+        return `已分叉到新会话 ${shortId(newId)}，后续消息进新会话（历史在网页端查看）。`
+      } catch (error) {
+        return error instanceof Error && error.name === 'UnsupportedError'
+          ? '当前宿主不支持会话分叉，请在网页端分叉后用 /session 绑定。'
+          : '分叉失败，原因已记入本机日志。'
+      }
+    }
+    case 'rename': {
+      if (command.arg === '') return '用法：/rename <新标题>'
+      return (await sessionApi.rename(sessionId, command.arg))
+        ? `会话已重命名为：${command.arg}`
+        : '当前宿主不支持会话重命名。'
+    }
+    case 'queue': {
+      const info = deps.queueInfo?.(address)
+      if (info === undefined) return '队列面不可用。'
+      return `任务${info.running ? '进行中' : '空闲'}，排队 ${info.pending} 条。`
+    }
+    case 'mute':
+      return deps.toggleMute !== undefined ? deps.toggleMute(address) : '静音面不可用。'
+    case 'unbind':
+      deps.router.unbind(address)
+      return '已解除会话绑定（下一条消息惰性新建会话；与 /new 同机制，不归档旧会话）。'
+    case 'goal': {
+      const key = chatKey(address)
+      if (command.arg === '') return deps.goals.get(key) !== undefined ? `当前目标：${deps.goals.get(key)}` : '未设定目标（/goal <文本> 设定，/goal - 清除）。'
+      if (command.arg === '-') {
+        deps.goals.delete(key)
+        return '已清除目标备忘。'
+      }
+      deps.goals.set(key, command.arg)
+      return `目标已记录：${command.arg}`
+    }
+    case 'delivery': {
+      const retry = /^retry\s+(\d+)$/i.exec(command.arg)
+      if (retry !== null) {
+        if (deps.retryDelivery === undefined) return '投递日志未启用，无法补发。'
+        return await deps.retryDelivery(Number(retry[1]))
+      }
+      if (deps.deliveryLog === undefined) return '投递日志未启用（本机状态目录磁盘/配置异常时降级）。'
+      const rows = deps.deliveryLog.recent(10, { chatId: address.chatId, channel: address.channel })
+      if (rows.length === 0) return '本聊天暂无投递记录（7 天内）。'
+      return [
+        '最近投递（/delivery retry <序号> 补发确定性失败项）：',
+        ...rows.map((r) => `#${r.seq} [${r.status}] ×${r.attempts} ${r.summary}`),
+      ].join('\n')
+    }
+    case 'export':
+      if (deps.exportChat === undefined) return '导出面未启用。'
+      return await deps.exportChat(address, sessionId)
     default:
       return `未知命令 /${command.name}（/help 看可用命令）`
   }

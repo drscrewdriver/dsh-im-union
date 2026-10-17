@@ -53,6 +53,7 @@ import type {
   ChannelCaps,
   ChannelDiagnosisCheck,
   MessageListener,
+  OutboundFile,
   Receipt,
   SemanticMessage,
 } from './types.js'
@@ -64,6 +65,22 @@ export const WECOM_APP_MAX_MESSAGE = 600
 const TOKEN_REFRESH_SKEW_MS = 300_000
 /** text 内容协议硬限（utf-8 字节）。 */
 const TEXT_CONTENT_MAX_BYTES = 2048
+/** 上传临时素材硬限（20MB，等于引擎 FILE_BUDGET 单文件上限，不自设更大）。 */
+const MEDIA_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+
+/** multipart/form-data 手搭（零依赖）：字段名固定 media（协议名）。 */
+function buildMediaMultipart(boundary: string, fileName: string, data: Uint8Array): Uint8Array {
+  const encoder = new TextEncoder()
+  const head = encoder.encode(
+    `--${boundary}\r\nContent-Disposition: form-data; name="media"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+  )
+  const tail = encoder.encode(`\r\n--${boundary}--\r\n`)
+  const out = new Uint8Array(head.length + data.length + tail.length)
+  out.set(head, 0)
+  out.set(data, head.length)
+  out.set(tail, head.length + data.length)
+  return out
+}
 
 interface FetchResponseLike {
   ok: boolean
@@ -72,7 +89,7 @@ interface FetchResponseLike {
 }
 export type FetchLike = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
+  init?: { method?: string; headers?: Record<string, string>; body?: string | Uint8Array; signal?: AbortSignal },
 ) => Promise<FetchResponseLike>
 
 /** 回调 query 的宽松形（HTTP 框架解出的 query map，值可缺省）。 */
@@ -215,8 +232,8 @@ export class WecomAppAdapter implements ChannelAdapter {
     // media_id 下载面（/cgi-bin/media/get）首版未接：入站图/文件占位文案不丢消息
     imageIn: false,
     fileIn: false,
-    // 上传临时素材 media 面首版不接
-    fileOut: false,
+    // 上传临时素材 media/upload + msgtype=file 已接（见 sendFile）
+    fileOut: true,
     threads: false,
     voice: false,
     maxMessageLength: WECOM_APP_MAX_MESSAGE,
@@ -429,6 +446,70 @@ export class WecomAppAdapter implements ChannelAdapter {
   }
 
   /**
+   * 文件回传（公开 REST 两步，文档 path/90253 上传临时素材 + path/90244 发送应用
+   * 消息）：
+   * 1) POST /cgi-bin/media/upload?access_token=…&type=file，multipart/form-data
+   *    字段名固定 media（filename 取文件名）→ { media_id }（临时素材 3 天有效，≤20MB）
+   * 2) POST /cgi-bin/message/send {touser,msgtype:'file',file:{media_id},agentid}
+   *    群会话（appchat 创建）走 /cgi-bin/appchat/send {chatid,msgtype:'file',…}
+   * 判型沿文本面口径：errcode≠0 = 确定性 WeComAppApiError（服务端未投递，不重发）；
+   * 传输失败/在途结果不明 = WeComAppUncertainError（D7）。
+   */
+  async sendFile(address: ChatAddress, file: OutboundFile, signal?: AbortSignal): Promise<Receipt> {
+    if (file.data.byteLength === 0) throw new WeComAppApiError(`wecom-app: 空文件不上传（${file.name}）`, 0)
+    if (file.data.byteLength > MEDIA_UPLOAD_MAX_BYTES) {
+      // 协议硬限小于/等于引擎裁额，超限即确定性拒（不截断盲发）
+      throw new WeComAppApiError(
+        `wecom-app: 文件 ${file.data.byteLength} 字节，超临时素材 ${MEDIA_UPLOAD_MAX_BYTES} 字节上限`,
+        40058,
+      )
+    }
+    if (address.kind !== 'group' && this.agentId === undefined) {
+      throw new Error('wecom-app: agentId 未配置（出站消息必需，管理后台应用页）')
+    }
+    const mediaId = await this.uploadMedia(file, signal)
+    const body: Record<string, unknown> =
+      address.kind === 'group'
+        ? { chatid: address.chatId, msgtype: 'file', file: { media_id: mediaId }, safe: 0 }
+        : {
+            touser: address.chatId,
+            msgtype: 'file',
+            file: { media_id: mediaId },
+            agentid: Number(this.agentId),
+            safe: 0,
+          }
+    return this.sendWithTokenRetry(address.kind === 'group' ? '/cgi-bin/appchat/send' : '/cgi-bin/message/send', body, signal)
+  }
+
+  /** 素材上传：multipart 直传；errcode≠0 确定性抛，传输失败 uncertain（不重试上传）。 */
+  private async uploadMedia(file: OutboundFile, signal?: AbortSignal): Promise<string> {
+    const token = await this.getAccessToken(signal)
+    const boundary = `----dshImUnion${randomBytes(12).toString('hex')}`
+    const body = buildMediaMultipart(boundary, file.name, file.data)
+    const path = '/cgi-bin/media/upload'
+    const url = `${this.apiBase}${path}?access_token=${encodeURIComponent(token)}&type=file`
+    let response: FetchResponseLike
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+        body,
+        ...(signal === undefined ? {} : { signal }),
+      })
+    } catch (error) {
+      // 消息不带 URL（含 token）；上传是否已达服务端不可知 → uncertain
+      throw new WeComAppUncertainError(`wecom-app: ${path} 传输失败（${String(error)}），结果不明`)
+    }
+    if (!response.ok) throw new WeComAppApiError(`wecom-app: ${path} HTTP ${response.status}`, response.status)
+    const json = await readJson(response)
+    const errcode = Number(json.errcode ?? 0)
+    if (errcode !== 0) throw new WeComAppApiError(`wecom-app: ${String(json.errmsg ?? '')}（errcode ${errcode}）`, errcode)
+    const mediaId = typeof json.media_id === 'string' ? json.media_id : ''
+    if (mediaId === '') throw new WeComAppApiError(`wecom-app: ${path} 成功体无 media_id`, errcode)
+    return mediaId
+  }
+
+  /**
    * 带 token 失效重试的发送：40014/42001 → 清缓存重取 token 重试一次。
    * 幂等口径：errcode≠0 = 服务端处理前明确拒绝、消息未投递，故换 token 重发
    * 一条不会双发；仅重试一次，仍失败照抛（不盲循环）。
@@ -544,6 +625,13 @@ export class WecomAppAdapter implements ChannelAdapter {
         hint: '微信端触达需企业先在管理后台启用「微信插件」并由用户关注（平台侧配置，代码不可探测）',
       },
       { name: 'roundtrip', status: 'unverified', hint: '收发 round-trip 需真机（企微客户端给应用发消息）验证' },
+      {
+        // 上传链已接，但应用是否有“发送文件”权限（微盘/会话类型限制）与
+        // media/upload 实际配额无代码可探 → 未实证即 unverified。
+        name: 'file-surface',
+        status: 'unverified',
+        hint: '出站 sendFile 需 media/upload（临时素材 20MB/3 天）+ msgtype=file；入站 media/get 下载未接（caps.fileIn=false）',
+      },
     )
     return checks
   }

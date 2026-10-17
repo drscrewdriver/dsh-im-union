@@ -50,7 +50,7 @@ test('normalize：非文本消息给占位文案（不丢事件）；缺字段�
 // —— SDK 注入面 ——————————————————————————————————————————
 
 function fakeLark(opts = {}) {
-  const created = { messageCalls: [], requestCalls: [], started: false, handlers: undefined }
+  const created = { messageCalls: [], requestCalls: [], fileCalls: [], resourceCalls: [], started: false, handlers: undefined }
   const lark = {
     WSClient: function () {
       this.start = async () => {
@@ -70,6 +70,26 @@ function fakeLark(opts = {}) {
             created.messageCalls.push(payload)
             if (opts.createThrows !== undefined) throw opts.createThrows
             return opts.createResult ?? { message_id: 'om_new' }
+          },
+        },
+        file: opts.noFileFace === true ? undefined : {
+          create: async (payload) => {
+            created.fileCalls.push(payload)
+            if (opts.fileThrows !== undefined) throw opts.fileThrows
+            if (opts.fileResult !== undefined) return opts.fileResult
+            return { file_key: 'file_new' }
+          },
+        },
+        messageResource: opts.noResourceFace === true ? undefined : {
+          get: async (payload) => {
+            created.resourceCalls.push(payload)
+            if (opts.resourceThrows !== undefined) throw opts.resourceThrows
+            if (opts.resourceNoStream === true) return { headers: {} }
+            return {
+              getReadableStream: () => (async function* () {
+                yield Uint8Array.from(opts.resourceBytes ?? [4, 5, 6])
+              })(),
+            }
           },
         },
       }
@@ -175,6 +195,151 @@ test('工厂凭据校验 + registry 实现度登记 feishu', async () => {
     /appId\/appSecret 未入库/,
   )
   assert.ok(implementedChannels().includes('feishu'))
+})
+
+// —— 文件输入/输出面（T2.4 渠道侧）——————————————————————————————————————
+
+test('声明一致性：fileIn/fileOut=true 且 sendFile 为函数（imageIn 仍 false）', () => {
+  const { adapter } = makeAdapter()
+  assert.equal(adapter.caps.fileIn, true)
+  assert.equal(adapter.caps.fileOut, true)
+  assert.equal(typeof adapter.sendFile, 'function')
+  assert.equal(adapter.caps.imageIn, false)
+})
+
+test('sendFile：im.file.create(stream) → message.create(msg_type=file, file_key)', async () => {
+  const { adapter, created } = makeAdapter()
+  await adapter.connect()
+  const receipt = await adapter.sendFile(
+    { channel: 'feishu', kind: 'dm', chatId: 'oc_chat' },
+    { name: 'spec.pdf', data: Uint8Array.from([1, 2, 3]), mimeType: 'application/pdf' },
+  )
+  assert.equal(receipt.platformMessageId, 'om_new')
+  const upload = created.fileCalls[0]
+  assert.equal(upload.data.file_type, 'stream')
+  assert.equal(upload.data.file_name, 'spec.pdf')
+  assert.ok(upload.data.file instanceof Uint8Array, '字节直接交给 SDK 上传面')
+  const sent = created.messageCalls.at(-1)
+  assert.deepEqual(sent.params, { receive_id_type: 'chat_id' })
+  assert.equal(sent.data.msg_type, 'file')
+  assert.deepEqual(JSON.parse(sent.data.content), { file_key: 'file_new' })
+})
+
+test('sendFile：空文件确定性抛（平台不允许空文件，不发请求）', async () => {
+  const { adapter, created } = makeAdapter()
+  await adapter.connect()
+  await assert.rejects(
+    adapter.sendFile({ channel: 'feishu', kind: 'dm', chatId: 'c' }, { name: 'empty.bin', data: new Uint8Array(0) }),
+    /空文件/,
+  )
+  assert.equal(created.fileCalls.length, 0)
+})
+
+test('sendFile：网络类抛 = Uncertain；无 file_key = 确定性抛', async () => {
+  const net = makeAdapter({ fileThrows: new Error('connect timeout') })
+  await net.adapter.connect()
+  await assert.rejects(
+    net.adapter.sendFile({ channel: 'feishu', kind: 'dm', chatId: 'c' }, { name: 'a', data: Uint8Array.from([1]) }),
+    (e) => e.constructor.name.includes('Uncertain'),
+  )
+
+  const noKey = makeAdapter({ fileResult: {} })
+  await noKey.adapter.connect()
+  await assert.rejects(
+    noKey.adapter.sendFile({ channel: 'feishu', kind: 'dm', chatId: 'c' }, { name: 'a', data: Uint8Array.from([1]) }),
+    /file_key/,
+  )
+
+  const badCode = makeAdapter({ fileThrows: Object.assign(new Error('upload rejected'), { code: 234001 }) })
+  await badCode.adapter.connect()
+  await assert.rejects(
+    badCode.adapter.sendFile({ channel: 'feishu', kind: 'dm', chatId: 'c' }, { name: 'a', data: Uint8Array.from([1]) }),
+    /code 234001/,
+  )
+})
+
+test('sendFile：SDK 缺上传面时明确抛（不静默降级）', async () => {
+  const { adapter } = makeAdapter({ noFileFace: true })
+  await adapter.connect()
+  await assert.rejects(
+    adapter.sendFile({ channel: 'feishu', kind: 'dm', chatId: 'c' }, { name: 'a', data: Uint8Array.from([1]) }),
+    /im.file.create/,
+  )
+})
+
+test('入站 file 事件：归一为文件名占位正文＋message_resource 下载填 files', async () => {
+  const { adapter, created } = makeAdapter({ resourceBytes: [9, 8, 7] })
+  const got = []
+  adapter.onMessage((m) => got.push(m))
+  await adapter.connect()
+  await adapter.injectEvent('im.message.receive_v1', {
+    sender: { sender_id: { user_id: 'ou_sender' } },
+    message: {
+      message_id: 'om_file1',
+      chat_id: 'oc_chat',
+      chat_type: 'p2p',
+      message_type: 'file',
+      content: JSON.stringify({ file_key: 'file_in', file_name: '报告.docx' }),
+    },
+  })
+  assert.equal(got.length, 1)
+  assert.match(got[0].text, /\[文件：报告\.docx\]/)
+  assert.equal(got[0].files.length, 1)
+  assert.equal(got[0].files[0].name, '报告.docx')
+  assert.deepEqual([...got[0].files[0].data], [9, 8, 7])
+  assert.deepEqual(created.resourceCalls[0], {
+    params: { type: 'file' },
+    path: { message_id: 'om_file1', file_key: 'file_in' },
+  })
+  await adapter.disconnect()
+})
+
+test('入站 file 下载失败/无流面：降级为无附件但不丢整条', async () => {
+  const a = makeAdapter({ resourceThrows: new Error('403 permission denied') })
+  const got = []
+  a.adapter.onMessage((m) => got.push(m))
+  await a.adapter.connect()
+  await a.adapter.injectEvent('im.message.receive_v1', {
+    sender: { sender_id: { user_id: 'ou_sender' } },
+    message: {
+      message_id: 'om_file2',
+      chat_id: 'oc_chat',
+      chat_type: 'p2p',
+      message_type: 'file',
+      content: JSON.stringify({ file_key: 'file_x', file_name: 'a.bin' }),
+    },
+  })
+  assert.equal(got.length, 1)
+  assert.equal(got[0].files, undefined)
+  await a.adapter.disconnect()
+
+  const b = makeAdapter({ noResourceFace: true })
+  const gotB = []
+  b.adapter.onMessage((m) => gotB.push(m))
+  await b.adapter.connect()
+  await b.adapter.injectEvent('im.message.receive_v1', {
+    sender: { sender_id: { user_id: 'ou_sender' } },
+    message: {
+      message_id: 'om_file3',
+      chat_id: 'oc_chat',
+      chat_type: 'p2p',
+      message_type: 'file',
+      content: JSON.stringify({ file_key: 'file_y' }),
+    },
+  })
+  assert.equal(gotB.length, 1)
+  assert.equal(gotB[0].files, undefined, '无下载面时不伪填附件')
+  assert.match(gotB[0].text, /\[文件：未命名文件\]/)
+  await b.adapter.disconnect()
+})
+
+test('diagnose：文件权限位未实证 = unverified', async () => {
+  const { adapter } = makeAdapter()
+  await adapter.connect()
+  const checks = await adapter.diagnose()
+  const file = checks.find((c) => c.name === 'permission-file')
+  assert.equal(file.status, 'unverified')
+  assert.match(file.hint, /im:resource/)
 })
 
 // —— 流式卡片档（T1.3 尾巴）——————————————————

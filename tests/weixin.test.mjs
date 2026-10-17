@@ -292,3 +292,13 @@ test('工厂与注册表：weixin 已实现；缺 token 构造期抛；分段上
   assert.equal(adapter.caps.editStream, false, '协议无编辑能力：诚实声明，引擎收轮分段')
   assert.equal(adapter.caps.typing, true)
 })
+
+// 文件面声明一致性（M2 T2.4）：出站走 iLink CDN 上传链（AES-128-ECB +
+// x-encrypted-param，media_type 3 非图）组 file_item；入站 item.type=4 经
+// downloadMedia + aesDecrypt 填 SemanticMessage.files —— 均已实装 → 声明=true。
+test('caps 文件面：fileIn/fileOut=true 且 sendFile 为函数（声明=实装 E1）', () => {
+  const { adapter } = makeAdapter(() => okJson({ ret: 0 }))
+  assert.equal(adapter.caps.fileOut, true)
+  assert.equal(adapter.caps.fileIn, true)
+  assert.equal(typeof adapter.sendFile, 'function')
+})

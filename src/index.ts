@@ -18,6 +18,12 @@ import { registerAdminApi, type AdminRequest, type AdminHandler } from './admin/
 import { ChatRouter } from './engine/router.js'
 import { ImUnionEngine } from './engine/gateway.js'
 import { AccountManager, AccountValidationError, type AccountRecord } from './engine/account-manager.js'
+import { DeliveryLog } from './engine/delivery-log.js'
+import { FragmentBuffer } from './engine/fragments.js'
+import { ProactiveDelivery, handleHttp as handleProactiveHttp } from './engine/proactive.js'
+import { ConnectorService, handleHttp as handleConnectorHttp } from './engine/connector.js'
+import { createUploadsCompat } from './host-compat/uploads-compat.js'
+import { createDeliverablesCompat } from './host-compat/deliverables-compat.js'
 import { CHANNEL_META, channelIds } from './channels/meta.js'
 import { implementedChannels } from './channels/registry.js'
 import { WeixinQrLogin } from './channels/weixin-qr.js'
@@ -31,6 +37,8 @@ export const inject = ['webServer']
 
 export interface UnionPluginConfig {
   stateDir: string
+  /** T2.7 AI Office Connector 远端 base URL；缺省/空=不启用（诚实降级）；非 https 拒启。 */
+  connectorBaseUrl?: string
 }
 
 function accountRecordFromBody(body: unknown): { record: AccountRecord; secrets: Record<string, string> } {
@@ -68,7 +76,52 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
   const vault = createVault(caps.credentials, stateDir)
   const router = new ChatRouter()
   const sessionApi = createSessionApi(ctx, caps)
-  const engine = new ImUnionEngine({ ctx, caps, sessionApi, router, vaultKind: vault.kind })
+
+  // M2 能力包（T2.4/T2.5/T2.8）：上传面/产物面构造期冻结（窄腰纪律）；
+  // DeliveryLog 文件态异常只降级不拦装载。
+  let deliveryLog: DeliveryLog | undefined
+  try {
+    deliveryLog = new DeliveryLog({ file: join(stateDir, 'deliveries.json'), logWarn: (msg) => log.warn(msg) })
+  } catch (error) {
+    log.warn(`投递日志未启用（${(error as Error).message}），/delivery /export 降级文案`)
+  }
+  const uploads = createUploadsCompat(ctx, caps)
+  const deliverables = createDeliverablesCompat(ctx, caps)
+  const fragments: FragmentBuffer = new FragmentBuffer({
+    // 引擎回合重建在闭包延后取（apply 期内 engine 尚未声明，消息到来时必已初始化）。
+    submit: (key: string, text: string): void => {
+      engine.submitFragment(key, text)
+    },
+    logWarn: (msg) => log.warn(msg),
+  })
+  const engine: ImUnionEngine = new ImUnionEngine({
+    ctx,
+    caps,
+    sessionApi,
+    router,
+    vaultKind: vault.kind,
+    deliveryLog,
+    uploads,
+    deliverables,
+    fragments,
+    exportDir: join(stateDir, 'exports'),
+    // 主动投递双向同步（T2.6）：syncBack 目标命中即自动入白名单——
+    // 开关语义在此；botId 口径与 sendTo 缺省一致（accountId）。
+    onInboundDm: (accountId, message) => {
+      const hit = proactive.observeInbound({
+        channel: message.address.channel,
+        botId: accountId,
+        targetId: message.userId,
+        chatId: message.address.chatId,
+        accountId,
+      })
+      if (!hit) return
+      const rec = accounts.list().find((r) => r.accountId === accountId)
+      if (rec === undefined || rec.dmAllowlist?.includes(message.userId) === true) return
+      const next = [...(rec.dmAllowlist ?? []), message.userId]
+      void accounts.setAllowlist(accountId, next).catch((error: Error) => log.warn(`syncBack 入白名单失败: ${error.message}`))
+    },
+  })
 
   // 渠道工厂表在 registry.ts 模块加载时静态登记（懒加载不变）。
 
@@ -80,6 +133,37 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     logWarn: (msg) => log.warn(msg),
   })
   void accounts.startAll()
+
+  // T2.6 主动投递：目标库文件态 + 账号解析（歧义不猜，报 no-account）。
+  const proactive = new ProactiveDelivery({
+    file: join(stateDir, 'proactive-targets.json'),
+    resolveAccount: (channel, botId) => {
+      const rows = accounts.list()
+      if (botId !== undefined) {
+        return rows.find((r) => r.channel === channel && (r.accountId === botId || r.alias === botId))?.accountId
+      }
+      const live = rows.filter((r) => r.channel === channel && r.paused !== true)
+      return live.length === 1 ? live[0]?.accountId : undefined
+    },
+    getAdapter: (accountId) => accounts.liveAdapter(accountId),
+    logWarn: (msg) => log.warn(msg),
+  })
+
+  // T2.7 AI Office Connector：未配 baseUrl=不启用；构造即抛（非 https）只记 warn 不拦装载。
+  let connector: ConnectorService | undefined
+  if (config?.connectorBaseUrl !== undefined && config.connectorBaseUrl !== '') {
+    try {
+      connector = new ConnectorService({
+        vault,
+        stateFile: join(stateDir, 'connector-jobs.json'),
+        baseUrl: config.connectorBaseUrl,
+        logWarn: (msg) => log.warn(msg),
+      })
+      connector.start()
+    } catch (error) {
+      log.warn(`Connector 未启用：${(error as Error).message}`)
+    }
+  }
 
   const accountRoutes = {
     /** 微信扫码绑定（T1.2 bind:'qr'）：取码 + PNG data URL（零凭据零 token）。 */
@@ -201,6 +285,27 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     }
     respond(403, { ok: false, error: '回调验签/解密未通过' })
   }
+  // M2 服务侧路由：主动投递四端点 + Connector Job 面（admin 精确匹配，
+  // cancel 以 body.jobId 重建路径；鉴权复用既有 Cookie/Origin 闸，模块内零第二套认证）。
+  const wrapProactive = (routePath: string): AdminHandler => {
+    return async ({ method, body, respond }) => {
+      const result = await handleProactiveHttp({ service: proactive, logWarn: (msg) => log.warn(msg) }, { method, path: routePath, body })
+      respond(result.status, result.json)
+    }
+  }
+  const connectorHandler = (routePath: string): AdminHandler => {
+    return async ({ method, body, respond }) => {
+      if (connector === undefined) {
+        respond(404, { ok: false, error: 'Connector 未配置（connectorBaseUrl 为空）' })
+        return
+      }
+      const jobId = String((body as { jobId?: unknown } | null)?.jobId ?? '')
+      const path = routePath === '/connector/jobs/cancel' ? `/connector/jobs/${encodeURIComponent(jobId)}/cancel` : routePath
+      const result = await handleConnectorHttp({ service: connector, logWarn: (msg) => log.warn(msg) }, { method, path, body })
+      respond(result.status, result.json)
+    }
+  }
+
   const admin = registerAdminApi(ctx, {
     '/ping': ({ respond }) => {
       respond(200, { ok: true, plugin: PLUGIN_NAME })
@@ -215,6 +320,9 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
           vaultKind: vault.kind,
           hasSharedFetch: caps.hasSharedFetch,
           hasRequestRejection: caps.hasRequestRejection,
+          uploadsMode: uploads.mode,
+          deliverablesMode: deliverables.mode,
+          connectorEnabled: connector !== undefined,
         },
         channels: channelIds().map((id) => ({
           id,
@@ -233,6 +341,12 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
       })
     },
     ...accountRoutes,
+    '/proactive/send': wrapProactive('/proactive/send'),
+    '/proactive/targets': wrapProactive('/proactive/targets'),
+    '/proactive/targets/remove': wrapProactive('/proactive/targets/remove'),
+    '/proactive/syncback': wrapProactive('/proactive/syncback'),
+    '/connector/jobs': connectorHandler('/connector/jobs'),
+    '/connector/jobs/cancel': connectorHandler('/connector/jobs/cancel'),
     '/wecom-app/callback': wecomAppCallback,
   }, {
     // 第三方回调白名单：跳登录态/JSON 闸（厂商无 Cookie，验签即认证）。
@@ -249,6 +363,8 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
   const dispose = ctx.effect?.(() => {
     return () => {
       void accounts.stopAll()
+      fragments.dispose()
+      connector?.dispose()
       admin.dispose()
       detachInteraction()
     }

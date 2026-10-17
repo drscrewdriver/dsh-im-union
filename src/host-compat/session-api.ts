@@ -68,6 +68,10 @@ export interface SessionApi {
   modelCatalog(): Promise<ModelCatalogLike | undefined>
   presetsList(): Promise<PresetInfo[]>
   presetSelect(nameOrId: string): Promise<{ ok: boolean; message?: string }>
+  /** /fork：分叉当前会话，回新会话 id；无面抛 UnsupportedError（/ 命令层降级）。 */
+  fork(sessionId: string): Promise<string>
+  /** /rename：改会话标题；false=面缺位（不伪装成功）。 */
+  rename(sessionId: string, title: string): Promise<boolean>
 }
 
 function asFn<T extends object>(value: unknown, key: string): T[keyof T] | undefined {
@@ -113,6 +117,12 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
       async presetSelect(): Promise<{ ok: boolean; message?: string }> {
         return { ok: false, message: '当前宿主无预设面' }
       },
+      async fork(): Promise<string> {
+        throw new UnsupportedError('session fork')
+      },
+      async rename(): Promise<boolean> {
+        return false
+      },
     }
   }
 
@@ -127,6 +137,8 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
   const catalogFn = asFn<{ modelCatalog(...args: any[]): any }>(sessionController, 'modelCatalog')
   const presetsListFn = asFn<{ list(...args: any[]): any }>(caps.agentPresets, 'list')
   const presetSelectFn = asFn<{ select(...args: any[]): any }>(caps.agentPresets, 'select')
+  const forkFn = asFn<{ fork(...args: any[]): any }>(sessionController, 'fork')
+  const renameFn = asFn<{ rename(...args: any[]): any }>(sessionController, 'rename')
 
   /**
    * 形态归一：宿主 @Remote 面收 request 对象（@0.2.x 锚点 api/session-controller），
@@ -299,6 +311,40 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
         } catch {
           return { ok: false, message: `预设切换失败：${(error as Error).message}` }
         }
+      }
+    },
+    async fork(sessionId) {
+      if (!forkFn) throw new UnsupportedError('session fork')
+      const result = await callWithShapeFallback(
+        () => forkFn.call(sessionController, { sessionId, requestId: `imu-f-${Date.now().toString(36)}` }) as Promise<unknown>,
+        () => forkFn.call(sessionController, sessionId) as Promise<unknown>,
+      )
+      // 回包形收敛：新会话 id 可能在顶层或嵌 session/descriptor；拿不到即缺位。
+      if (typeof result === 'string') return result
+      if (result !== null && typeof result === 'object') {
+        const r = result as Record<string, unknown>
+        for (const key of ['sessionId', 'id']) {
+          if (typeof r[key] === 'string') return r[key] as string
+        }
+        const nested = (r.session ?? r.descriptor ?? r.forked) as Record<string, unknown> | undefined
+        if (nested !== null && typeof nested === 'object') {
+          for (const key of ['sessionId', 'id']) {
+            if (typeof nested[key] === 'string') return nested[key] as string
+          }
+        }
+      }
+      throw new UnsupportedError('fork 回包无新会话 id')
+    },
+    async rename(sessionId, title) {
+      if (!renameFn) return false
+      try {
+        await callWithShapeFallback(
+          () => renameFn.call(sessionController, { sessionId, title }) as Promise<void>,
+          () => renameFn.call(sessionController, sessionId, title) as Promise<void>,
+        )
+        return true
+      } catch {
+        return false
       }
     },
   }

@@ -293,8 +293,8 @@ test('caps 诚实 + authorize 恒 undefined', async () => {
   assert.equal(adapter.caps.nativeChoices, false)
   assert.equal(adapter.caps.typing, true)
   assert.equal(adapter.caps.imageIn, false)
-  assert.equal(adapter.caps.fileIn, false)
-  assert.equal(adapter.caps.fileOut, false)
+  assert.equal(adapter.caps.fileIn, false, '入站媒体下载未接')
+  assert.equal(adapter.caps.fileOut, true, '出站 document 载荷已实装（见 sendFile）')
   assert.equal(adapter.caps.threads, false)
   assert.equal(adapter.caps.voice, false)
   assert.equal(adapter.caps.maxMessageLength, 4000)
@@ -305,4 +305,65 @@ test('createWhatsappAdapter：QR 配对渠道 secrets 可空，缺 authDir 不�
   assert.doesNotThrow(() => createWhatsappAdapter({ accountId: 'z', config: {}, secrets: {} }))
   const adapter = createWhatsappAdapter({ accountId: 'acct99', config: {}, secrets: {} })
   assert.ok(adapter.getStateDir().includes('acct99'))
+})
+
+// —— 文件面（T2.4）——————————————————————————————————
+
+test('sendFile：document 公开载荷（fileName/mimetype）+ ACK key 落定回执', async () => {
+  const { socket, adapter } = await connectedAdapter(true)
+  const data = new Uint8Array([1, 2, 3, 4, 5])
+  const receipt = await adapter.sendFile(DM_ADDR, { name: 'report.pdf', data, mimeType: 'application/pdf' })
+  assert.equal(socket.sent.length, 1)
+  const { jid, payload } = socket.sent[0]
+  assert.equal(jid, DM_ADDR.chatId, 'jid 直接取 address.chatId')
+  assert.ok(payload.document instanceof Buffer, 'document 载荷为字节（Baileys 公开形态）')
+  assert.deepEqual([...payload.document], [...data], '字节原样交付（不转 base64/不缩略）')
+  assert.equal(payload.fileName, 'report.pdf')
+  assert.equal(payload.mimetype, 'application/pdf')
+  assert.equal(payload.text, undefined, '文件帧不携 text 字段')
+  assert.deepEqual(receipt, { platformMessageId: 'ID1', uncertain: false })
+  await adapter.disconnect()
+})
+
+test('sendFile： mimeType 缺省 → application/octet-stream（不伪造类型）', async () => {
+  const { socket, adapter } = await connectedAdapter(true)
+  await adapter.sendFile(DM_ADDR, { name: 'blob.bin', data: new Uint8Array([9]) })
+  assert.equal(socket.sent[0].payload.mimetype, 'application/octet-stream')
+  await adapter.disconnect()
+})
+
+test('sendFile：4xx 确定性拒绝→ WhatsAppApiError（抛、不自作重发）', async () => {
+  const { socket, adapter } = await connectedAdapter(true)
+  socket.failNext = Object.assign(new Error('BadRequest'), { output: { statusCode: 400 } })
+  await assert.rejects(adapter.sendFile(DM_ADDR, { name: 'a.txt', data: new Uint8Array([1]) }), WhatsAppApiError)
+  assert.equal(socket.sent.length, 1, '未重试')
+  await adapter.disconnect()
+})
+
+test('sendFile：传输错/5xx → uncertain（D7 禁自动重发）', async () => {
+  const { socket, adapter } = await connectedAdapter(true)
+  socket.failNext = Object.assign(new Error('fetch failed'))
+  await assert.rejects(adapter.sendFile(DM_ADDR, { name: 'a.txt', data: new Uint8Array([1]) }), WhatsAppUncertainError)
+  socket.failNext = Object.assign(new Error('server boom'), { output: { statusCode: 500 } })
+  await assert.rejects(adapter.sendFile(DM_ADDR, { name: 'b.txt', data: new Uint8Array([1]) }), WhatsAppUncertainError)
+  assert.equal(socket.sent.length, 2, '两次调用各发一次，适配器本身不重发')
+  await adapter.disconnect()
+})
+
+test('sendFile：未建会话 → uncertain（不伪称已投）', async () => {
+  const socket = makeFakeSocket()
+  const adapter = new WhatsappAdapter({ accountId: 'a', makeSocket: fakeFactory(socket, true) })
+  await adapter.disconnect()
+  await assert.rejects(adapter.sendFile(DM_ADDR, { name: 'a.txt', data: new Uint8Array([1]) }), WhatsAppUncertainError)
+})
+
+test('能力位一致性（E1）：fileOut=true 且挂 sendFile；fileIn=false 且无入站下载面', async () => {
+  const { adapter } = await connectedAdapter(true)
+  assert.equal(adapter.caps.fileOut, true)
+  assert.equal(typeof adapter.sendFile, 'function')
+  assert.equal(adapter.caps.fileIn, false, '入站媒体下载（downloadMediaMessage）未接 → 不得声明')
+  const checks = await adapter.diagnose()
+  const fileSurface = checks.find((c) => c.name === 'file-surface')
+  assert.equal(fileSurface.status, 'unverified', '文件面未真机实证 → 不谎报 passed')
+  await adapter.disconnect()
 })

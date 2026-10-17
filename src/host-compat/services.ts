@@ -25,6 +25,8 @@ export interface UnionCapabilities {
   configForms: unknown
   /** 文件上传服务（≥某线存在，逐线矩阵坐实后作为能力位而非版本判断）。 */
   fileUploads: unknown
+  /** 工作区文件读面（产物回传 T2.4；锚点 packages/api/workspace-files readAll/readBytes）。 */
+  workspaceFiles: unknown
   sessionPersistence: unknown
   agentPresets: unknown
   agentDefaultModel: unknown
@@ -71,6 +73,7 @@ export function detectCapabilities(ctx: CordisLike): UnionCapabilities {
   const connection = optionalService<ConnectionLike>(ctx, 'connection')
   const configForms = optionalService(ctx, 'configForms')
   const fileUploads = optionalService(ctx, 'fileUploads')
+  const workspaceFiles = optionalService(ctx, 'workspaceFiles')
   const sessionPersistence = optionalService(ctx, 'sessionPersistence')
   const agentPresets = optionalService(ctx, 'agentPresets')
   const agentDefaultModel = optionalService(ctx, 'agentDefaultModel')
@@ -90,6 +93,7 @@ export function detectCapabilities(ctx: CordisLike): UnionCapabilities {
     connection,
     configForms,
     fileUploads,
+    workspaceFiles,
     sessionPersistence,
     agentPresets,
     agentDefaultModel,

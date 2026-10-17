@@ -12,7 +12,12 @@
  *   card_id→PUT 元素内容流式更新→收轮关 streaming_mode；需 cardkit:card:write
  *   权限，缺权时 beginStream 抛错→引擎自动退化文本档）；
  *   text 档=逐步消息（caps 全 false → 引擎收轮后分段 reply）；
- * - 图片入站/文件/话题/按钮：P1+ 增强，本版本声明 false；
+ * - 文件收发（T2.4 渠道侧）：出站 im.v1.file.create（file_type=stream）+
+ *   im.v1.message.create（msg_type=file, content.file_key）；入站 file 消息
+ *   经 im.v1.message_resource 取回（GET /im/v1/messages/{id}/resources/{key}?type=file），
+ *   需 im:resource 权限；限额不自设（引擎 FILE_BUDGET 20 MiB / ≤4 个，
+ *   平台侧 stream 文件自身上限 30 MiB）；
+ * - 图片入站/话题/按钮：P1+ 增强，本版本声明 false；
  * - QR 创建机器人：【决策不做】飞书官方无公开「扫码创建自建应用」API，
  *   OpenClaw 系流程为私有接口（净室边界 E2 同类红线）——保持 credentials 绑定
  *   + 开发者后台权限模板引导。
@@ -25,6 +30,7 @@ import type {
   ChannelCaps,
   ChannelDiagnosisCheck,
   MessageListener,
+  OutboundFile,
   Receipt,
   SemanticMessage,
 } from './types.js'
@@ -56,6 +62,22 @@ interface FeishuEventPayload {
   message?: FeishuEventMessage
 }
 
+/** 上传/下载面的响应形（只声明用到的字段）。 */
+interface FeishuUploadResult {
+  file_key?: string
+  code?: number
+  msg?: string
+}
+
+interface FeishuResourceResult {
+  getReadableStream?: () => AsyncIterable<Uint8Array>
+}
+
+/** 网络类错误判定（结果不明）——与确定性平台拒收分档。 */
+function isNetworkLike(error: unknown): boolean {
+  return error instanceof Error && /网络|timeout|timed out|unreachable|socket|ECONN|fetch/i.test(error.message)
+}
+
 export interface LarkLike {
   WSClient: new (options: { appId: string; appSecret: string }) => {
     start: (opts: { eventDispatcher: unknown }) => Promise<void> | void
@@ -70,6 +92,23 @@ export interface LarkLike {
           params: { receive_id_type: string }
           data: { receive_id: string; msg_type: string; content: string }
         }) => Promise<{ message_id?: string; code?: number; msg?: string }>
+      }
+      /**
+       * im.v1.file 上传面（官方 SDK 内部处理 multipart，返回顶层 file_key）。
+       * 协议事实：file_type 可用 stream；单文件≤30 MB 且不得为空。
+       * 宿主 SDK 缺位时 sendFile 明确抛（不静默）。
+       */
+      file?: {
+        create: (payload: {
+          data: { file_type: string; file_name: string; file: Uint8Array }
+        }) => Promise<FeishuUploadResult | null | undefined>
+      }
+      /** im.v1.message_resource 下载面（图/音/视频/文件共用，type 区分）。 */
+      messageResource?: {
+        get: (payload: {
+          params: { type: string }
+          path: { message_id: string; file_key: string }
+        }) => Promise<FeishuResourceResult>
       }
     }
     request: (opts: { method: string; url: string; data?: unknown; headers?: Record<string, unknown> }) => Promise<{
@@ -89,11 +128,15 @@ export interface FeishuAdapterOptions {
   cardMode?: 'card' | 'text'
   /** 注入官方 SDK 模块面（测试 fake；缺省动态 import）。 */
   lark?: LarkLike
-  /** card 档裸 REST 面（测试注入；缺省全局 fetch）。 */
-  fetchImpl?: (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{
+  /** card 档裸 REST 面与文件下载面共用（测试注入；缺省全局 fetch）。 */
+  fetchImpl?: (
+    url: string,
+    init?: { method?: string; headers?: Record<string, string>; body?: string },
+  ) => Promise<{
     ok: boolean
     status: number
     json(): Promise<Record<string, any>>
+    arrayBuffer?(): Promise<ArrayBuffer>
   }>
   logger?: (msg: string) => void
 }
@@ -125,6 +168,11 @@ export function normalizeFeishuMessage(payload: FeishuEventPayload): SemanticMes
           if (typeof key === 'string') text = text.replace(key, '').trim()
         }
       }
+    } else if (message.message_type === 'file' || typeof parsed.file_key === 'string') {
+      // file 消息：正文先给文件名占位，字节由 fillFiles 异步补（失败也不丢整条）。
+      const name = typeof parsed.file_name === 'string' && parsed.file_name !== '' ? parsed.file_name : '未命名文件'
+      text = `[文件：${name}]`
+      mentionedBot = true
     } else {
       text = `[非文本消息：${message.message_type ?? '未知'}，当前版本未开通该类型接收]`
       mentionedBot = true
@@ -174,8 +222,8 @@ export class FeishuAdapter implements ChannelAdapter {
       statusReaction: false,
       typing: false,
       imageIn: false,
-      fileIn: false,
-      fileOut: false,
+      fileIn: true,
+      fileOut: true,
       threads: false,
       voice: false,
       maxMessageLength: MAX_MESSAGE_LENGTH,
@@ -204,6 +252,8 @@ export class FeishuAdapter implements ChannelAdapter {
       'im.message.receive_v1': async (data) => {
         const message = normalizeFeishuMessage(data)
         if (message === undefined) return
+        // 入站文件下载（T2.4）：失败降级为无附件，不丢整条。
+        await this.fillFiles(message, data?.message)
         for (const listener of this.listeners) listener(message)
       },
     }
@@ -217,7 +267,7 @@ export class FeishuAdapter implements ChannelAdapter {
     this.wsClient = undefined
   }
 
-  private async createMessage(address: ChatAddress, text: string): Promise<Receipt> {
+  private async sendMessagePayload(address: ChatAddress, msgType: string, content: string): Promise<Receipt> {
     const client = this.client
     if (client === undefined || typeof client.im?.message?.create !== 'function') {
       throw new Error('feishu: 客户端未初始化（先 connect）')
@@ -227,8 +277,8 @@ export class FeishuAdapter implements ChannelAdapter {
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: address.chatId,
-          msg_type: 'text',
-          content: JSON.stringify({ text }),
+          msg_type: msgType,
+          content,
         },
       })
       if (typeof response?.code === 'number' && response.code !== 0) {
@@ -238,11 +288,16 @@ export class FeishuAdapter implements ChannelAdapter {
         ? { platformMessageId: response.message_id, uncertain: false }
         : { uncertain: false }
     } catch (error) {
-      if (error instanceof Error && /网络|timeout|unreachable/i.test(error.message)) {
+      if (error instanceof FeishuUncertainError) throw error
+      if (isNetworkLike(error)) {
         throw new FeishuUncertainError(`feishu send: ${(error as Error).message}`)
       }
       throw error
     }
+  }
+
+  private async createMessage(address: ChatAddress, text: string): Promise<Receipt> {
+    return this.sendMessagePayload(address, 'text', JSON.stringify({ text }))
   }
 
   /** 权限类错误码 → 可读引导（不透传内部错误体）。 */
@@ -255,6 +310,88 @@ export class FeishuAdapter implements ChannelAdapter {
 
   async reply(address: ChatAddress, text: string): Promise<Receipt> {
     return this.createMessage(address, text)
+  }
+
+  /**
+   * 出站文件（T2.4）：im.v1.file.create（file_type=stream）→ im.v1.message.create
+   * （msg_type=file, content.file_key）。限额：引擎 FILE_BUDGET 在上游已裁（20 MiB ≤ 4），
+   * 本层只重平台硬约束（非空文件）。
+   */
+  async sendFile(address: ChatAddress, file: OutboundFile, _signal?: AbortSignal): Promise<Receipt> {
+    const client = this.client
+    if (client === undefined) throw new Error('feishu: 客户端未初始化（先 connect）')
+    if (typeof client.im?.file?.create !== 'function') {
+      throw new Error('feishu: 当前 SDK 面缺 im.file.create，文件上传不可用')
+    }
+    if (file.data.byteLength === 0) throw new Error(`feishu: 空文件不允许上传（${file.name}）`)
+    let uploaded: FeishuUploadResult | null | undefined
+    try {
+      uploaded = await client.im.file.create({
+        data: { file_type: 'stream', file_name: file.name, file: Buffer.from(file.data) },
+      })
+    } catch (error) {
+      if (isNetworkLike(error)) throw new FeishuUncertainError(`feishu file upload: ${(error as Error).message}`)
+      const code = (error as { code?: unknown }).code
+      if (typeof code === 'number') throw this.translateApiError(code, (error as Error).message)
+      throw error
+    }
+    if (typeof uploaded?.code === 'number' && uploaded.code !== 0) {
+      throw this.translateApiError(uploaded.code, uploaded.msg)
+    }
+    const fileKey = uploaded?.file_key
+    if (typeof fileKey !== 'string' || fileKey === '') {
+      throw new Error('feishu: 文件上传未返回 file_key')
+    }
+    return this.sendMessagePayload(address, 'file', JSON.stringify({ file_key: fileKey }))
+  }
+
+  /**
+   * 入站文件字节（message_type=file）：走 im.v1.message_resource 下载面。
+   * 失败只降级为无附件（正文已带文件名占位），不丢整条消息。
+   */
+  private async fillFiles(message: SemanticMessage, raw: FeishuEventMessage | undefined): Promise<void> {
+    if (raw === undefined || raw.message_type !== 'file') return
+    if (typeof raw.message_id !== 'string' || raw.message_id === '') return
+    let fileKey = ''
+    let fileName = '未命名文件'
+    try {
+      const parsed = JSON.parse(String(raw.content ?? '{}')) as Record<string, unknown>
+      if (typeof parsed.file_key === 'string') fileKey = parsed.file_key
+      if (typeof parsed.file_name === 'string' && parsed.file_name !== '') fileName = parsed.file_name
+    } catch {
+      return
+    }
+    if (fileKey === '') return
+    const client = this.client
+    if (typeof client?.im?.messageResource?.get !== 'function') {
+      this.log('feishu: 当前 SDK 面缺 im.message_resource.get，入站文件降级为无附件')
+      return
+    }
+    try {
+      const resource = await client.im.messageResource.get({
+        params: { type: 'file' },
+        path: { message_id: raw.message_id, file_key: fileKey },
+      })
+      const stream = resource?.getReadableStream?.()
+      if (stream === undefined) return
+      const chunks: Uint8Array[] = []
+      let total = 0
+      for await (const chunk of stream) {
+        const bytes = chunk instanceof Uint8Array ? chunk : Uint8Array.from(chunk as ArrayLike<number>)
+        chunks.push(bytes)
+        total += bytes.byteLength
+      }
+      if (total === 0) return
+      const data = new Uint8Array(total)
+      let offset = 0
+      for (const chunk of chunks) {
+        data.set(chunk, offset)
+        offset += chunk.byteLength
+      }
+      message.files = [{ name: fileName, data }]
+    } catch (error) {
+      this.log(`feishu: 文件下载失败（降级为无附件）: ${(error as Error).message}`)
+    }
   }
 
   // —— 流式卡片档（cardkit v1 公开 REST）————————————————
@@ -388,6 +525,11 @@ export class FeishuAdapter implements ChannelAdapter {
         hint: '流式卡片档需 cardkit:card:write（开通后须发布版本生效）；缺权时自动退化逐步消息档不丢回复',
       })
     }
+    checks.push({
+      name: 'permission-file',
+      status: 'unverified',
+      hint: '文件收发需 im:resource（上传 im.v1.file / 下载 im.v1.message_resource）；首次文件收发时实证',
+    })
     return checks
   }
 

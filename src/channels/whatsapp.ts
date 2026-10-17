@@ -33,6 +33,7 @@ import type {
   ChannelCaps,
   ChannelDiagnosisCheck,
   MessageListener,
+  OutboundFile,
   Receipt,
   ReplyStream,
   SemanticMessage,
@@ -153,8 +154,10 @@ export class WhatsappAdapter implements ChannelAdapter {
     statusReaction: false,
     typing: true,
     imageIn: false,
+    // 入站媒体下载（baileys downloadMediaMessage 需媒体密钥/凭据上下文，本档未接）
     fileIn: false,
-    fileOut: false,
+    // 出站 document 载荷已实装（见 sendFile）
+    fileOut: true,
     threads: false,
     voice: false,
     maxMessageLength: WHATSAPP_MAX_MESSAGE,
@@ -317,6 +320,30 @@ export class WhatsappAdapter implements ChannelAdapter {
     return toReceipt(result)
   }
 
+  /**
+   * 文件回传：Baileys 公开发送面的 document 载荷
+   * `sendMessage(jid, { document, fileName, mimetype })`（与 { text } 同一公开面，
+   * 文档：https://github.com/WhiskeySockets/Baileys README「Sending media/messages」）。
+   * ACK 语义与 reply 一致：拿到 key = 已投递；传输/5xx 类结果不明 → Uncertain（D7 禁重发）；
+   * 4xx/BadRequest 确定性拒绝 → WhatsAppApiError（classifySendError 统一判型）。
+   * 限额不自设：字节由引擎按 FILE_BUDGET（20 MiB / ≤4 个）裁额后交付。
+   */
+  async sendFile(address: ChatAddress, file: OutboundFile, signal?: AbortSignal): Promise<Receipt> {
+    const socket = this.requireSocket()
+    let result: WaSendResultLike | undefined
+    try {
+      result = await socket.sendMessage(address.chatId, {
+        document: Buffer.from(file.data),
+        fileName: file.name,
+        mimetype: file.mimeType ?? 'application/octet-stream',
+      })
+    } catch (error) {
+      throw classifySendError(error, 'sendFile')
+    }
+    void signal
+    return toReceipt(result)
+  }
+
   /** 占位 + edit 同一 key 流式；编辑被拒/uncertain 降级补发接替。 */
   async beginStream(address: ChatAddress, signal?: AbortSignal): Promise<ReplyStream> {
     const socket = this.requireSocket()
@@ -400,6 +427,12 @@ export class WhatsappAdapter implements ChannelAdapter {
       name: 'roundtrip',
       status: 'unverified',
       hint: '未做收发回环验证（媒体面未接）',
+    })
+    checks.push({
+      // document 发送面已接，但 WhatsApp Web 对文件类型/体积的服务端约束需真机实证
+      name: 'file-surface',
+      status: 'unverified',
+      hint: '出站 sendFile 走 baileys document 载荷；入站媒体下载未接（caps.fileIn=false）',
     })
     return checks
   }

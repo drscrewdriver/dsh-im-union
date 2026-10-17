@@ -50,10 +50,12 @@ import type {
   ChannelCaps,
   ChannelDiagnosisCheck,
   MessageListener,
+  OutboundFile,
   Receipt,
   ReplyStream,
   SemanticMessage,
 } from './types.js'
+import { FILE_BUDGET } from '../engine/files.js'
 
 const API_BASE = 'https://slack.com/api'
 /** chat.postMessage 实践上限每频道 1 条/秒，留 100ms 余量。 */
@@ -69,10 +71,10 @@ const SEEN_LIMIT = 500
 type FetchLike = (
   url: string,
   init?: RequestInitLike,
-) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>
+) => Promise<{ ok: boolean; status: number; json(): Promise<unknown>; arrayBuffer?(): Promise<ArrayBuffer> }>
 interface RequestInitLike {
   method?: string
-  body?: string
+  body?: string | Uint8Array
   headers?: Record<string, string>
   signal?: AbortSignal
 }
@@ -260,8 +262,10 @@ export class SlackAdapter implements ChannelAdapter {
     statusReaction: false,
     typing: false,
     imageIn: false,
-    fileIn: false,
-    fileOut: false,
+    // 入站：非图 file 引用走 url_private + Bearer 下载（图仍不接 → imageIn=false）
+    fileIn: true,
+    // 出站：files.getUploadURLExternal → 直传 → files.completeUploadExternal
+    fileOut: true,
     threads: true,
     voice: false,
     maxMessageLength: SLACK_MAX_MESSAGE,
@@ -540,14 +544,67 @@ export class SlackAdapter implements ChannelAdapter {
     for (const event of events) {
       const semantic = this.normalize(event)
       if (semantic === undefined) continue
-      for (const listener of [...this.listeners]) {
-        try {
-          listener(semantic)
-        } catch (error) {
-          this.log(`slack: 入站监听器异常（${error instanceof Error ? error.message : String(error)}）`)
-        }
+      const refs = this.fileRefs(event)
+      if (refs.length > 0) {
+        // 异步 fill 范式：字节补齐后再投递（fillFiles 内部自吞异常，不丢整条消息）。
+        void this.fillFiles(semantic, refs).then(() => this.deliver(semantic))
+        continue
+      }
+      this.deliver(semantic)
+    }
+  }
+
+  private deliver(semantic: SemanticMessage): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(semantic)
+      } catch (error) {
+        this.log(`slack: 入站监听器异常（${error instanceof Error ? error.message : String(error)}）`)
       }
     }
+  }
+
+  /**
+   * 入站 file 引用筛面：只取非图文件（imageIn=false → 图不下载），
+   * 限额归引擎 FILE_BUDGET（≤4 个 / 单文件 20 MiB），本渠道不自设更大限额。
+   */
+  private fileRefs(event: SlackEvent): Array<Record<string, any>> {
+    const raw = (event as { files?: unknown }).files
+    if (!Array.isArray(raw)) return []
+    const picked: Array<Record<string, any>> = []
+    for (const item of raw as Array<Record<string, any>>) {
+      const mimetype = str(item?.mimetype)
+      if (mimetype.startsWith('image/')) continue
+      if (picked.length >= FILE_BUDGET.maxCount) continue
+      if (Number.isFinite(Number(item?.size)) && Number(item.size) > FILE_BUDGET.perFileMaxBytes) {
+        this.log(`slack: 文件超过 20 MiB 上限，未下载：${str(item?.name ?? item?.title)}`)
+        continue
+      }
+      if (str(item?.url_private_download ?? item?.url_private) !== '') picked.push(item)
+    }
+    return picked
+  }
+
+  /** url_private(_download) 带 Bearer 下载（公开面）；失败只降级不抛。 */
+  private async fillFiles(message: SemanticMessage, refs: Array<Record<string, any>>): Promise<void> {
+    const files: Array<{ name: string; data: Uint8Array }> = []
+    for (const ref of refs) {
+      const url = str(ref.url_private_download ?? ref.url_private)
+      const name = str(ref.name ?? ref.title) === '' ? `slack-file-${files.length + 1}` : str(ref.name ?? ref.title)
+      try {
+        const response = await this.fetchImpl(url, { method: 'GET', headers: { authorization: `Bearer ${this.botToken}` } })
+        if (!response.ok || response.arrayBuffer === undefined) {
+          this.log(`slack: 文件下载被拒（HTTP ${response.status}），降级为无附件：${name}`)
+          continue
+        }
+        const data = new Uint8Array(await response.arrayBuffer())
+        if (data.byteLength === 0) this.log(`slack: 文件下载为空，降级为无附件：${name}`)
+        else files.push({ name, data })
+      } catch (error) {
+        this.log(`slack: 文件下载失败（${error instanceof Error ? error.message : String(error)}），降级为无附件：${name}`)
+      }
+    }
+    if (files.length > 0) message.files = files
   }
 
   private normalize(event: SlackEvent | undefined): SemanticMessage | undefined {
@@ -571,11 +628,10 @@ export class SlackAdapter implements ChannelAdapter {
     let text = str(event.text)
     const fileCount = (event.files?.length ?? 0) + (event.attachments?.length ?? 0)
     if (fileCount > 0) {
-      // imageIn/fileIn=false：不下载字节（需 conversations.history + files.url 带鉴权），
-      // 但绝不丢事件 —— 用占位文案告知有附件。
+      // 非图文件另走 url_private 异步 fill（fillFiles）；本处只给可读占位，绝不丢事件。
       const firstName = str(event.files?.[0]?.name ?? event.files?.[0]?.title)
       const label = firstName === '' ? 'attachment' : firstName
-      text = text === '' ? `[${label}]` : `${text}\n[${label} +${fileCount - 1} more，未下载]`
+      text = text === '' ? `[${label}]` : `${text}\n[附件 ${fileCount}：${label}${fileCount > 1 ? ' 等' : ''}]`
     }
     if (text === '') return undefined
 
@@ -681,6 +737,59 @@ export class SlackAdapter implements ChannelAdapter {
   private async edit(ts: string, address: ChatAddress, text: string, signal?: AbortSignal): Promise<void> {
     // chat.update 必填 channel + ts；线程内消息同样可编辑。
     await this.api('chat.update', { channel: address.chatId, ts, text: this.renderBody(text) }, this.botToken, signal)
+  }
+
+  /**
+   * 文件回传：公开三步链（files.upload 已于 2025-11-12 停用，新应用不可用）：
+   * 1) POST files.getUploadURLExternal {filename,length} → {file_id, upload_url}
+   * 2) POST upload_url（原始字节，无 token 头，非 Web API 域名）
+   * 3) POST files.completeUploadExternal {files:[{id,title}], channel_id[, thread_ts]}
+   * 文档：https://docs.slack.dev/messaging/uploading-files-to-slack
+   * 判型沿用 api()：ok:false 带错误码 = 确定性 SlackApiError；网络/无码/5xx =
+   * SlackUncertainError（D7 禁自动重发——链上任一步结果不明都不能盲重传）。
+   * 限额不自设：引擎按 FILE_BUDGET 裁额后才交给本方法。
+   */
+  async sendFile(address: ChatAddress, file: OutboundFile, signal?: AbortSignal): Promise<Receipt> {
+    const ticket = await this.api(
+      'files.getUploadURLExternal',
+      { filename: file.name, length: file.data.byteLength },
+      this.botToken,
+      signal,
+    )
+    const fileId = str(ticket.file_id)
+    const uploadUrl = str(ticket.upload_url)
+    if (fileId === '' || uploadUrl === '') {
+      throw new SlackApiError('slack: files.getUploadURLExternal 未返回 file_id/upload_url', 'no_upload_url')
+    }
+    let raw: { ok: boolean; status: number }
+    try {
+      raw = await this.fetchImpl(uploadUrl, {
+        method: 'POST',
+        headers: { 'content-type': file.mimeType ?? 'application/octet-stream' },
+        body: file.data,
+        ...(signal !== undefined ? { signal } : {}),
+      })
+    } catch (error) {
+      if (signal?.aborted) throw error instanceof Error ? error : new Error(String(error))
+      throw new SlackUncertainError(`slack: 文件直传未送达（${error instanceof Error ? error.message : String(error)}），结果不明`)
+    }
+    if (!raw.ok) {
+      if (raw.status >= 500) throw new SlackUncertainError(`slack: 文件直传服务端异常（HTTP ${raw.status}），结果不明`)
+      throw new SlackApiError(`slack: 文件直传被拒（HTTP ${raw.status}）`, String(raw.status))
+    }
+    const completion = await this.api(
+      'files.completeUploadExternal',
+      {
+        files: JSON.stringify([{ id: fileId, title: file.name }]),
+        channel_id: address.chatId,
+        ...(address.threadId !== undefined ? { thread_ts: address.threadId } : {}),
+      },
+      this.botToken,
+      signal,
+    )
+    const first = Array.isArray(completion.files) ? (completion.files as Array<Record<string, any>>)[0] : undefined
+    const id = str(first?.id ?? completion.file_id ?? fileId)
+    return { ...(id === '' ? {} : { platformMessageId: id }), uncertain: false }
   }
 
   async reply(address: ChatAddress, text: string, signal?: AbortSignal): Promise<Receipt> {
@@ -818,6 +927,13 @@ export class SlackAdapter implements ChannelAdapter {
       name: 'roundtrip',
       status: 'unverified',
       hint: '收发 round-trip 需真机验证（在 Slack 频道 @ 本 bot 或私聊发消息）',
+    })
+    // 4) 文件面（T2.4）：链已接，但 scopes（files:read + files:write）与实际可投
+    //    文件类型/体积无代码可探——未实证即 unverified（不谎报 passed）。
+    checks.push({
+      name: 'file-surface',
+      status: 'unverified',
+      hint: '外发需 files:write（getUploadURLExternal/completeUploadExternal）、入站下载需 files:read（url_private + Bearer），权限未真机实证',
     })
     return checks
   }

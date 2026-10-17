@@ -194,6 +194,11 @@ export class AccountManager {
     return this.records.map((r) => ({ ...r }))
   }
 
+  /** 按账号 id 取在位适配器（主动投递 T2.6：多账号 E3 下精确定位，不取「渠道首个」凑数）。 */
+  liveAdapter(accountId: string): ChannelAdapter | undefined {
+    return this.live.get(accountId)?.adapter
+  }
+
   /** 指定渠道的在位适配器（第三方回调路由分发给各账号实例用）。 */
   liveAdapters(channel: string): ChannelAdapter[] {
     const out: ChannelAdapter[] = []

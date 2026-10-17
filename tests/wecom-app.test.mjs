@@ -340,15 +340,19 @@ test('防御上限：超 2048 字节的 text 直接确定性拒绝，不出网',
 
 // —— caps / 队列模型 / 工厂 / 诊断 ————————————————————————————————
 
-test('caps：应用消息无编辑流式、无图片文件面、maxMessageLength=600', () => {
-  const caps = baseAdapter().caps
+test('caps：应用消息无编辑流式、入站文件面未接/出站文件面已接、maxMessageLength=600', () => {
+  const adapter = baseAdapter()
+  const caps = adapter.caps
   assert.equal(caps.editStream, false)
   assert.equal(caps.nativeStream, false)
   assert.equal(caps.nativeChoices, false)
   assert.equal(caps.typing, false)
   assert.equal(caps.imageIn, false)
+  // 入站 media_id 下载面（/cgi-bin/media/get）未接 → fileIn=false 且无入站 files 填充
   assert.equal(caps.fileIn, false)
-  assert.equal(caps.fileOut, false)
+  // E1 声明=实装：media/upload + msgtype=file 已接 → fileOut=true 且 sendFile 为函数
+  assert.equal(caps.fileOut, true)
+  assert.equal(typeof adapter.sendFile, 'function')
   assert.equal(caps.threads, false)
   assert.equal(caps.voice, false)
   assert.equal(caps.statusReaction, false)
@@ -422,3 +426,137 @@ test('extractXmlField 最小子集：CDATA/纯文本/缺标签', () => {
   assert.equal(extractXmlField(xml, 'B'), 'plain')
   assert.equal(extractXmlField(xml, 'Missing'), undefined)
 })
+
+// —— 文件面（M2 T2.4）————————————————————————————————
+// 协议依据：上传临时素材 /cgi-bin/media/upload?access_token=…&type=file（multipart 字段名
+// 固定 media，≤20MB、三天有效）+ 发送应用消息 msgtype=file（file.media_id）。
+// 帧形断言：只断 url/method/header/字段名，不解析 multipart 正文语义。
+
+const TOKEN_OK = { match: 'gettoken', reply: { json: { errcode: 0, access_token: 'T-f', expires_in: 7200 } } }
+const UPLOAD_OK = { match: 'media/upload', reply: { json: { errcode: 0, media_id: 'MEDIA-1', type: 'file', created_at: '1700000000' } } }
+const SEND_OK = { match: 'message/send', reply: { json: { errcode: 0, msgid: 'MSG-9' } } }
+
+const DM = { channel: 'wecom-app', kind: 'dm', chatId: 'u1' }
+const GROUP = { channel: 'wecom-app', kind: 'group', chatId: 'chat-77' }
+
+test('sendFile 单聊两步帧形：media/upload multipart（字段名 media）→ message/send msgtype=file', async () => {
+  const { fetchImpl, calls } = fakeFetch([TOKEN_OK, UPLOAD_OK, SEND_OK])
+  const adapter = baseAdapter({ fetchImpl })
+  const receipt = await adapter.sendFile(DM, { name: 'report.pdf', data: new Uint8Array([1, 2, 3, 4]) })
+  assert.deepEqual(receipt, { platformMessageId: 'MSG-9', uncertain: false })
+
+  const upload = calls.find((c) => c.url.includes('/cgi-bin/media/upload'))
+  assert.equal(upload.init.method, 'POST')
+  assert.match(upload.url, /\/cgi-bin\/media\/upload\?access_token=T-f&type=file$/)
+  assert.match(upload.init.headers['content-type'], /^multipart\/form-data; boundary=----dshImUnion[0-9a-f]{24}$/)
+  const raw = Buffer.from(upload.init.body).toString('latin1')
+  assert.match(raw, /Content-Disposition: form-data; name="media"; filename="report\.pdf"/)
+  assert.match(raw, /Content-Type: application\/octet-stream/)
+  const boundary = upload.init.headers['content-type'].split('boundary=')[1]
+  assert.ok(raw.endsWith(`--${boundary}--\r\n`), 'multipart 尾分隔符闭合')
+  assert.ok(raw.includes('\r\n\r\n'), '头部与字节体以空行分隔（正文不参与语义断言）')
+
+  const send = calls.find((c) => c.url.includes('/cgi-bin/message/send'))
+  assert.deepEqual(JSON.parse(send.init.body), {
+    touser: 'u1',
+    msgtype: 'file',
+    file: { media_id: 'MEDIA-1' },
+    agentid: Number(AGENT_ID),
+    safe: 0,
+  })
+  assert.equal(send.init.headers['Content-Type'], 'application/json')
+})
+
+test('sendFile 群聊：走 appchat/send 带 chatid + msgtype=file（body 无 agentid）', async () => {
+  const { fetchImpl, calls } = fakeFetch([
+    TOKEN_OK,
+    UPLOAD_OK,
+    { match: 'appchat/send', reply: { json: { errcode: 0 } } },
+  ])
+  const adapter = baseAdapter({ fetchImpl })
+  const receipt = await adapter.sendFile(GROUP, { name: 'a.bin', data: new Uint8Array([9]) })
+  assert.equal(receipt.uncertain, false)
+  const send = calls.find((c) => c.url.includes('/cgi-bin/appchat/send'))
+  assert.deepEqual(JSON.parse(send.init.body), { chatid: 'chat-77', msgtype: 'file', file: { media_id: 'MEDIA-1' }, safe: 0 })
+  assert.equal(calls.some((c) => c.url.includes('/cgi-bin/message/send')), false)
+})
+
+test('sendFile 上传确定性失败（errcode≠0）→ WeComAppApiError，且不进入发送步', async () => {
+  const { fetchImpl, calls } = fakeFetch([
+    TOKEN_OK,
+    { match: 'media/upload', reply: { json: { errcode: 41005, errmsg: 'media file not exist' } } },
+    SEND_OK,
+  ])
+  const adapter = baseAdapter({ fetchImpl })
+  await assert.rejects(
+    () => adapter.sendFile(DM, { name: 'a.bin', data: new Uint8Array([1]) }),
+    (error) => error instanceof WeComAppApiError && error.errcode === 41005,
+  )
+  assert.equal(calls.filter((c) => c.url.includes('media/upload')).length, 1)
+  assert.equal(calls.some((c) => c.url.includes('message/send')), false, '上传未被接受 → 不发引用未素材的消息')
+})
+
+test('sendFile 上传传输失败 → WeComAppUncertainError（D7）：不重传不发送、零 token 回显', async () => {
+  const { fetchImpl, calls } = fakeFetch([
+    TOKEN_OK,
+    { match: 'media/upload', reply: () => new Error('socket hang up') },
+    SEND_OK,
+  ])
+  const adapter = baseAdapter({ fetchImpl })
+  await assert.rejects(
+    () => adapter.sendFile(DM, { name: 'a.bin', data: new Uint8Array([1]) }),
+    (error) => error instanceof WeComAppUncertainError && !error.message.includes('T-f') && !error.message.includes(CORP_SECRET),
+  )
+  assert.equal(calls.filter((c) => c.url.includes('media/upload')).length, 1, '结果不明也不自动重发')
+  assert.equal(calls.some((c) => c.url.includes('message/send')), false)
+})
+
+test('sendFile 上传成功体无 media_id → 确定性 ApiError（不发空引用）', async () => {
+  const { fetchImpl, calls } = fakeFetch([
+    TOKEN_OK,
+    { match: 'media/upload', reply: { json: { errcode: 0, type: 'file' } } },
+    SEND_OK,
+  ])
+  const adapter = baseAdapter({ fetchImpl })
+  await assert.rejects(
+    () => adapter.sendFile(DM, { name: 'a.bin', data: new Uint8Array([1]) }),
+    /无 media_id/,
+  )
+  assert.equal(calls.some((c) => c.url.includes('message/send')), false)
+})
+
+test('sendFile 预检拒绝不出网：空文件 / 超临时素材 20MB / 缺 agentId', async () => {
+  const { fetchImpl, calls } = fakeFetch([TOKEN_OK, UPLOAD_OK, SEND_OK])
+  const adapter = baseAdapter({ fetchImpl })
+  await assert.rejects(
+    () => adapter.sendFile(DM, { name: 'empty.bin', data: new Uint8Array(0) }),
+    (error) => error instanceof WeComAppApiError,
+  )
+  await assert.rejects(
+    () => adapter.sendFile(DM, { name: 'huge.bin', data: new Uint8Array(20 * 1024 * 1024 + 1) }),
+    (error) => error instanceof WeComAppApiError && /20971520/.test(error.message),
+  )
+  const noAgent = baseAdapter({ fetchImpl, agentId: undefined })
+  await assert.rejects(() => noAgent.sendFile(DM, { name: 'a.bin', data: new Uint8Array([1]) }), /agentId/)
+  assert.equal(calls.length, 0)
+})
+
+test('sendFile 不超引擎裁额：20MiB 整值放行（与 FILE_BUDGET 口径一致）', async () => {
+  const { fetchImpl, calls } = fakeFetch([TOKEN_OK, UPLOAD_OK, SEND_OK])
+  const adapter = baseAdapter({ fetchImpl })
+  const receipt = await adapter.sendFile(DM, { name: 'edge.bin', data: new Uint8Array(20 * 1024 * 1024) })
+  assert.equal(receipt.uncertain, false)
+  assert.equal(calls.filter((c) => c.url.includes('media/upload')).length, 1)
+})
+
+test('诊断 file-surface：未实证 = unverified，hint 如实区分出站已接/入站未接', async () => {
+  const { fetchImpl } = fakeFetch([TOKEN_OK])
+  const adapter = baseAdapter({ fetchImpl })
+  const checks = await adapter.diagnose()
+  const fs = checks.find((c) => c.name === 'file-surface')
+  assert.equal(fs.status, 'unverified')
+  assert.match(fs.hint, /media\/upload/)
+  assert.match(fs.hint, /caps\.fileIn=false/)
+  assert.ok(!JSON.stringify(checks).includes(CORP_SECRET))
+})
+

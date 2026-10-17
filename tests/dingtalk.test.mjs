@@ -289,7 +289,8 @@ test('normalize：非文本类型给占位文案，不丢事件（与飞书同�
   const { adapter } = makeAdapter()
   assert.match(adapter.normalize(dmPayload({ msgtype: 'picture', text: undefined })).text, /图片输入首档未启用/)
   assert.match(adapter.normalize(dmPayload({ msgtype: 'audio', text: undefined })).text, /语音输入未启用/)
-  assert.match(adapter.normalize(dmPayload({ msgtype: 'file', text: undefined })).text, /文件输入未启用/)
+  // 文件消息已接公开下载面：归一先给占位文案，字节由 fillFile 异步补齐
+  assert.match(adapter.normalize(dmPayload({ msgtype: 'file', text: undefined })).text, /^\[文件：未命名文件\]$/)
   assert.match(adapter.normalize(dmPayload({ msgtype: 'sticker', text: undefined })).text, /暂不支持的消息类型：sticker/)
   const rich = adapter.normalize(
     dmPayload({ msgtype: 'richText', text: undefined, content: { richText: [{ text: '前段' }, { type: 'picture', downloadCode: 'DC' }, { text: '后段' }] } }),
@@ -544,7 +545,7 @@ test('文本档：未配 cardTemplateId / cardMode=text → beginStream 抛错�
 
 // —— 七、caps / 准入 ——————————————————————————————————
 
-test('caps 诚实：卡片档只声明 nativeStream+statusProgress，其余未实现一律 false', () => {
+test('caps 诚实：卡片档声明 nativeStream+statusProgress，文件面已接，其余未实现一律 false', () => {
   const { adapter } = makeAdapter()
   assert.deepEqual(adapter.caps, {
     editStream: false,
@@ -554,12 +555,14 @@ test('caps 诚实：卡片档只声明 nativeStream+statusProgress，其余未�
     statusProgress: true,
     typing: false,
     imageIn: false,
-    fileIn: false,
-    fileOut: false,
+    // E1 声明=实装：入站 messageFiles/download + 出站 sampleFile 均已接
+    fileIn: true,
+    fileOut: true,
     threads: false,
     voice: false,
     maxMessageLength: 1000,
   })
+  assert.equal(typeof adapter.sendFile, 'function')
   assert.equal(adapter.id, 'dingtalk')
   assert.equal(adapter.label, '钉钉')
 })
@@ -580,6 +583,7 @@ test('diagnose：credentials 实探 passed / stream passed / card+roundtrip unve
     ['credentials', 'passed'],
     ['stream-connection', 'passed'],
     ['card-streaming', 'unverified'],
+    ['file-surface', 'unverified'],
     ['roundtrip', 'unverified'],
   ])
   assert.ok(http.of(TOKEN_URL).length > before, 'credentials 面实探：不复用缓存 token')
@@ -636,5 +640,250 @@ test('apiBase 覆盖：专有云/代理场景所有 REST 面走自定义基址',
   sock.push(wireFrame('CALLBACK', '/v1.0/im/bot/messages/get', 'CB-1', dmPayload({ sessionWebhook: WEBHOOK_URL })))
   await adapter.reply({ channel: 'dingtalk', kind: 'dm', chatId: 'staff-001' }, 'x')
   assert.equal(http.of(WEBHOOK_URL).at(-1).url, WEBHOOK_URL, 'sessionWebhook 用回调原样 URL，不改写基址')
+  await adapter.disconnect()
+})
+
+// —— 十、文件面（M2 T2.4）——————————————————————————————
+// 公开面依据（均已核实）：
+// · 上传普通文件 https://open.dingtalk.com/document/orgapp/upload-media-files
+//   POST https://oapi.dingtalk.com/media/upload?access_token=…&type=file（multipart 字段名 media）
+// · 机器人发送消息类型 sampleFile https://open.dingtalk.com/document/orgapp/types-of-messages-sent-by-robots
+// · 下载机器人接收消息的文件内容
+//   https://open.dingtalk.com/document/development/download-the-file-content-of-the-robot-receiving-message
+//   POST https://api.dingtalk.com/v1.0/robot/messageFiles/download → { downloadUrl }
+
+const MEDIA_UPLOAD_URL = '/media/upload'
+const FILE_DOWNLOAD_URL = '/v1.0/robot/messageFiles/download'
+const FILE_HOST = 'https://tmp.example.com'
+const DM_ADDR = { channel: 'dingtalk', kind: 'dm', chatId: 'staff-001' }
+
+const uploadOk = () => jsonResponse(200, { errcode: 0, media_id: 'MEDIA-1', type: 'file', created_at: '1700000000' })
+const binResponse = (status, bytes) => ({
+  ok: status >= 200 && status < 300,
+  status,
+  json: async () => ({}),
+  arrayBuffer: async () => new Uint8Array(bytes).buffer,
+})
+
+async function waitUntilFile(fn, hint, ms = 300) {
+  const start = Date.now()
+  while (Date.now() - start < ms) {
+    if (fn()) return
+    await sleep(5)
+  }
+  assert.fail(`等待超时：${hint ?? ''}`)
+}
+
+/** 额外记录 raw body 的 fake fetch（multipart 正文只看帧形，不解析语义）。 */
+function rawFetch(overrides = {}) {
+  const routes = { ...defaultRoutes(), ...overrides }
+  const calls = []
+  const fn = async (url, init = {}) => {
+    const record = {
+      url,
+      method: init.method ?? 'GET',
+      headers: init.headers ?? {},
+      raw: init.body,
+      body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined,
+    }
+    calls.push(record)
+    for (const [key, handler] of Object.entries(routes)) {
+      if (key !== '' && url.includes(key)) return handler(record, calls)
+    }
+    return jsonResponse(404, { code: 'NotFound', message: `raw fake 未路由：${url}` })
+  }
+  return { fn, calls, of: (needle) => calls.filter((c) => c.url.includes(needle)) }
+}
+
+function rawAdapter(http, patches = {}) {
+  return new DingtalkAdapter({
+    clientId: 'CID',
+    clientSecret: 'CS',
+    cardTemplateId: 'TPL-1',
+    robotCode: 'ROBOT-1',
+    WebSocketImpl: fakeWS().factory,
+    fetchImpl: http.fn,
+    requestTimeoutMs: 40,
+    ...patches,
+  })
+}
+
+test('sendFile 帧形：media/upload multipart（字段名 media）→ msgKey=sampleFile + msgParam JSON', async () => {
+  const http = rawFetch({
+    [MEDIA_UPLOAD_URL]: uploadOk,
+    [DM_SEND_URL]: () => jsonResponse(200, { processQueryKey: 'PQ-FILE' }),
+  })
+  const adapter = rawAdapter(http)
+  const receipt = await adapter.sendFile(DM_ADDR, { name: 'report.pdf', data: new Uint8Array([1, 2, 3, 4]) })
+  assert.deepEqual(receipt, { platformMessageId: 'PQ-FILE', uncertain: false })
+
+  const up = http.of(MEDIA_UPLOAD_URL)[0]
+  assert.equal(up.url, 'https://oapi.dingtalk.com/media/upload?access_token=AT-1&type=file')
+  assert.equal(up.method, 'POST')
+  assert.match(up.headers['content-type'], /^multipart\/form-data; boundary=----dshImUnion[0-9a-f]{24}$/)
+  const raw = Buffer.from(up.raw).toString('latin1')
+  assert.match(raw, /Content-Disposition: form-data; name="media"; filename="report\.pdf"/)
+  const boundary = up.headers['content-type'].split('boundary=')[1]
+  assert.ok(raw.endsWith(`--${boundary}--\r\n`), 'multipart 尾分隔符闭合')
+
+  const send = http.of(DM_SEND_URL)[0]
+  assert.equal(send.body.robotCode, 'ROBOT-1')
+  assert.equal(send.body.msgKey, 'sampleFile')
+  assert.deepEqual(JSON.parse(send.body.msgParam), { mediaId: 'MEDIA-1', fileName: 'report.pdf', fileType: 'pdf' })
+  assert.deepEqual(send.body.userIds, ['staff-001'])
+  assert.equal(send.headers['x-acs-dingtalk-access-token'], 'AT-1')
+})
+
+test('sendFile 群聊：groupMessages/send + openConversationId；无扩展名→ fileType=file', async () => {
+  const http = rawFetch({
+    [MEDIA_UPLOAD_URL]: uploadOk,
+    [GROUP_SEND_URL]: () => jsonResponse(200, { processQueryKey: 'PQ-GF' }),
+  })
+  const adapter = rawAdapter(http)
+  const receipt = await adapter.sendFile({ channel: 'dingtalk', kind: 'group', chatId: 'cidGroup==' }, {
+    name: 'archive',
+    data: new Uint8Array([5, 6]),
+  })
+  assert.deepEqual(receipt, { platformMessageId: 'PQ-GF', uncertain: false })
+  const send = http.of(GROUP_SEND_URL)[0]
+  assert.equal(send.body.openConversationId, 'cidGroup==')
+  assert.equal(send.body.msgKey, 'sampleFile')
+  assert.deepEqual(JSON.parse(send.body.msgParam), { mediaId: 'MEDIA-1', fileName: 'archive', fileType: 'file' })
+})
+
+test('sendFile 上传确定性失败（errcode≠0）→ DingTalkApiError，不进入推送步', async () => {
+  const http = rawFetch({
+    [MEDIA_UPLOAD_URL]: () => jsonResponse(200, { errcode: 220401, errmsg: 'invalid file size' }),
+    [DM_SEND_URL]: () => jsonResponse(200, { processQueryKey: 'PQ-X' }),
+  })
+  const adapter = rawAdapter(http)
+  await assert.rejects(
+    () => adapter.sendFile(DM_ADDR, { name: 'a.bin', data: new Uint8Array([1]) }),
+    (error) => error instanceof DingTalkApiError && error.code === '220401',
+  )
+  assert.equal(http.of(MEDIA_UPLOAD_URL).length, 1)
+  assert.equal(http.of(DM_SEND_URL).length, 0, '素材未被接受 → 不推送引用空 media_id 的消息')
+})
+
+test('sendFile 上传 4xx → DingTalkApiError（确定性，服务端未接单）', async () => {
+  const http = rawFetch({ [MEDIA_UPLOAD_URL]: () => jsonResponse(403, { errcode: 403, errmsg: 'forbidden' }) })
+  const adapter = rawAdapter(http)
+  await assert.rejects(
+    () => adapter.sendFile(DM_ADDR, { name: 'a.bin', data: new Uint8Array([1]) }),
+    (error) => error instanceof DingTalkApiError && error.code === '403',
+  )
+})
+
+test('sendFile 上传传输失败 → DingTalkUncertainError（D7）：不重传不推送、零 token 回显', async () => {
+  const http = rawFetch({
+    [MEDIA_UPLOAD_URL]: () => {
+      throw new TypeError('socket hang up')
+    },
+    [DM_SEND_URL]: () => jsonResponse(200, { processQueryKey: 'PQ-X' }),
+  })
+  const adapter = rawAdapter(http)
+  await assert.rejects(
+    () => adapter.sendFile(DM_ADDR, { name: 'a.bin', data: new Uint8Array([1]) }),
+    (error) => error instanceof DingTalkUncertainError && !error.message.includes('AT-1') && !error.message.includes('CS'),
+  )
+  assert.equal(http.of(MEDIA_UPLOAD_URL).length, 1, '结果不明也不自动重发')
+  assert.equal(http.of(DM_SEND_URL).length, 0)
+})
+
+test('sendFile 推送步 uncertain → 上抛 DingTalkUncertainError', async () => {
+  const http = rawFetch({
+    [MEDIA_UPLOAD_URL]: uploadOk,
+    [DM_SEND_URL]: () => {
+      throw new TypeError('fetch failed')
+    },
+  })
+  const adapter = rawAdapter(http)
+  await assert.rejects(() => adapter.sendFile(DM_ADDR, { name: 'a.bin', data: new Uint8Array([1]) }), DingTalkUncertainError)
+})
+
+test('sendFile 预检拒绝不出网：空文件 / 超 20MB 素材上限 / 缺 robotCode', async () => {
+  const http = rawFetch({ [MEDIA_UPLOAD_URL]: uploadOk })
+  const adapter = rawAdapter(http)
+  await assert.rejects(
+    () => adapter.sendFile(DM_ADDR, { name: 'a.bin', data: new Uint8Array(0) }),
+    (error) => error instanceof DingTalkApiError && error.code === 'emptyFile',
+  )
+  await assert.rejects(
+    () => adapter.sendFile(DM_ADDR, { name: 'big.bin', data: new Uint8Array(20 * 1024 * 1024 + 1) }),
+    (error) => error instanceof DingTalkApiError && error.code === 'fileTooLarge',
+  )
+  const noRobot = rawAdapter(http, { robotCode: '' })
+  await assert.rejects(
+    () => noRobot.sendFile(DM_ADDR, { name: 'a.bin', data: new Uint8Array([1]) }),
+    (error) => error instanceof DingTalkApiError && error.code === 'no-context',
+  )
+  assert.equal(http.calls.length, 0)
+})
+
+test('sendFile 不超引擎裁额：20MiB 整值放行（FILE_BUDGET 同值口径）', async () => {
+  const http = rawFetch({
+    [MEDIA_UPLOAD_URL]: uploadOk,
+    [DM_SEND_URL]: () => jsonResponse(200, { processQueryKey: 'PQ-EDGE' }),
+  })
+  const adapter = rawAdapter(http)
+  const receipt = await adapter.sendFile(DM_ADDR, { name: 'edge.bin', data: new Uint8Array(20 * 1024 * 1024) })
+  assert.equal(receipt.uncertain, false)
+  assert.equal(http.of(MEDIA_UPLOAD_URL).length, 1)
+})
+
+test('入站 file 回调：downloadCode→messageFiles/download→取字节填 files（异步 fill 后投递）', async () => {
+  const { adapter, sock, http } = await connectedAdapter({}, {
+    [FILE_DOWNLOAD_URL]: () => jsonResponse(200, { downloadUrl: `${FILE_HOST}/f1.bin` }),
+    [FILE_HOST]: () => binResponse(200, [7, 8, 9]),
+  })
+  const seen = []
+  adapter.onMessage((m) => seen.push(m))
+  sock.push(botFrame('CB-F', dmPayload({ msgtype: 'file', text: undefined, content: { downloadCode: 'DC-1', fileName: 'data.csv' } })))
+  assert.equal(seen.length, 0, '字节换取完成前不投递（与 images 同异步 fill 范式）')
+  await waitUntilFile(() => seen.length === 1, '入站文件投递')
+  assert.equal(seen[0].text, '[文件：data.csv]')
+  assert.equal(seen[0].files.length, 1)
+  assert.equal(seen[0].files[0].name, 'data.csv')
+  assert.deepEqual(Array.from(seen[0].files[0].data), [7, 8, 9])
+  assert.equal(seen[0].address.chatId, 'staff-001')
+  const dl = http.of(FILE_DOWNLOAD_URL)[0]
+  assert.deepEqual(dl.body, { downloadCode: 'DC-1', robotCode: 'dingROBOT' })
+  assert.equal(dl.headers['x-acs-dingtalk-access-token'], 'AT-1')
+  assert.equal(http.of(FILE_HOST)[0].method, 'GET')
+  await adapter.disconnect()
+})
+
+test('入站 file 下载失败 → 降级文本说明，消息仍投递（不丢整条）', async () => {
+  const { adapter, sock } = await connectedAdapter({}, {
+    [FILE_DOWNLOAD_URL]: () => jsonResponse(400, { code: 'invalidParameter.robotCode.downloadCode', message: '下载码有误或已过期' }),
+  })
+  const seen = []
+  adapter.onMessage((m) => seen.push(m))
+  sock.push(botFrame('CB-E', dmPayload({ msgtype: 'file', text: undefined, content: { downloadCode: 'BAD', fileName: 'x.bin' } })))
+  await waitUntilFile(() => seen.length === 1, '降级投递')
+  assert.match(seen[0].text, /\[文件：x\.bin\]（字节未取回）/)
+  assert.equal(seen[0].files, undefined)
+  await adapter.disconnect()
+})
+
+test('入站 file 无 downloadCode → 不换取字节，同步投递占位文案', async () => {
+  const { adapter, sock, http } = await connectedAdapter()
+  const seen = []
+  adapter.onMessage((m) => seen.push(m))
+  sock.push(botFrame('CB-N', dmPayload({ msgtype: 'file', text: undefined, content: { fileName: 'n.txt' } })))
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].text, '[文件：n.txt]')
+  assert.equal(http.of(FILE_DOWNLOAD_URL).length, 0)
+  await adapter.disconnect()
+})
+
+test('诊断 file-surface：未实证 = unverified（素材上传/下载权限均需真机）', async () => {
+  const { adapter } = await connectedAdapter()
+  const checks = await adapter.diagnose()
+  const face = checks.find((c) => c.name === 'file-surface')
+  assert.equal(face.status, 'unverified')
+  assert.match(face.hint ?? '', /media\/upload/)
+  assert.match(face.hint ?? '', /sampleFile/)
+  assert.ok(!JSON.stringify(checks).includes('CS'))
   await adapter.disconnect()
 })

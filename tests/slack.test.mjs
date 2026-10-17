@@ -156,6 +156,11 @@ async function connectedAdapter(route, options = {}) {
   return { adapter, sock, ws, fetch, collected }
 }
 
+/** 逐例自带路由的握手套件（复用 fakeFetch 记录面）。 */
+async function connectedAdapterWith(fetch) {
+  return connectedAdapter(undefined, { fetchImpl: fetch.impl })
+}
+
 async function waitUntil(fn, timeout = 1500) {
   const started = Date.now()
   while (!fn()) {
@@ -304,15 +309,63 @@ test('interactive / slash_commands 首版不消费业务，但仍回 ACK 防重�
   assert.deepEqual(sock.sent.map((f) => f.envelope_id), ['En-i', 'En-s'])
 })
 
-test('附件事件不丢：imageIn/fileIn=false → 占位文案，无字节下载', async () => {
-  const { sock, collected } = await connectedAdapter()
-  sock.frame(eventsFrame('En-1', imEvent({ text: '', files: [{ name: 'shot.png', mimetype: 'image/png' }] })))
-  sock.frame(eventsFrame('En-2', imEvent({ text: 'see this', ts: '1700.000002', files: [{ name: 'a.pdf' }, { name: 'b.pdf' }] })))
-  assert.equal(collected.length, 2)
-  assert.equal(collected[0].text, '[shot.png]')
-  assert.equal(collected[1].images, undefined)
-  assert.equal(collected[1].files, undefined)
-  assert.match(collected[1].text, /see this\n\[a\.pdf \+1 more，未下载\]/)
+const binResp = (status, bytes) => ({
+  ok: status >= 200 && status < 399,
+  status,
+  json: async () => undefined,
+  arrayBuffer: async () => new Uint8Array(bytes).buffer,
+})
+
+test('附件事件：非图走 url_private 异步 fill 进 files；图不下载（imageIn=false）', async () => {
+  const route = (method, call, all) => {
+    if (method === 'a.pdf') return binResp(200, [1, 2, 3])
+    return defaultRoute()(method, call, all)
+  }
+  const { sock, collected, fetch } = await connectedAdapter(route)
+  sock.frame(eventsFrame('En-1', imEvent({ text: '', files: [{ name: 'shot.png', mimetype: 'image/png', url_private: 'https://files.slack.com/shot.png' }] })))
+  sock.frame(eventsFrame('En-2', imEvent({ text: 'see this', ts: '1700.000002', files: [{ name: 'a.pdf', url_private: 'https://files.slack.com/a.pdf' }, { name: 'b.pdf' }] })))
+  await waitUntil(() => collected.length === 2)
+  assert.equal(collected[0].text, '[shot.png]', '图事件仍不丢（占位文案）')
+  assert.equal(collected[0].files, undefined, '图引用不下载')
+  assert.equal(collected[1].text, 'see this\n[附件 2：a.pdf 等]')
+  assert.deepEqual([...collected[1].files[0].data], [1, 2, 3], '非图字节归一到 files')
+  assert.equal(collected[1].files[0].name, 'a.pdf')
+  assert.equal(collected[1].files.length, 1, '无 url_private 的引用不下载')
+  const dl = fetch.calls.find((c) => c.method === 'a.pdf')
+  assert.equal(dl.init.headers.authorization, `Bearer ${BOT}`, 'url_private 下载带 bot token')
+  assert.equal(fetch.calls.find((c) => c.method === 'shot.png'), undefined, '图 URL 不发起下载')
+})
+
+test('入站文件下载失败 → 降级为无附件，不丢整条消息', async () => {
+  const route = (method, call, all) => {
+    if (method === 'a.pdf') return resp(403, {})
+    return defaultRoute()(method, call, all)
+  }
+  const { sock, collected } = await connectedAdapter(route)
+  sock.frame(eventsFrame('En-1', imEvent({ text: '请看附件', ts: '1700.000003', files: [{ name: 'a.pdf', url_private: 'https://files.slack.com/a.pdf' }] })))
+  await waitUntil(() => collected.length === 1)
+  assert.equal(collected[0].files, undefined)
+  assert.match(collected[0].text, /请看附件/)
+})
+
+test('入站文件超 20 MiB → 不下载（引擎 FILE_BUDGET 限额，渠道不自设更大）', async () => {
+  const route = (method, call, all) => {
+    if (method === 'big.bin') throw new Error('不应发起下载')
+    return defaultRoute()(method, call, all)
+  }
+  const { sock, collected } = await connectedAdapter(route)
+  sock.frame(
+    eventsFrame(
+      'En-1',
+      imEvent({
+        text: '大文件',
+        ts: '1700.000004',
+        files: [{ name: 'big.bin', url_private: 'https://files.slack.com/big.bin', size: 21 * 1024 * 1024 }],
+      }),
+    ),
+  )
+  await waitUntil(() => collected.length === 1)
+  assert.equal(collected[0].files, undefined)
 })
 
 // —— 出站与判型 ——————————————————————————————————————————
@@ -567,15 +620,15 @@ test('caps：声明=真实现（editStream/threads 开，其余首版关，上�
     statusReaction: false,
     typing: false,
     imageIn: false,
-    fileIn: false,
-    fileOut: false,
+    fileIn: true,
+    fileOut: true,
     threads: true,
     voice: false,
     maxMessageLength: 40000,
   })
   assert.equal(adapter.id, 'slack')
   assert.equal(typeof adapter.beginStream, 'function')
-  assert.equal(adapter.sendFile, undefined)
+  assert.equal(typeof adapter.sendFile, 'function', 'fileOut=true 已实装（声明=实装）')
   assert.equal(adapter.askChoices, undefined)
   assert.equal(adapter.setTyping, undefined)
 })
@@ -590,11 +643,11 @@ test('诊断：两 token 实探通过 + roundtrip 恒 unverified，hint 零 toke
   const checks = await adapter.diagnose()
   assert.deepEqual(
     checks.map((c) => c.name),
-    ['bot-token', 'app-token-socket', 'roundtrip'],
+    ['bot-token', 'app-token-socket', 'roundtrip', 'file-surface'],
   )
   assert.deepEqual(
     checks.map((c) => c.status),
-    ['passed', 'passed', 'unverified'],
+    ['passed', 'passed', 'unverified', 'unverified'],
   )
   assert.match(checks[0].hint, /imbot/)
   assert.match(checks[1].hint, /Socket Mode 长连接已建立/)
@@ -618,7 +671,7 @@ test('诊断：bot token 被拒 → failed；未连接时 app token 走 apps.con
   assert.equal(checks[2].status, 'unverified')
 })
 
-test('诊断：网络不明 → 两项 unverified（不把不确定说成失败）', async () => {
+test('诊断：网络不明 → 四项 unverified（不把不确定说成失败）', async () => {
   const route = () => {
     throw new Error('socket hang up')
   }
@@ -626,7 +679,7 @@ test('诊断：网络不明 → 两项 unverified（不把不确定说成失败�
   const checks = await adapter.diagnose()
   assert.deepEqual(
     checks.map((c) => c.status),
-    ['unverified', 'unverified', 'unverified'],
+    ['unverified', 'unverified', 'unverified', 'unverified'],
   )
 })
 
@@ -644,4 +697,108 @@ test('工厂：Socket Mode 双 token 缺一即构造抛错', () => {
 test('适配器构造：双 token 校验与工厂同口径（不降级为「单边可用」）', () => {
   assert.throws(() => new SlackAdapter({ botToken: '', appToken: APP }), /botToken 缺失/)
   assert.throws(() => new SlackAdapter({ botToken: BOT, appToken: '' }), /appToken 缺失/)
+})
+
+// —— 文件面出站（T2.4）——————————————————————————————————
+
+/** 上传链路由：getUploadURLExternal → upload_url 直传 → completeUploadExternal。 */
+function uploadRoute(over = {}) {
+  const base = defaultRoute()
+  return (method, call, all) => {
+    switch (method) {
+      case 'files.getUploadURLExternal':
+        return over.ticket ?? resp(200, { ok: true, file_id: 'F1', upload_url: 'https://upload.slack.com/upload-req-1' })
+      case 'upload-req-1':
+        return over.raw ?? resp(200, 'OK')
+      case 'files.completeUploadExternal':
+        return over.complete ?? resp(200, { ok: true, files: [{ id: 'F1' }] })
+      default:
+        return base(method, call, all)
+    }
+  }
+}
+
+test('sendFile：三步链帧形（filename/length → 原始字节直传 → channel_id + files）', async () => {
+  const fetch = fakeFetch(uploadRoute())
+  const { adapter } = await connectedAdapterWith(fetch)
+  const data = new Uint8Array([1, 2, 3, 4, 5])
+  const receipt = await adapter.sendFile(dm, { name: 'report.pdf', data, mimeType: 'application/pdf' })
+  assert.deepEqual(
+    fetch.calls.map((c) => c.method).slice(2),
+    ['files.getUploadURLExternal', 'upload-req-1', 'files.completeUploadExternal'],
+  )
+  const ticket = fetch.byMethod('files.getUploadURLExternal')[0]
+  assert.deepEqual(ticket.body, { filename: 'report.pdf', length: 5 })
+  assert.equal(ticket.init.headers.authorization, `Bearer ${BOT}`)
+  const raw = fetch.byMethod('upload-req-1')[0]
+  assert.equal(raw.url, 'https://upload.slack.com/upload-req-1', '直传走 upload_url 原域名')
+  assert.equal(raw.init.method, 'POST')
+  assert.equal(raw.init.headers['content-type'], 'application/pdf')
+  assert.ok(raw.init.body instanceof Uint8Array, '原始字节直传（不包 multipart）')
+  assert.equal(raw.init.headers.authorization, undefined, 'upload_url 不携 token 头')
+  const done = fetch.byMethod('files.completeUploadExternal')[0]
+  assert.deepEqual(done.body, { files: JSON.stringify([{ id: 'F1', title: 'report.pdf' }]), channel_id: 'D9' })
+  assert.deepEqual(receipt, { platformMessageId: 'F1', uncertain: false })
+  await adapter.disconnect()
+})
+
+test('sendFile：thread 地址→ completeUploadExternal 挂 thread_ts', async () => {
+  const fetch = fakeFetch(uploadRoute())
+  const { adapter } = await connectedAdapterWith(fetch)
+  await adapter.sendFile({ channel: 'slack', kind: 'group', chatId: 'C1', threadId: '1700.100' }, { name: 'a.txt', data: new Uint8Array([1]) })
+  const done = fetch.byMethod('files.completeUploadExternal')[0]
+  assert.deepEqual(done.body, {
+    files: JSON.stringify([{ id: 'F1', title: 'a.txt' }]),
+    channel_id: 'C1',
+    thread_ts: '1700.100',
+  })
+  await adapter.disconnect()
+})
+
+test('sendFile：mimeType 缺省 → application/octet-stream', async () => {
+  const fetch = fakeFetch(uploadRoute())
+  const { adapter } = await connectedAdapterWith(fetch)
+  await adapter.sendFile(dm, { name: 'blob.bin', data: new Uint8Array([7]) })
+  assert.equal(fetch.byMethod('upload-req-1')[0].init.headers['content-type'], 'application/octet-stream')
+  await adapter.disconnect()
+})
+
+test('sendFile：ok:false 带错误码 → SlackApiError（确定性，不自作重发）', async () => {
+  const fetch = fakeFetch(uploadRoute({ complete: resp(200, { ok: false, error: 'channels_not_found' }) }))
+  const { adapter } = await connectedAdapterWith(fetch)
+  await assert.rejects(adapter.sendFile(dm, { name: 'a.txt', data: new Uint8Array([1]) }), SlackApiError)
+  assert.equal(fetch.byMethod('upload-req-1').length, 1, '失败后链路不重跑')
+  assert.equal(fetch.byMethod('files.getUploadURLExternal').length, 1)
+  await adapter.disconnect()
+})
+
+test('sendFile：票据缺 file_id/upload_url → 确定性 SlackApiError', async () => {
+  const fetch = fakeFetch(uploadRoute({ ticket: resp(200, { ok: true }) }))
+  const { adapter } = await connectedAdapterWith(fetch)
+  await assert.rejects(adapter.sendFile(dm, { name: 'a.txt', data: new Uint8Array([1]) }), SlackApiError)
+  assert.equal(fetch.byMethod('files.completeUploadExternal').length, 0)
+  await adapter.disconnect()
+})
+
+test('sendFile：直传 5xx / 传输错 → uncertain（D7 禁自动重发）', async () => {
+  const five = fakeFetch(uploadRoute({ raw: resp(503, {}) }))
+  const { adapter: a1 } = await connectedAdapterWith(five)
+  await assert.rejects(a1.sendFile(dm, { name: 'a.txt', data: new Uint8Array([1]) }), SlackUncertainError)
+  assert.equal(five.byMethod('files.completeUploadExternal').length, 0, '结果不明即停在直传位')
+  await a1.disconnect()
+  const boom = fakeFetch((method, call, all) => {
+    if (method === 'files.getUploadURLExternal') return resp(200, { ok: true, file_id: 'F1', upload_url: 'https://upload.slack.com/upload-req-1' })
+    if (method === 'upload-req-1') throw new Error('socket hang up')
+    return defaultRoute()(method, call, all)
+  })
+  const { adapter: a2 } = await connectedAdapterWith(boom)
+  await assert.rejects(a2.sendFile(dm, { name: 'a.txt', data: new Uint8Array([1]) }), SlackUncertainError)
+  await a2.disconnect()
+})
+
+test('sendFile：直传 4xx → SlackApiError（确定性拒投）', async () => {
+  const fetch = fakeFetch(uploadRoute({ raw: resp(400, {}) }))
+  const { adapter } = await connectedAdapterWith(fetch)
+  await assert.rejects(adapter.sendFile(dm, { name: 'a.txt', data: new Uint8Array([1]) }), SlackApiError)
+  await adapter.disconnect()
 })

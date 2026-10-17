@@ -589,6 +589,32 @@ test('caps 诚实位 + authorize 恒交网关 + 无 beginStream/sendFile/askChoi
   await adapter.disconnect()
 })
 
+// 文件面声明一致性回归（M2 T2.4）：QQ 官方机器人面出站富媒体需先换 file_info
+// （/v2/users/{id}/files 上传接口）且群聊 file_type=4「文件暂不开放」+ 日配额
+// 40093002（文档 https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/rich-message.html
+// https://open.qq.com/doc/qqbot/api/medi上传）；入站 attachments[].url 携带时效 rkey
+// 且文件下载权限未实证 → 做不到即不声明：caps.fileOut=false 且 sendFile 不存在。
+test('文件面未实装：caps.fileOut===false 且 typeof sendFile!==function（声明=实装 E1）', async () => {
+  const { adapter } = await ready()
+  assert.equal(adapter.caps.fileOut, false)
+  assert.equal(adapter.caps.fileIn, false)
+  assert.notEqual(typeof adapter.sendFile, 'function')
+  assert.equal(adapter.sendFile, undefined)
+  await adapter.disconnect()
+})
+
+// 入站附件不偷跑字节：带 attachments 的 C2C 帧仍产出消息（不丢），但 fileIn=false → 不填 files。
+test('入站附件事件：无公开下载面实证 → 不填 files，事件不丢', async () => {
+  const { adapter, sock } = await ready()
+  const seen = []
+  adapter.onMessage((m) => seen.push(m))
+  sock.push(C2C_FRAME({ id: 'ROBOT1.0_attach1', content: '', attachments: [{ id: 'att-1', url: 'https://qqfile.example/a.bin?rkey=exp', file_type: 4, file_name: 'a.bin', file_size: 12 }] }))
+  assert.equal(seen.length, 1, '附件类事件仍产出（不丢整条）')
+  assert.equal(seen[0].files, undefined, 'caps.fileIn=false → 不下载字节')
+  assert.equal(seen[0].images, undefined, 'imageIn=false → 图片面同样不跟跑')
+  await adapter.disconnect()
+})
+
 test('数字菜单回退前提：nativeChoices=false 时引擎走文本档位，本渠道不实现按钮面', async () => {
   const { adapter } = await ready()
   assert.equal(adapter.caps.nativeChoices, false)

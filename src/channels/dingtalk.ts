@@ -82,19 +82,29 @@
  * 运行时依赖零：Node≥22 全局 fetch/WebSocket + node:crypto（randomUUID 生成
  * outTrackId/guid）；测试注入 fetchImpl / WebSocketImpl，不发真实请求。
  */
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import type { ChatAddress } from '../engine/router.js'
+import { FILE_BUDGET } from '../engine/files.js'
 import type {
   ChannelAdapter,
   ChannelCaps,
   ChannelDiagnosisCheck,
   MessageListener,
+  OutboundFile,
   Receipt,
   ReplyStream,
   SemanticMessage,
 } from './types.js'
 
 const API_BASE = 'https://api.dingtalk.com'
+/**
+ * 素材上传/下载走 oapi 基址（企业内部应用 accessToken 新老接口通用）。
+ * 文档：上传媒体文件 https://open.dingtalk.com/document/orgapp/upload-media-files
+ * 机器人发送消息类型（sampleFile）：https://open.dingtalk.com/document/orgapp/types-of-messages-sent-by-robots
+ */
+const OAPI_BASE = 'https://oapi.dingtalk.com'
+/** 普通文件素材上限 20MB（3 天有效）——与引擎 FILE_BUDGET 同值，渠道不自设更大限额。 */
+const DINGTALK_FILE_MAX_BYTES = FILE_BUDGET.perFileMaxBytes
 /** 机器人消息回调 topic（单聊不需 @，群聊必须 @机器人）。 */
 const BOT_MESSAGES_TOPIC = '/v1.0/im/bot/messages/get'
 /** 卡片互动回调 topic（首档只 ACK 不消费——caps.nativeChoices=false）。 */
@@ -122,11 +132,35 @@ type FetchResponseLike = {
   ok: boolean
   status: number
   json(): Promise<unknown>
+  arrayBuffer?(): Promise<ArrayBuffer>
 }
 type FetchLike = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
+  init?: { method?: string; headers?: Record<string, string>; body?: string | Uint8Array; signal?: AbortSignal },
 ) => Promise<FetchResponseLike>
+
+/** multipart/form-data 手搭（零依赖）：字段名固定 media（oapi 素材上传协议名）。 */
+function buildFileMultipart(boundary: string, fileName: string, data: Uint8Array): Uint8Array {
+  const encoder = new TextEncoder()
+  const head = encoder.encode(
+    `--${boundary}\r\nContent-Disposition: form-data; name="media"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+  )
+  const tail = encoder.encode(`\r\n--${boundary}--\r\n`)
+  const out = new Uint8Array(head.byteLength + data.byteLength + tail.byteLength)
+  out.set(head, 0)
+  out.set(data, head.byteLength)
+  out.set(tail, head.byteLength + data.byteLength)
+  return out
+}
+
+/** 入站文件引用（msgtype=file 且带 downloadCode）；图片/音视频不在本面。 */
+function extractFileRef(payload: Record<string, any>): { downloadCode: string; fileName: string } | undefined {
+  if (String(payload.msgtype ?? '') !== 'file') return undefined
+  const downloadCode = typeof payload.content?.downloadCode === 'string' ? payload.content.downloadCode : ''
+  if (downloadCode === '') return undefined
+  const name = typeof payload.content?.fileName === 'string' && payload.content.fileName !== '' ? payload.content.fileName : '未命名文件'
+  return { downloadCode, fileName: name }
+}
 
 /** Stream 通道线帧（收发共用，宽松形）。 */
 interface StreamFrame {
@@ -141,6 +175,8 @@ export interface DingtalkAdapterOptions {
   clientSecret: string
   /** 覆盖 REST 基址（测试注入/专有云代理）。 */
   apiBase?: string
+  /** 覆盖 oapi 基址（素材上传面，测试注入用）。 */
+  oapiBase?: string
   /** AI 卡片模板 ID；缺位=不启卡片档（文本档）。 */
   cardTemplateId?: string
   /** 卡片流式变量名（以模板定义为准，默认 content）。 */
@@ -183,6 +219,7 @@ export class DingtalkAdapter implements ChannelAdapter {
   private readonly clientId: string
   private readonly clientSecret: string
   private readonly apiBase: string
+  private readonly oapiBase: string
   private readonly cardTemplateId: string
   private readonly cardTemplateKey: string
   private readonly cardMode: 'card' | 'text'
@@ -222,6 +259,7 @@ export class DingtalkAdapter implements ChannelAdapter {
     this.clientId = options.clientId
     this.clientSecret = options.clientSecret
     this.apiBase = (options.apiBase ?? API_BASE).replace(/\/+$/, '')
+    this.oapiBase = (options.oapiBase ?? OAPI_BASE).replace(/\/+$/, '')
     this.cardTemplateId = options.cardTemplateId ?? ''
     // 官方 AI 卡片模板内容字段名社区见 content/msgContent 两种口径，以模板定义为
     // 准——默认 content，config.cardTemplateKey 覆盖。
@@ -241,8 +279,8 @@ export class DingtalkAdapter implements ChannelAdapter {
     this.streamThrottleMs = options.streamThrottleMs ?? STREAM_THROTTLE_MS
     this.log = options.logger ?? (() => {})
     // E1 纪律：声明=真实现。卡片档才声明原生流式与进度档位；
-    // threads/nativeChoices/statusReaction/typing/imageIn/fileIn/fileOut/voice
-    // 本版本一律未实现 → false。
+    // threads/nativeChoices/statusReaction/typing/imageIn/voice 本版本未实现 → false。
+    // 文件面：出站 sampleFile + 入站 messageFiles/download 已接（见 sendFile/fillFile）。
     const cardLive = this.cardEnabled
     this.caps = {
       editStream: false,
@@ -252,8 +290,8 @@ export class DingtalkAdapter implements ChannelAdapter {
       statusProgress: cardLive,
       typing: false,
       imageIn: false,
-      fileIn: false,
-      fileOut: false,
+      fileIn: true,
+      fileOut: true,
       threads: false,
       voice: false,
       maxMessageLength: DINGTALK_MAX_MESSAGE,
@@ -503,6 +541,17 @@ export class DingtalkAdapter implements ChannelAdapter {
       this.conversationIdByChat.set(key, payload.conversationId)
     }
     if (typeof payload.robotCode === 'string' && payload.robotCode !== '') this.observedRobotCode = payload.robotCode
+    const fileRef = extractFileRef(payload)
+    if (fileRef !== undefined) {
+      // 入站非图文件：公开下载面（POST /v1.0/robot/messageFiles/download → downloadUrl）。
+      // 沿用异步 fill 范式：先换字节再投递；失败降级文本说明，不丢整条消息。
+      const code = typeof payload.robotCode === 'string' && payload.robotCode !== '' ? payload.robotCode : this.robotCode
+      void this.fillFile(message, fileRef, code).then(() => {
+        if (this.stopping) return
+        for (const listener of this.listeners) listener(message)
+      })
+      return undefined
+    }
     return message
   }
 
@@ -534,9 +583,12 @@ export class DingtalkAdapter implements ChannelAdapter {
     } else if (msgtype === 'audio') {
       text = '[语音输入未启用（caps.voice=false）]'
     } else if (msgtype === 'video') {
-      text = '[视频输入未启用（caps.fileIn=false）]'
+      // 协议上视频同样有 downloadCode 下载面，但本版本未接视频归一 → 占位不丢事件。
+      text = '[视频输入未启用（视频字节面未接）]'
     } else if (msgtype === 'file') {
-      text = '[文件输入未启用（caps.fileIn=false）]'
+      // 入站文件：占位文案先行，字节由 fillFile 异步补齐（失败只追加说明）。
+      const name = typeof payload.content?.fileName === 'string' && payload.content.fileName !== '' ? payload.content.fileName : '未命名文件'
+      text = `[文件：${name}]`
     } else {
       text = `[暂不支持的消息类型：${msgtype}]`
     }
@@ -656,6 +708,101 @@ export class DingtalkAdapter implements ChannelAdapter {
     const result = await this.restV1(path, body, signal)
     const queryKey = typeof result.processQueryKey === 'string' ? result.processQueryKey : undefined
     return queryKey === undefined ? { uncertain: false } : { platformMessageId: queryKey, uncertain: false }
+  }
+
+  /**
+   * 出站文件（公开面两步，均已核实）：
+   * 1) POST {oapiBase}/media/upload?access_token=…&type=file，multipart/form-data
+   *    字段名固定 media → { media_id }（普通文件 ≤20MB、3 天有效）
+   * 2) 机器人推送 msgKey='sampleFile'，msgParam=JSON {mediaId, fileName, fileType}
+   *    ——文档：机器人发送消息类型 types-of-messages-sent-by-robots
+   * 注：协议只支持企业内部应用/第三方企业应用机器人（本适配器即此档）；
+   * webhook 自定义机器人无文件外发公开面。
+   * 判型沿用文本面：errcode≠0/4xx = 确定性 DingTalkApiError；超时/传输失败 = DingTalkUncertainError（D7）。
+   */
+  async sendFile(address: ChatAddress, file: OutboundFile, signal?: AbortSignal): Promise<Receipt> {
+    if (file.data.byteLength === 0) throw new DingTalkApiError(`dingtalk: 空文件不上传（${file.name}）`, 'emptyFile')
+    if (file.data.byteLength > DINGTALK_FILE_MAX_BYTES) {
+      throw new DingTalkApiError(
+        `dingtalk: 文件 ${file.data.byteLength} 字节，超素材上限 ${DINGTALK_FILE_MAX_BYTES}`,
+        'fileTooLarge',
+      )
+    }
+    if (this.robotCode === '') throw new DingTalkApiError('dingtalk: 缺少 robotCode（sampleFile 推送必需）', 'no-context')
+    const mediaId = await this.uploadMedia(file, signal)
+    const dot = file.name.lastIndexOf('.')
+    const fileType = dot > 0 ? file.name.slice(dot + 1) : 'file'
+    return this.robotSend(
+      address,
+      `${address.kind}:${address.chatId}`,
+      'sampleFile',
+      { mediaId, fileName: file.name, fileType },
+      signal,
+    )
+  }
+
+  /** 素材上传 multipart：oapi 口径 errcode≠0 / 非 2xx = 确定性；传输失败 = uncertain（不重传）。 */
+  private async uploadMedia(file: OutboundFile, signal?: AbortSignal): Promise<string> {
+    const token = await this.accessToken(signal)
+    const boundary = `----dshImUnion${randomBytes(12).toString('hex')}`
+    const url = `${this.oapiBase}/media/upload?access_token=${encodeURIComponent(token)}&type=file`
+    let response: FetchResponseLike
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+        body: buildFileMultipart(boundary, file.name, file.data),
+        ...(signal === undefined ? {} : { signal }),
+      })
+    } catch (error) {
+      // 错误不带 URL（含 access_token）；上传是否已达服务端不可知 → uncertain
+      throw new DingTalkUncertainError(`dingtalk: media/upload 传输失败（${String(error)}），结果不确定`)
+    }
+    if (!response.ok) throw new DingTalkApiError(`dingtalk: media/upload HTTP ${response.status}`, String(response.status))
+    const body = (await response.json().catch(() => ({}))) as Record<string, any>
+    const errcode = Number(body.errcode ?? 0)
+    if (errcode !== 0) {
+      throw new DingTalkApiError(`dingtalk: media/upload ${String(body.errmsg ?? '')}（errcode ${errcode}）`, String(errcode))
+    }
+    const mediaId = typeof body.media_id === 'string' ? body.media_id : ''
+    if (mediaId === '') throw new DingTalkApiError('dingtalk: media/upload 成功体无 media_id', 'mediaIdEmpty')
+    return mediaId
+  }
+
+  /**
+   * 下载码 → 临时链接 → 取字节。
+   * 文档：下载机器人接收消息的文件内容
+   * https://open.dingtalk.com/document/development/download-the-file-content-of-the-robot-receiving-message
+   * 任何失败均降级：保留占位文案加说明，不抛不丢消息（入站面无 Receipt 语义）。
+   */
+  private async fillFile(
+    message: SemanticMessage,
+    ref: { downloadCode: string; fileName: string },
+    robotCode: string,
+  ): Promise<void> {
+    try {
+      if (robotCode === '') throw new DingTalkApiError('dingtalk: 无 robotCode，无法换取下载链接', 'no-context')
+      const result = await this.restV1('/v1.0/robot/messageFiles/download', {
+        downloadCode: ref.downloadCode,
+        robotCode,
+      })
+      const url = typeof result.downloadUrl === 'string' ? result.downloadUrl : ''
+      if (url === '') throw new DingTalkApiError('dingtalk: 下载响应无 downloadUrl', 'downloadUrlEmpty')
+      const response = await this.fetchImpl(url, { method: 'GET' })
+      if (!response.ok) throw new DingTalkApiError(`dingtalk: 文件下载 HTTP ${response.status}`, String(response.status))
+      if (response.arrayBuffer === undefined) throw new DingTalkApiError('dingtalk: 宿主 fetch 无 arrayBuffer 面', 'noArrayBuffer')
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      if (bytes.byteLength === 0) throw new DingTalkApiError('dingtalk: 文件下载响应体为空', 'emptyBody')
+      if (bytes.byteLength > FILE_BUDGET.perFileMaxBytes) {
+        this.log(`dingtalk: 入站文件 ${bytes.byteLength} 字节超引擎裁额 ${FILE_BUDGET.perFileMaxBytes}，不取字节`)
+        message.text = `${message.text}（字节超限未取回）`
+        return
+      }
+      message.files = [{ name: ref.fileName, data: bytes }]
+    } catch (error) {
+      this.log(`dingtalk: 入站文件下载失败（${String(error)}），保留占位文案`)
+      message.text = `${message.text}（字节未取回）`
+    }
   }
 
   /**
@@ -909,6 +1056,11 @@ export class DingtalkAdapter implements ChannelAdapter {
         : this.cardTemplateId === ''
           ? '未配置 config.cardTemplateId，流式为文本档（caps.nativeStream=false）'
           : '卡片面因确定性拒绝已关闭（本实例退化文本档）',
+    })
+    checks.push({
+      name: 'file-surface',
+      status: 'unverified',
+      hint: '出站 sendFile 走 oapi media/upload(type=file ≤20MB/3 天) + msgKey=sampleFile；入站走 /v1.0/robot/messageFiles/download（需企业内机器人发消息权限），素材上传/下载权限均需真机实证',
     })
     checks.push({
       name: 'roundtrip',

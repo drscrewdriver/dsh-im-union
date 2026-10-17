@@ -162,6 +162,19 @@ test('caps：仅文本私聊——流式/按钮/附件/话题/typing/语音全 f
   assert.equal(adapter.askChoices, undefined)
 })
 
+// 文件面声明一致性回归（M2 T2.4）：imessage 渠道只读 chat.db + osascript 发纯文
+// 本私聊（Apple 无公开的“给指定 handle 发附件”命令行/REST 面；附件需 Messages.app
+// 自身体内 AppleScript UI 脚本，属未实证面）→ 做不到即不声明：
+// caps.fileOut/fileIn 恒 false，且 sendFile 不存在（引擎不会误派文件出站）。
+test('文件面未实装：caps.fileOut===false 且 typeof sendFile!==function（声明=实装 E1）', () => {
+  const { adapter } = harness()
+  assert.equal(adapter.caps.fileOut, false)
+  assert.equal(adapter.caps.fileIn, false)
+  assert.equal(adapter.caps.imageIn, false)
+  assert.notEqual(typeof adapter.sendFile, 'function')
+  assert.equal(adapter.sendFile, undefined)
+})
+
 // —— 收：chat.db 只读轮询 ————————————————————————————————
 
 test('chat.db 缺失：connect 落明确失败态（未找到 chat.db + 完全磁盘访问指引），不静默空轮询', async () => {
