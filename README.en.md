@@ -8,7 +8,7 @@ A union IM bridge for DeepSeek Harness — a clean-room reimplementation merging
 
 ## Status
 
-**0.1.0 feature release**: all 14 P0/P1/P2 channel protocol layers, the cross-version narrow waist, session engine, approval/question IM loop and multi-account management are delivered (574 unit tests; host-farm smoke green on 0.1.2 / 0.1.5 / 0.1.7 / 0.2.1 lines). Outstanding real-device acceptance items are registered in CHANGELOG.
+**0.1.0 feature release**: all 12 channel adapters (11 platforms; WeCom contributes two: intelligent bot + self-built app), the cross-version narrow waist, session engine, approval/question IM loop and multi-account management are delivered (574 unit tests; host-farm smoke green on 0.1.2 / 0.1.5 / 0.1.7 / 0.2.1 lines). Outstanding real-device acceptance items are registered in CHANGELOG.
 
 Highlights:
 
