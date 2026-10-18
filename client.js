@@ -624,25 +624,28 @@ window.__ModuleLoader__.load({
       // 契约实读（dsh-session-guard 同宿主先例，src/client/index.ts:147/159）：
       // inject(slotName, factory) 二参必须是工厂，工厂内调 register(desc, Component)；
       // 裸传对象会被宿主当工厂取 .call → `e.execute.call is not a function`。
-      // 三形依序：①dsh-family.tab（0.2.x 家族共享设置节，贡献 tab）
-      //           ②settings.section 直接挂（无家族节的 0.1.x 线）
-      //           ③overlayFallback 兜底。
+      // 三形依序：①settings.section 独立顶层项（IM 面板信息密度大，不挤家族票位；
+      //   顶层节 desc 形实读 guard 先例 index.ts:223-240：label 为惰性函数、带 priority）
+      //           ②overlayFallback 兜底。
       try {
         if (typeof ctx.slots.inject === 'function' && typeof ctx.slots.register === 'function') {
-          ctx.slots.inject('dsh-family.tab', function () {
+          ctx.slots.inject('settings.section', function () {
+            console.info('[dsh-im-union] settings.section factory fired')
             return ctx.slots.register({
-              name: 'dsh-family.tab',
+              name: 'settings.section',
               id: 'dsh-im-union',
-              order: 41,
-              label: t('settings.title'),
-              locale: 'im-union',
+              order: 42,
+              priority: 5,
+              label: function () {
+                return t('settings.title')
+              },
               inject: function () {
                 return {};
               },
-            }, UnionPanel);
-          });
-          registered = true;
-          console.info('[dsh-im-union] dsh-family.tab 已贡献（家族设置节）')
+            }, UnionPanel)
+          })
+          registered = true
+          console.info('[dsh-im-union] settings.section 独立顶层项已声明')
           // bundle 详情页配置卡（Dsh 0.2.0：Plugins 详情页不自动渲染，须 key=包名 注册）。
           try {
             ctx.slots.inject('plugins.bundle.config', function () {
