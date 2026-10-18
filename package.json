@@ -102,6 +102,9 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.76.0",
+    "@matrix-org/olm": "^3.2.15",
+    "imapflow": "^2.5.2",
+    "nodemailer": "^10.1.2",
     "qrcode": "^1.5.4"
   },
   "repository": {

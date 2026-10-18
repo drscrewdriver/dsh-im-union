@@ -1,5 +1,5 @@
 /**
- * Matrix 渠道适配器（T3.2：Client-Server API v1.11 + olm E2EE 实验档，required/optional 两模式）。
+ * Matrix 渠道适配器（T3.2：Client-Server API v1.11 + olm E2EE A 档入站解密，disabled/optional/required 三档）。
  *
  * 净室口径：以下协议事实全部取自 matrix.org 公开规范独立重实现，未参考任何第三方
  * SDK（matrix-js-sdk / matrix-bot-sdk / matrix-nio）源码结构；运行时依赖为零
@@ -47,14 +47,20 @@
  *   客户端须剥离回退块再展示正文。
  * - 长度：联邦事件体量上限 65536 字节，本实现按任务口径保守取 4000 字符分段（引擎分段）。
  *
- * E2EE 诚实档位（本期核心约束）：olm WASM 解密库不在本包依赖内（宿主侧后接），
- * 因此绝不在无解密面时伪称 E2EE——
- * - `encryption='optional'`（默认）：加密事件（type=`m.room.encrypted`）投递
- *   占位文案 `[加密消息：E2EE 解密面未接]`，不丢事件（回合可见「有消息但解不开」）；
- * - `encryption='required'`：connect 期（首轮 sync 房间面）对每个房间探
- *   `m.room.encryption` 状态，已加密且无解密面 → **明确拒连该房间**（不消费其事件、
- *   邀请面 invite_state 声明加密则不 join、出站亦本地拒发），诊断项 `e2ee` 报
- *   failed 并带原因；探测结果不明时不判死（报 unverified）。
+ * E2EE 诚实档位（本期核心约束；A 档解密面实现在 matrix-e2ee.ts，协议锚点见彼处头注释）：
+ * olm js 绑定（@matrix-org/olm@3.2.15）为本包可安装依赖，但解密面只在构造期注入
+ * `olmFactory` 时才会接通（测试传 fake、宿主显式传 loadRealOlm）——
+ * - `encryption='disabled'`（默认，零行为漂移）：与历史完全一致——加密事件投递占位
+ *   文案、不上传设备密钥、不消费 to_device、required 拒连语义不触发；
+ * - `encryption='optional'`：解密面接上时尝试 Megolm 解密；密钥未达/加载失败 → 占位
+ *   文案 `[加密消息：E2EE 解密面未接]` 不丢事件（维持现状降级）；
+ * - `encryption='required'`：解密面已加载时**不再拒连**加密房间——解密失败的消息给
+ *   占位 `[加密消息：密钥未达，A 档不保证跨设备分享]` 而非拒连（回合可见「有消息但
+ *   密钥还没到」）；解密面未接（未注入工厂/olm 加载失败）时仍**明确拒连**该房间
+ *   （旧兜底：不消费其事件、invite_state 声明加密则不 join、出站本地拒发），诊断项
+ *   `e2ee` 报 failed 并带原因；探测结果不明时不判死（报 unverified）。
+ * A 档边界（如实登记，不伪称全 E2EE）：仅覆盖会话内已分发 room_key 的解密，跨设备
+ * 分享不完整（keys/claim + Olm 会话建立 + 密钥转发未实现）；出站一律不加密。
  *
  * dm/group 判定口径（简化，注释即规范）：config.dmRoomList 命中即 dm；否则取
  * `GET /rooms/{roomId}/members` 的 join 成员数，≤2 判 dm、>2 判 group，判定失败
@@ -77,9 +83,14 @@ import type {
   SemanticMessage,
 } from './types.js'
 import { FILE_BUDGET } from '../engine/files.js'
+import { MatrixE2eeCrypto, deriveDeviceId, ONETIME_KEY_FLOOR, type OlmFactory } from './matrix-e2ee.js'
 
-/** E2EE 档位：optional=加密房间降级占位；required=加密房间拒连。 */
-export type MatrixE2eeMode = 'optional' | 'required'
+/**
+ * E2EE 档位：disabled=不接解密面（默认，零漂移，与旧 optional 观察行为一致）；
+ * optional=接了解密面但失败容忍占位；required=解密面在位时解密失败给密钥未达占位、
+ * 解密面缺席时拒连加密房间（旧兜底）。
+ */
+export type MatrixE2eeMode = 'disabled' | 'optional' | 'required'
 
 const DEFAULT_SYNC_TIMEOUT_MS = 30_000
 /** 编辑流式节流：Matrix 速率限制按设备桶，留 1.1s 余量（与 telegram/slack 同档）。 */
@@ -97,8 +108,11 @@ const POLL_MIN_INTERVAL_MS = 200
 const SEEN_EVENT_LIMIT = 1_000
 const SELF_EVENT_LIMIT = 2_000
 
-/** 无解密面时的占位文案（协议事实：m.room.encrypted 在本包不可解）。 */
+/** 无解密面时的占位文案（协议事实：m.room.encrypted 在解密面缺席时不可解）。 */
 export const ENCRYPTED_PLACEHOLDER = '[加密消息：E2EE 解密面未接]'
+
+/** required + 解密面在位但该消息密钥未达时的占位（A 档口径：不丢事件、不伪称解密成功）。 */
+export const ENCRYPTED_KEY_MISSING_PLACEHOLDER = '[加密消息：密钥未达，A 档不保证跨设备分享]'
 
 /**
  * 时间线事件 → 可下载的明文 m.file content（编辑取 m.new_content）；
@@ -162,8 +176,14 @@ export interface MatrixAdapterOptions {
   accessToken: string
   /** homeserver 根地址，形如 https://matrix.example.org（无尾斜杠）。 */
   homeserverBaseUrl: string
-  /** E2EE 档位，缺省 optional。 */
+  /** E2EE 档位，缺省 disabled（零行为漂移；不注入 olmFactory 时三档均维持无解密面现状）。 */
   encryption?: MatrixE2eeMode
+  /**
+   * olm 工厂注入面（A 档解密核心 matrix-e2ee.ts）：encryption≠disabled 且本位提供时，
+   * connect 期引导设备密钥并消费 to_device m.room_key 解密。缺省不注入=旧行为
+   * （工厂 createMatrixAdapter 也不自动装载 olm——零漂移门禁，宿主装配显式传 loadRealOlm）。
+   */
+  olmFactory?: OlmFactory
   /** 强制按 dm 处理的房间 id 列表（简化私聊判定）。 */
   dmRoomList?: string[]
   /** sync 长轮询超时 ms，缺省 30000。 */
@@ -218,12 +238,19 @@ export class MatrixAdapter implements ChannelAdapter {
   private readonly accessToken: string
   private readonly base: string
   private readonly e2eeMode: MatrixE2eeMode
+  private readonly olmFactory: OlmFactory | undefined
   private readonly fetchImpl: FetchLike
   private readonly log: (msg: string) => void
   private readonly syncTimeoutMs: number
   private readonly editThrottleMs: number
   private readonly dmRoomList: string[]
   private readonly deliverInitialHistory: boolean
+  /** A 档解密面（olmFactory 注入且 init 成功才在位）。 */
+  private e2ee: MatrixE2eeCrypto | undefined
+  private e2eeInitTried = false
+  private e2eeInitError = ''
+  private e2eeDeviceId = ''
+  private e2eeUploadOk = false
 
   private listeners: MessageListener[] = []
   private pollController: AbortController | undefined
@@ -253,7 +280,8 @@ export class MatrixAdapter implements ChannelAdapter {
     }
     this.accessToken = options.accessToken
     this.base = options.homeserverBaseUrl.replace(/\/+$/, '')
-    this.e2eeMode = options.encryption ?? 'optional'
+    this.e2eeMode = options.encryption ?? 'disabled'
+    this.olmFactory = options.olmFactory
     this.fetchImpl = options.fetchImpl ?? ((globalThis as { fetch?: FetchLike }).fetch as FetchLike)
     this.log = options.logger ?? (() => {})
     this.syncTimeoutMs = options.syncTimeoutMs ?? DEFAULT_SYNC_TIMEOUT_MS
@@ -265,6 +293,11 @@ export class MatrixAdapter implements ChannelAdapter {
   /** required 模式下已被拒连的房间 id（诊断/测试可见）。 */
   get refusedRoomIds(): string[] {
     return [...this.rejectedRooms.keys()]
+  }
+
+  /** A 档解密面是否就绪（olm 加载成功；未注入工厂恒 false=零漂移）。 */
+  private get e2eeReady(): boolean {
+    return this.e2ee !== undefined && this.e2ee.ready
   }
 
   /** 已建立的 sync 游标是否存在（不泄漏游标内容）。 */
@@ -288,6 +321,8 @@ export class MatrixAdapter implements ChannelAdapter {
       signal.addEventListener('abort', onAbort, { once: true })
       this.externalAbortCleanup = () => signal.removeEventListener('abort', onAbort) // disconnect 後必须摘除，防重连累积
     }
+    // 解密面引导（仅 encryption≠disabled 且注入 olmFactory 时发生；disabled 零请求零漂移）
+    await this.initE2ee(link)
     // connect 期跑一轮 sync：建游标 + 房间面（required 模式在此拒连加密房间、邀请在此自动 join）
     await this.syncOnce(link)
     void this.pollLoop(link)
@@ -298,6 +333,8 @@ export class MatrixAdapter implements ChannelAdapter {
     this.externalAbortCleanup?.()
     this.externalAbortCleanup = undefined
     this.pollController?.abort()
+    // A 档：会话密钥随连接释放（重连后须再收 to_device m.room_key——跨设备分享不完整，如实）
+    this.e2ee?.freeSessions()
   }
   private externalAbortCleanup: (() => void) | undefined
 
@@ -305,6 +342,37 @@ export class MatrixAdapter implements ChannelAdapter {
     this.listeners.push(listener)
     return () => {
       this.listeners = this.listeners.filter((l) => l !== listener)
+    }
+  }
+
+  /**
+   * A 档解密面引导：olm 加载 → device_id（accessToken 哈希派生，不引入状态文件依赖：
+   * 同 token+user 重启同设备稳定；token 轮换即换设备身份，旧设备的 room_key 不会跟来，
+   * 已登记为 A 档边界）→ POST /_matrix/client/v3/keys/upload 发布设备密钥 +
+   * one-time keys（规范端点；任务锚点 crypto/device_keys 非规范面，见 matrix-e2ee.ts 头注释）。
+   * 失败不抛：optional 退占位现状；required 退旧拒连兜底（e2eeReady=false 即旧行为）。
+   */
+  private async initE2ee(signal?: AbortSignal): Promise<void> {
+    if (this.e2eeMode === 'disabled' || this.olmFactory === undefined || this.e2eeInitTried) return
+    this.e2eeInitTried = true
+    const crypto = new MatrixE2eeCrypto({ olmFactory: this.olmFactory, logger: this.log })
+    if (!(await crypto.init())) {
+      this.e2eeInitError = crypto.lastError
+      return
+    }
+    this.e2ee = crypto
+    this.e2eeDeviceId = deriveDeviceId(this.accessToken, this.userId)
+    const payload = crypto.deviceKeysPayload(this.userId, this.e2eeDeviceId)
+    if (payload === undefined) {
+      this.log('matrix e2ee: device_keys 组装失败（解密面可用但未发布设备密钥，诊断报 unverified）')
+      return
+    }
+    try {
+      await this.requestJson('POST', '/_matrix/client/v3/keys/upload', { body: payload, signal, retryOn429: true })
+      this.e2eeUploadOk = true
+      this.log('matrix e2ee: 设备密钥已发布（A 档：仅覆盖会话内已分发 room_key 的解密，跨设备分享不完整）')
+    } catch (error) {
+      this.log(`matrix e2ee: /keys/upload 失败（解密面仍就位，但对端设备不会向本设备发钥）: ${describe(error)}`)
     }
   }
 
@@ -357,6 +425,29 @@ export class MatrixAdapter implements ChannelAdapter {
       throw error
     }
     if (typeof json.next_batch === 'string' && json.next_batch !== '') this.nextBatch = json.next_batch
+    // A 档：to_device 的 m.room_key 存取 + one-time keys 水位补充（仅解密面在位时；
+    // disabled/未注入零额外请求，零漂移）
+    if (this.e2ee !== undefined) {
+      const toDevice = asRecord(json.to_device)
+      const deviceEvents = Array.isArray(toDevice.events) ? (toDevice.events as MatrixEvent[]) : []
+      for (const ev of deviceEvents) {
+        if (ev.type === 'm.room_key') {
+          this.e2ee.handleRoomKey(ev.content, typeof ev.sender === 'string' ? ev.sender : '')
+        }
+      }
+      const counts = asRecord(json.device_one_time_keys_count)
+      const remaining = typeof counts.curve25519 === 'number' ? counts.curve25519 : undefined
+      if (remaining !== undefined && remaining < ONETIME_KEY_FLOOR && this.e2eeUploadOk) {
+        const topUp = this.e2ee.topUpOneTimeKeys(this.e2eeDeviceId, this.userId)
+        if (topUp !== undefined) {
+          try {
+            await this.requestJson('POST', '/_matrix/client/v3/keys/upload', { body: topUp, signal, retryOn429: true })
+          } catch (error) {
+            this.log(`matrix e2ee: one-time keys 补充失败（下轮再试）: ${describe(error)}`)
+          }
+        }
+      }
+    }
     const rooms = asRecord(json.rooms)
     const invite = asRecord(rooms.invite)
     for (const roomId of Object.keys(invite)) {
@@ -368,7 +459,8 @@ export class MatrixAdapter implements ChannelAdapter {
       if (this.rejectedRooms.has(roomId)) continue
       const room = asRecord(roomRaw)
       this.rememberStateNames(room)
-      if (this.e2eeMode === 'required' && (await this.isRoomEncrypted(roomId, signal))) {
+      // required + 解密面在位：不再拒连（解密失败给密钥未达占位）；解密面缺席才走旧拒连兜底
+      if (this.e2eeMode === 'required' && !this.e2eeReady && (await this.isRoomEncrypted(roomId, signal))) {
         this.rejectedRooms.set(roomId, '房间已启用 m.megolm 加密，本包无 olm 解密面（required 模式拒连）')
         this.log(`matrix: 拒连加密房间 ${roomId}`)
         continue
@@ -382,10 +474,31 @@ export class MatrixAdapter implements ChannelAdapter {
           if (this.seenEventIds.has(ev.event_id)) continue
           this.rememberSeen(ev.event_id)
         }
-        const message = this.normalizeEvent(roomId, ev)
+        // 观测到 m.room.encrypted 即实锤该房间启用 Megolm（/#get_matrixclientv3sync +
+        // Megolm 条款）：required 出站守卫据此本地拒发——A 档出站不加密，而规范
+        // （/#sending-encrypted-messages）要求加密房间不得发未加密事件，不能拿解密面
+        // 在位冒充可回话。
+        if (ev.type === 'm.room.encrypted') this.roomEncrypted.set(roomId, true)
+        // A 档解密路径：解密面在位时 m.room.encrypted 先解回明文事件再归一；
+        // 失败不丢事件（required→密钥未达占位，optional→维持现状占位）。
+        let effective = ev
+        if (ev.type === 'm.room.encrypted' && this.e2eeReady && this.e2ee !== undefined) {
+          const fields = this.e2ee.decryptToEventFields(roomId, ev)
+          effective =
+            fields !== undefined
+              ? { type: fields.type, event_id: ev.event_id, sender: ev.sender, origin_server_ts: ev.origin_server_ts, content: fields.content }
+              : {
+                  type: 'm.room.message',
+                  event_id: ev.event_id,
+                  sender: ev.sender,
+                  origin_server_ts: ev.origin_server_ts,
+                  content: { msgtype: 'm.text', body: this.e2eeMode === 'required' ? ENCRYPTED_KEY_MISSING_PLACEHOLDER : ENCRYPTED_PLACEHOLDER },
+                }
+        }
+        const message = this.normalizeEvent(roomId, effective)
         if (message === undefined) continue
         // 异步 fill 范式：m.file 先拉字节再投递（失败只降级，不丢整条消息）。
-        const fileContent = plainFileContent(ev)
+        const fileContent = plainFileContent(effective)
         if (fileContent !== undefined) await this.fillFiles(message, fileContent)
         for (const listener of this.listeners) listener(message)
       }
@@ -396,7 +509,7 @@ export class MatrixAdapter implements ChannelAdapter {
   private async acceptInvite(roomId: string, invite: Record<string, any>, signal?: AbortSignal): Promise<void> {
     if (this.joinedInvites.has(roomId) || this.rejectedRooms.has(roomId)) return
     this.joinedInvites.add(roomId)
-    if (this.e2eeMode === 'required') {
+    if (this.e2eeMode === 'required' && !this.e2eeReady) {
       const events = Array.isArray(asRecord(invite.invite_state).events) ? (asRecord(invite.invite_state).events as MatrixEvent[]) : []
       if (events.some((ev) => ev.type === 'm.room.encryption')) {
         this.rejectedRooms.set(roomId, '邀请面 invite_state 已声明 m.room.encryption，本包无 olm 解密面（required 模式拒连）')
@@ -508,8 +621,13 @@ export class MatrixAdapter implements ChannelAdapter {
     }
     const content = asRecord(ev.content)
     if (ev.type === 'm.room.encrypted') {
-      // required 模式已在上游拒连整个房间；此处是双保险（不伪称解密成功）
-      if (this.e2eeMode === 'required') return undefined
+      // required + 解密面缺席：双保险丢事件（不伪称解密成功）；解密面在位时 syncOnce
+      // 已把事件替换为解密结果/占位合成体，漏到本半边的按密钥未达占位处理。
+      if (this.e2eeMode === 'required') {
+        if (!this.e2eeReady) return undefined
+        semantic.text = ENCRYPTED_KEY_MISSING_PLACEHOLDER
+        return semantic
+      }
       semantic.text = ENCRYPTED_PLACEHOLDER
       return semantic
     }
@@ -560,7 +678,7 @@ export class MatrixAdapter implements ChannelAdapter {
     return `imu-${Date.now().toString(36)}-${this.txnSeq.toString(36)}`
   }
 
-  /** required 模式守卫：已知加密房间一律本地拒发（明文不得进加密房间）。 */
+  /** required 守卫：已知加密房间一律本地拒发（A 档出站不加密，规范禁明文进加密房间）。 */
   private assertRoomSendable(roomId: string): void {
     const refused = this.rejectedRooms.has(roomId) || this.roomEncrypted.get(roomId) === true
     if (this.e2eeMode === 'required' && refused) {
@@ -827,20 +945,35 @@ export class MatrixAdapter implements ChannelAdapter {
         ? `已观测房间 ${this.roomKinds.size} 个，游标已滚动${this.rejectedRooms.size > 0 ? `（拒连 ${this.rejectedRooms.size} 个）` : ''}`
         : '未连接',
     })
-    if (this.e2eeMode === 'required') {
+    if (this.e2ee !== undefined && this.e2ee.ready) {
+      // A 档实探：olm 已加载才走到这里；密钥未发布成功不谎报 passed。
+      checks.push({
+        name: 'e2ee',
+        status: this.e2eeUploadOk ? 'passed' : 'unverified',
+        hint: this.e2eeUploadOk
+          ? `A 档解密面已就位：device_id=${this.e2eeDeviceId}，已存 room_key 会话 ${this.e2ee.sessionCount()} 个（仅覆盖会话内已分发 room_key 的解密，跨设备分享不完整；出站不加密）`
+          : 'olm 已加载但设备密钥未发布成功（/keys/upload 未成，对端设备不会向本设备发钥），未据此判死',
+      })
+    } else if (this.e2eeMode === 'required') {
       const refused = [...this.rejectedRooms.entries()]
       if (refused.length > 0) {
         checks.push({
           name: 'e2ee',
           status: 'failed',
-          hint: `required 模式已拒连 ${refused.length} 个加密房间（olm 解密面未接）：${refused.map(([id, why]) => `${id} ${why}`).join('；')}`.slice(0, 300),
+          hint: `required 模式已拒连 ${refused.length} 个加密房间（olm 解密面未接${this.e2eeInitError === '' ? '' : `：加载失败 ${this.e2eeInitError}`}）：${refused.map(([id, why]) => `${id} ${why}`).join('；')}`.slice(0, 300),
         })
+      } else if (this.e2eeInitError !== '') {
+        checks.push({ name: 'e2ee', status: 'failed', hint: `olm 解密面加载失败（${this.e2eeInitError}），required 模式对加密房间按拒连处理` })
       } else if (this.e2eeProbeUncertain) {
         checks.push({ name: 'e2ee', status: 'unverified', hint: '加密状态探测结果不明（未据此判死）' })
       } else {
         checks.push({ name: 'e2ee', status: 'passed', hint: 'required 模式：未检出已启用加密的房间' })
       }
+    } else if (this.e2eeMode === 'optional' && this.e2eeInitError !== '') {
+      checks.push({ name: 'e2ee', status: 'unverified', hint: `optional 模式：olm 解密面加载失败（${this.e2eeInitError}），加密房间按占位文案降级（不伪称 E2EE）` })
     } else {
+      // disabled（默认档）与无解密面的 optional：零漂移——文案与旧 optional 逐字一致
+      //（两档观察行为本就相同：加密事件占位降级、olm 解密面未接）。
       checks.push({
         name: 'e2ee',
         status: 'unverified',
@@ -1001,9 +1134,11 @@ export function stripReplyFallback(body: string): { text: string; quote?: string
 }
 
 function parseE2eeMode(raw: string | undefined, accountId: string): MatrixE2eeMode {
-  if (raw === undefined || raw === '' || raw === 'optional') return 'optional'
+  if (raw === undefined || raw === '' || raw === 'disabled') return 'disabled'
+  if (raw === 'optional') return 'optional'
   if (raw === 'required') return 'required'
-  throw new Error(`matrix 账号 ${accountId}: config.encryption 只能是 optional|required（当前为 ${raw}）`)
+  // 错文案保留旧子串「只能是 optional|required」防配置面板正则断裂（新增 disabled 档）
+  throw new Error(`matrix 账号 ${accountId}: config.encryption 只能是 optional|required|disabled（当前为 ${raw}）`)
 }
 
 function positiveIntOr(raw: string | undefined, fallback: number): number {
@@ -1015,11 +1150,14 @@ function positiveIntOr(raw: string | undefined, fallback: number): number {
 /**
  * 工厂挂 registry（注册面由 registry.ts 追加，本文件不自带注册副作用）：
  * secrets.accessToken 缺位即抛；config.homeserverBaseUrl 缺位即抛；config.encryption 严格解析。
+ * 零漂移门禁：工厂面不自动装载 olm（既有 required 拒连测试与 registry 默认行为不变），
+ * A 档解密需装配方显式传 olmFactory（如 loadRealOlm）；registry 侧接线不在本期改动面。
  */
 export function createMatrixAdapter(options: {
   accountId: string
   config: Record<string, string>
   secrets: Record<string, string | undefined>
+  olmFactory?: OlmFactory
 }): MatrixAdapter {
   const accessToken = options.secrets.accessToken
   if (typeof accessToken !== 'string' || accessToken === '') {
@@ -1040,6 +1178,7 @@ export function createMatrixAdapter(options: {
     homeserverBaseUrl,
     encryption,
     syncTimeoutMs,
+    ...(options.olmFactory === undefined ? {} : { olmFactory: options.olmFactory }),
     ...(dmRoomList.length > 0 ? { dmRoomList } : {}),
   })
 }

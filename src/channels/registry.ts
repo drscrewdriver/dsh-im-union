@@ -51,3 +51,6 @@ registerChannel('whatsapp', async (options) => (await import('./whatsapp.js')).c
 registerChannel('matrix', async (options) => (await import('./matrix.js')).createMatrixAdapter(options))
 registerChannel('imessage', async (options) => (await import('./imessage.js')).createImessageAdapter(options))
 registerChannel('wecom-app', async (options) => (await import('./wecom-app.js')).createWecomAppAdapter(options))
+registerChannel('email', async (options) => (await import('./email.js')).createEmailAdapter(options))
+registerChannel('dingtalk-notify', async (options) => (await import('./dingtalk-notify.js')).createDingtalkNotifyAdapter(options))
+registerChannel('qq-notify', async (options) => (await import('./qq-notify.js')).createQqNotifyAdapter(options))

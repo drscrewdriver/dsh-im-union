@@ -114,7 +114,7 @@ export const CHANNEL_META: Record<string, ChannelMeta> = {
     fields: [
       cred('accessToken', 'Access Token', 'Access Token'),
       { key: 'homeserverBaseUrl', label: { zh: ' homeserver 地址', en: 'Homeserver base URL' }, secret: false, required: true },
-      plain('encryption', 'E2EE 模式 optional/required（首版解密面未接）', 'E2EE mode (decrypt not wired)'),
+      plain('encryption', 'E2EE 模式 disabled/optional/required（A 档：入站 Megolm 解密，出站明文）', 'E2EE mode disabled/optional/required (tier A: inbound Megolm decrypt, plaintext outbound)'),
       plain('dmRoomList', '私聊房间表（逗号分隔）', 'DM room list (comma separated)'),
     ],
   },
@@ -136,6 +136,43 @@ export const CHANNEL_META: Record<string, ChannelMeta> = {
       cred('encodingAesKey', '回调 EncodingAESKey', 'Callback EncodingAESKey'),
       cred('callbackToken', '回调 Token', 'Callback Token'),
       { key: 'agentId', label: { zh: '应用 AgentId', en: 'App AgentId' }, secret: false, required: true },
+    ],
+  },
+  email: {
+    id: 'email',
+    label: { zh: 'Email（IMAP/SMTP）', en: 'Email (IMAP/SMTP)' },
+    bind: 'credentials',
+    fields: [
+      { key: 'address', label: { zh: '邮箱地址', en: 'Email address' }, secret: false, required: true },
+      { key: 'imapHost', label: { zh: 'IMAP 主机', en: 'IMAP host' }, secret: false, required: true },
+      { key: 'smtpHost', label: { zh: 'SMTP 主机', en: 'SMTP host' }, secret: false, required: true },
+      plain('imapPort', 'IMAP 端口（默认 993）', 'IMAP port (default 993)'),
+      plain('smtpPort', 'SMTP 端口（默认 465）', 'SMTP port (default 465)'),
+      cred('password', '邮箱密码/应用专用密码', 'Mailbox password / app-specific password'),
+      plain('pollIntervalSec', '拉询间隔秒（默认 60）', 'Poll interval seconds (default 60)'),
+    ],
+  },
+  'dingtalk-notify': {
+    id: 'dingtalk-notify',
+    label: { zh: '钉钉通知（群机器人）', en: 'DingTalk notify (group webhook)' },
+    bind: 'credentials',
+    // 纯出站通知类：群设置直加自定义机器人，不建应用；安全三档按官方口径。
+    fields: [
+      cred('webhook', 'Webhook 地址或 access_token', 'Webhook URL or access_token'),
+      cred('signSecret', '加签密钥（security=sign 时必填）', 'Signing secret (when security=sign)'),
+      plain('security', '安全档 keyword/sign/none', 'Security mode keyword/sign/none'),
+      plain('keyword', '关键词模板（keyword 档未命中时自动补前缀）', 'Keyword template (auto-prefixed when missing)'),
+      plain('atAll', '是否 @所有人（true）', 'Mention all (true)'),
+    ],
+  },
+  'qq-notify': {
+    id: 'qq-notify',
+    label: { zh: 'QQ 通知（主动推送）', en: 'QQ notify (active push)' },
+    bind: 'credentials',
+    // 官方主动消息面（bot.qq.com 查实）：受频控与用户「允许主动发送」开关约束。
+    fields: [
+      { key: 'appId', label: { zh: '机器人 AppID', en: 'Bot AppID' }, secret: false, required: true },
+      cred('clientSecret', '机器人 AppSecret', 'Bot AppSecret'),
     ],
   },
 }
