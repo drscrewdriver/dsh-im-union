@@ -621,23 +621,50 @@ window.__ModuleLoader__.load({
       }
 
       var registered = false;
+      // 契约实读（dsh-session-guard 同宿主先例，src/client/index.ts:147/159）：
+      // inject(slotName, factory) 二参必须是工厂，工厂内调 register(desc, Component)；
+      // 裸传对象会被宿主当工厂取 .call → `e.execute.call is not a function`。
+      // 三形依序：①dsh-family.tab（0.2.x 家族共享设置节，贡献 tab）
+      //           ②settings.section 直接挂（无家族节的 0.1.x 线）
+      //           ③overlayFallback 兜底。
       try {
-        var section = {
-          id: 'dsh-im-union.settings',
-          label: t('settings.title'),
-          order: 41,
-          component: UnionPanel,
-        };
-        if (ctx.slots && typeof ctx.slots.inject === 'function') {
-          // 走包装管道（裸 register 在 ≤0.1.5 壳不解）。
-          ctx.slots.inject('settings.section', section);
+        if (typeof ctx.slots.inject === 'function' && typeof ctx.slots.register === 'function') {
+          ctx.slots.inject('dsh-family.tab', function () {
+            return ctx.slots.register({
+              name: 'dsh-family.tab',
+              id: 'dsh-im-union',
+              order: 41,
+              label: t('settings.title'),
+              locale: 'im-union',
+              inject: function () {
+                return {};
+              },
+            }, UnionPanel);
+          });
           registered = true;
-        } else if (ctx.slots && typeof ctx.slots.register === 'function') {
-          ctx.slots.register('settings.section', section);
-          registered = true;
+          console.info('[dsh-im-union] dsh-family.tab 已贡献（家族设置节）')
+          // bundle 详情页配置卡（Dsh 0.2.0：Plugins 详情页不自动渲染，须 key=包名 注册）。
+          try {
+            ctx.slots.inject('plugins.bundle.config', function () {
+              return ctx.slots.register(
+                {
+                  name: 'plugins.bundle.config',
+                  key: 'dsh-im-union',
+                  inject: function () {
+                    return {};
+                  },
+                },
+                UnionPanel,
+              )
+            })
+          } catch (error) {
+            console.warn('[dsh-im-union] plugins.bundle.config 席位不可用：', error)
+          }
+        } else {
+          console.warn('[dsh-im-union] ctx.slots 无 inject/register 面（老线或壳缺）：', typeof ctx.slots)
         }
       } catch (error) {
-        console.warn('[dsh-im-union] settings.section 槽位不可用：', error);
+        console.warn('[dsh-im-union] 槽位注册失败：', error)
       }
       if (!registered) {
         // gen1 或槽位面异常 → 浮窗兜底，保证至少有一条可视管理入口。
