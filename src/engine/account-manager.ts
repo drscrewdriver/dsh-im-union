@@ -120,8 +120,16 @@ export class AccountManager {
 
   /** 新增或整体替换账号；secrets 单向入 vault（键=meta 的 secret 字段名）；随后重启生效。
    * skipConnect：扫码类渠道先建档后取凭据（微信 iLink），建档期不建适配器。 */
+  /** 策略字段按 type 归位：纯出站通知类无入站语义，dmAllowlist/groupEnabled 不落不报。 */
+  private isNotifyOnly(channel: string): boolean {
+    return CHANNEL_META[channel]?.notifyOnly === true
+  }
+
   async upsert(record: AccountRecord, secrets?: Record<string, string>, opts?: { skipConnect?: boolean }): Promise<void> {
     this.validate(record)
+    if (this.isNotifyOnly(record.channel)) {
+      record = { ...record, dmAllowlist: undefined, groupEnabled: undefined }
+    }
     const index = this.records.findIndex((r) => r.accountId === record.accountId)
     if (index >= 0) {
       await this.teardown(record.accountId)
@@ -174,10 +182,13 @@ export class AccountManager {
     return true
   }
 
-  /** 白名单整值替换（账号级私聊准入，红线 D6 的数据源）。 */
+  /** 白名单整值替换（账号级私聊准入，红线 D6 的数据源）；通知类无此概念。 */
   async setAllowlist(accountId: string, userIds: string[]): Promise<boolean> {
     const record = this.records.find((r) => r.accountId === accountId)
     if (record === undefined) return false
+    if (this.isNotifyOnly(record.channel)) {
+      throw new AccountValidationError('该渠道为纯出站通知类，无私聊准入概念')
+    }
     record.dmAllowlist = userIds
     this.persist()
     const live = this.live.get(accountId)
@@ -221,6 +232,7 @@ export class AccountManager {
         fields.push({ key: field.key, configured: value !== undefined })
       }
       const live = this.live.get(record.accountId)
+      const notify = this.isNotifyOnly(record.channel)
       rows.push({
         accountId: record.accountId,
         channel: record.channel,
@@ -228,8 +240,9 @@ export class AccountManager {
         paused: record.paused === true,
         connected: live?.adapter?.connected === true,
         secretFields: fields,
-        dmAllowlist: record.dmAllowlist ?? [],
-        groupEnabled: record.groupEnabled,
+        // 通知类不回显策略字段（存储态也已剥除，双向一致）。
+        dmAllowlist: notify ? [] : record.dmAllowlist ?? [],
+        groupEnabled: notify ? undefined : record.groupEnabled,
       })
     }
     return rows

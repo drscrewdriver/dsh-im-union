@@ -362,6 +362,11 @@ window.__ModuleLoader__.load({
           var allowValue = allowDrafts[row.accountId] !== undefined
             ? allowDrafts[row.accountId]
             : (row.dmAllowlist || []).join('\n');
+          // 策略字段按 type 归位：纯出站通知类不渲染白名单编辑块（后端也已拒写）。
+          var rowNotify = false;
+          for (var ri = 0; ri < channels.length; ri += 1) {
+            if (channels[ri].id === row.channel && channels[ri].notifyOnly === true) rowNotify = true;
+          }
           body.push(
             createElement(
               'div',
@@ -393,28 +398,34 @@ window.__ModuleLoader__.load({
                 }, t('accounts.remove'))
               ),
               checkRows.length > 0 ? createElement('ul', null, checkRows) : null,
-              createElement('div', { style: { marginTop: 6 } }, t('accounts.allowlist')),
-              createElement('textarea', {
-                rows: 2,
-                style: { width: '100%', marginTop: 2 },
-                value: allowValue,
-                onChange: function (event) {
-                  var next = Object.assign({}, allowDrafts);
-                  next[row.accountId] = event.target.value;
-                  setAllowDrafts(next);
-                },
-              }),
-              createElement('button', {
-                style: { marginTop: 4 },
-                disabled: busy,
-                onClick: function () {
-                  var ids = String(allowValue || '')
-                    .split('\n')
-                    .map(function (v) { return v.trim(); })
-                    .filter(function (v) { return v !== ''; });
-                  doAction('/accounts/allowlist', { accountId: row.accountId, userIds: ids }, t('accounts.saved'));
-                },
-              }, t('accounts.allowlist.save'))
+              rowNotify
+                ? null
+                : createElement('div', { style: { marginTop: 6 } }, t('accounts.allowlist')),
+              rowNotify
+                ? null
+                : createElement('textarea', {
+                    rows: 2,
+                    style: { width: '100%', marginTop: 2 },
+                    value: allowValue,
+                    onChange: function (event) {
+                      var next = Object.assign({}, allowDrafts);
+                      next[row.accountId] = event.target.value;
+                      setAllowDrafts(next);
+                    },
+                  }),
+              rowNotify
+                ? null
+                : createElement('button', {
+                    style: { marginTop: 4 },
+                    disabled: busy,
+                    onClick: function () {
+                      var ids = String(allowValue || '')
+                        .split('\n')
+                        .map(function (v) { return v.trim(); })
+                        .filter(function (v) { return v !== ''; });
+                      doAction('/accounts/allowlist', { accountId: row.accountId, userIds: ids }, t('accounts.saved'));
+                    },
+                  }, t('accounts.allowlist.save'))
             )
           );
         });

@@ -99,6 +99,23 @@ function makeManager(extra = {}) {
 
 const rec = (over = {}) => ({ accountId: 'a1', channel: 'telegram', ...over })
 
+test('策略字段按 type 归位：notifyOnly 渠道 upsert 剥除白名单/群开关，setAllowlist 拒写', async () => {
+  const { manager } = makeManager()
+  CHANNEL_META.dingtalkNotifyProbe = { id: 'dingtalkNotifyProbe', label: { zh: 'p', en: 'p' }, bind: 'credentials', notifyOnly: true, fields: [] }
+  try {
+    await manager.upsert({ accountId: 'np1', channel: 'dingtalkNotifyProbe', dmAllowlist: ['u1'], groupEnabled: true })
+    const stored = manager.list().find((r) => r.accountId === 'np1')
+    assert.equal(stored.dmAllowlist, undefined, '存储态已剥除 dmAllowlist')
+    assert.equal(stored.groupEnabled, undefined, '存储态已剥除 groupEnabled')
+    const pub = await manager.listPublic()
+    const row = pub.find((r) => r.accountId === 'np1')
+    assert.deepEqual(row.dmAllowlist, [], '回显视图不带策略字段')
+    await assert.rejects(() => manager.setAllowlist('np1', ['u2']), /纯出站通知类/)
+  } finally {
+    delete CHANNEL_META.dingtalkNotifyProbe
+  }
+})
+
 test('upsert：secret 单向入库 + 文件态持久化 + 非暂停即连接', async () => {
   const { manager, vault, engine, adapters } = makeManager()
   await manager.upsert(rec(), { botToken: 'T0KKN' })

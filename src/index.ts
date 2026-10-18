@@ -235,8 +235,16 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
         respond(400, { ok: false, error: 'userIds 需为数组' })
         return
       }
-      const ok = await accounts.setAllowlist(String(b.accountId ?? ''), b.userIds.map((v) => String(v)))
-      respond(ok ? 200 : 404, { ok, error: ok ? undefined : '账号不存在' })
+      try {
+        const ok = await accounts.setAllowlist(String(b.accountId ?? ''), b.userIds.map((v) => String(v)))
+        respond(ok ? 200 : 404, { ok, error: ok ? undefined : '账号不存在' })
+      } catch (error) {
+        if (error instanceof AccountValidationError) {
+          respond(400, { ok: false, error: error.message })
+          return
+        }
+        throw error
+      }
     },
     /** 检查连接：诊断面逐账号，回包已过脱敏纪律（E5）。 */
     '/accounts/check': async ({ body, respond }: AdminRequest) => {
@@ -332,6 +340,8 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
           // 账号 ID = 代理键（CMDB 同构：主键系统生成，业务标识归属性/别名）——
           // 全渠道统一自动生成，设置页不再要求用户填内部键。
           autoAccountId: true,
+          // 纯出站通知类：client 隐藏白名单编辑块，manager 拒写策略字段。
+          notifyOnly: CHANNEL_META[id].notifyOnly === true,
           // 表单驱动元数据（零敏感：字段名/标签/形态，不含值）。
           fields: CHANNEL_META[id].fields.map((f) => ({
             key: f.key,
