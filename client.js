@@ -292,14 +292,16 @@ window.__ModuleLoader__.load({
       };
 
       var startQr = function () {
-        if (form.accountId === '') {
-          setNotice(t('accounts.qr.needid'));
-          return;
+        // 扫码前先确保内部键存在（代理键全量自动生成，needid 手填时代结束）。
+        var acct = form.accountId;
+        if (acct === '') {
+          acct = form.channel + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+          setForm(Object.assign({}, form, { accountId: acct }));
         }
         withBusy(function () {
           return postJSON('/weixin/qr/start', {}).then(function (result) {
             if (result.status === 200 && result.json && result.json.ok) {
-              setQr({ qrcode: result.json.qrcode, qrDataUrl: result.json.qrDataUrl, accountId: form.accountId, status: 'wait' });
+              setQr({ qrcode: result.json.qrcode, qrDataUrl: result.json.qrDataUrl, accountId: acct, status: 'wait' });
             } else {
               setNotice((result.json && result.json.error) || 'HTTP ' + result.status);
             }

@@ -329,8 +329,9 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
           label: CHANNEL_META[id].label,
           bind: CHANNEL_META[id].bind,
           implemented: implementedChannels().includes(id),
-          // 账号 ID 自动生成类（通知类双向皆涵盖）：设置页隐藏账号 ID。
-          autoAccountId: CHANNEL_META[id].notifyOnly === true || CHANNEL_META[id].autoAccountId === true,
+          // 账号 ID = 代理键（CMDB 同构：主键系统生成，业务标识归属性/别名）——
+          // 全渠道统一自动生成，设置页不再要求用户填内部键。
+          autoAccountId: true,
           // 表单驱动元数据（零敏感：字段名/标签/形态，不含值）。
           fields: CHANNEL_META[id].fields.map((f) => ({
             key: f.key,
