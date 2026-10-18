@@ -329,6 +329,8 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
           label: CHANNEL_META[id].label,
           bind: CHANNEL_META[id].bind,
           implemented: implementedChannels().includes(id),
+          // 纯出站通知类：设置页隐藏账号 ID（自动生成）。
+          notifyOnly: CHANNEL_META[id].notifyOnly === true,
           // 表单驱动元数据（零敏感：字段名/标签/形态，不含值）。
           fields: CHANNEL_META[id].fields.map((f) => ({
             key: f.key,

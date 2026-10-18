@@ -20,6 +20,8 @@ export interface ChannelMeta {
   fields: ChannelField[]
   /** 该平台是否需要本机条件（iMessage=macOS 等）——设置页据此灰显。 */
   hostRequirement?: 'macos' | 'ffmpeg' | 'none'
+  /** 纯出站通知类：无入站/路由语义，设置页隐藏账号 ID（自动生成内部键）。 */
+  notifyOnly?: boolean
 }
 
 const cred = (key: string, zh: string, en: string, helpUrl?: string): ChannelField => ({
@@ -156,6 +158,7 @@ export const CHANNEL_META: Record<string, ChannelMeta> = {
     id: 'dingtalk-notify',
     label: { zh: '钉钉通知（群机器人）', en: 'DingTalk notify (group webhook)' },
     bind: 'credentials',
+    notifyOnly: true,
     // 纯出站通知类：群设置直加自定义机器人，不建应用；安全三档按官方口径。
     fields: [
       cred('webhook', 'Webhook 地址或 access_token', 'Webhook URL or access_token'),
@@ -169,6 +172,7 @@ export const CHANNEL_META: Record<string, ChannelMeta> = {
     id: 'qq-notify',
     label: { zh: 'QQ 通知（主动推送）', en: 'QQ notify (active push)' },
     bind: 'credentials',
+    notifyOnly: true,
     // 官方主动消息面（bot.qq.com 查实）：受频控与用户「允许主动发送」开关约束。
     fields: [
       { key: 'appId', label: { zh: '机器人 AppID', en: 'Bot AppID' }, secret: false, required: true },

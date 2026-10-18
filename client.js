@@ -239,9 +239,16 @@ window.__ModuleLoader__.load({
       }
 
       var submitNew = function () {
+        // 纯出站通知类（meta.notifyOnly）：账号 ID 对用户无意义，自动生成内部键。
+        var record = form;
+        if (selectedChannel && selectedChannel.notifyOnly && form.accountId === '') {
+          record = Object.assign({}, form, {
+            accountId: form.channel + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+          });
+        }
         // 微信扫码账号：表单存而连——凭据由扫码流程写入，保存时必须跳过
         // 适配器构建（否则 botToken 缺失工厂即抛 → 被当校验错 400，UI 假报）。
-        var payload = { record: form, secrets: form.secrets };
+        var payload = { record: record, secrets: form.secrets };
         if (form.channel === 'weixin' && (form.secrets.botToken || '') === '') payload.skipConnect = true;
         withBusy(function () {
           return postJSON('/accounts/save', payload).then(function (result) {
@@ -500,16 +507,19 @@ window.__ModuleLoader__.load({
                 })
               )
             ),
-            createElement(
-              'label',
-              { style: { display: 'block', marginTop: 6 } },
-              t('accounts.accountId'),
-              createElement('input', {
-                value: form.accountId,
-                style: { marginLeft: 8 },
-                onChange: function (event) { setForm(Object.assign({}, form, { accountId: event.target.value })); },
-              })
-            ),
+            // 纯出站通知类：隐藏账号 ID（提交时自动生成内部键）。
+            selectedChannel && selectedChannel.notifyOnly
+              ? null
+              : createElement(
+                  'label',
+                  { style: { display: 'block', marginTop: 6 } },
+                  t('accounts.accountId'),
+                  createElement('input', {
+                    value: form.accountId,
+                    style: { marginLeft: 8 },
+                    onChange: function (event) { setForm(Object.assign({}, form, { accountId: event.target.value })); },
+                  })
+                ),
             createElement(
               'label',
               { style: { display: 'block', marginTop: 6 } },
@@ -525,7 +535,7 @@ window.__ModuleLoader__.load({
             createElement(
               'div',
               { style: { marginTop: 8 } },
-              createElement('button', { onClick: submitNew, disabled: busy || form.channel === '' || form.accountId === '' }, t('accounts.save')),
+              createElement('button', { onClick: submitNew, disabled: busy || form.channel === '' || (!(selectedChannel && selectedChannel.notifyOnly) && form.accountId === '') }, t('accounts.save')),
               createElement(
                 'button',
                 { style: { marginLeft: 6 }, onClick: function () { setAddOpen(false); } },
