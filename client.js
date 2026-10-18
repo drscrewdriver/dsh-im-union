@@ -12,6 +12,9 @@
 window.__ModuleLoader__.load({
   id: 'dsh-im-union',
   factory: function (require) {
+    // 插桩（真机诊断）：宿主装载链哪一段没走到这里，日志即缺席——与 apply 入口日志
+    // 成对，可二分「bundle 加载但 factory 未调」vs「factory 调了但 apply 未调」。
+    console.info('[dsh-im-union] client factory invoked')
     var module = { exports: {} };
     var exports = module.exports;
     var React = require('react');
@@ -606,6 +609,7 @@ window.__ModuleLoader__.load({
     var inject = ['slots', 'locale'];
 
     function apply(ctx) {
+      console.info('[dsh-im-union] apply invoked, slots:', typeof ctx && ctx.slots ? Object.keys(ctx.slots).join(',') : 'none')
       // apply 期顶层注册——不许关进任何回调。
       try {
         if (ctx.locale && typeof ctx.locale.register === 'function') {
