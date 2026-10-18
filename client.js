@@ -34,6 +34,7 @@ window.__ModuleLoader__.load({
         'panel.generation': '设置面代际',
         'panel.sessionBackend': '会话后端',
         'panel.vault': '凭据存储',
+        'panel.debug': '运行时诊断',
         'panel.channels': '渠道实现度',
         'panel.implemented': '已实现',
         'panel.planned': '规划中',
@@ -84,6 +85,7 @@ window.__ModuleLoader__.load({
         'panel.generation': 'Settings generation',
         'panel.sessionBackend': 'Session backend',
         'panel.vault': 'Credential vault',
+        'panel.debug': 'Runtime diagnostics',
         'panel.channels': 'Channels',
         'panel.implemented': 'implemented',
         'panel.planned': 'planned',
@@ -561,26 +563,33 @@ window.__ModuleLoader__.load({
         'div',
         { style: { padding: 16, maxWidth: 720 } },
         createElement('h3', null, t('settings.title')),
-        createElement('p', null, t('panel.generation') + ': ' + String(caps.settingsGeneration || '-')),
-        createElement('p', null, t('panel.sessionBackend') + ': ' + String(caps.sessionBackend || '-')),
-        createElement('p', null, t('panel.vault') + ': ' + String(caps.vaultKind || '-')),
+        // 调试内容（代际/后端/凭据/渠道实现度清单）收进默认折叠的诊断块，
+        // 面板首屏只剩账号管理；排障时展开即可，不另设开关。
         createElement(
-          'p',
-          null,
-          t('panel.channels') + ': ' + done + '/' + channels.length + ' ' + t('panel.implemented')
-        ),
-        createElement(
-          'ul',
-          null,
-          channels.map(function (channel) {
-            return createElement(
-              'li',
-              { key: channel.id },
-              (channel.label && (channel.label.zh || channel.label.en)) +
-                ' — ' +
-                (channel.implemented ? t('panel.implemented') : t('panel.planned'))
-            );
-          })
+          'details',
+          { style: { margin: '8px 0', fontSize: 12, color: 'inherit', opacity: 0.75 } },
+          createElement('summary', null, t('panel.debug')),
+          createElement('p', null, t('panel.generation') + ': ' + String(caps.settingsGeneration || '-')),
+          createElement('p', null, t('panel.sessionBackend') + ': ' + String(caps.sessionBackend || '-')),
+          createElement('p', null, t('panel.vault') + ': ' + String(caps.vaultKind || '-')),
+          createElement(
+            'p',
+            null,
+            t('panel.channels') + ': ' + done + '/' + channels.length + ' ' + t('panel.implemented')
+          ),
+          createElement(
+            'ul',
+            null,
+            channels.map(function (channel) {
+              return createElement(
+                'li',
+                { key: channel.id },
+                (channel.label && (channel.label.zh || channel.label.en)) +
+                  ' — ' +
+                  (channel.implemented ? t('panel.implemented') : t('panel.planned'))
+              )
+            })
+          )
         ),
         createElement(AccountsPanel, { channels: channels })
       );
