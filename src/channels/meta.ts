@@ -22,6 +22,9 @@ export interface ChannelMeta {
   hostRequirement?: 'macos' | 'ffmpeg' | 'none'
   /** 纯出站通知类：无入站/路由语义，设置页隐藏账号 ID（自动生成内部键）。 */
   notifyOnly?: boolean
+  /** 账号 ID 自动生成（用户无需手填）：notifyOnly 蕴含此位；双向渠道若天然标识
+   * （如 email 的邮箱地址）也应置 true。 */
+  autoAccountId?: boolean
 }
 
 const cred = (key: string, zh: string, en: string, helpUrl?: string): ChannelField => ({
@@ -144,6 +147,8 @@ export const CHANNEL_META: Record<string, ChannelMeta> = {
     id: 'email',
     label: { zh: 'Email（IMAP/SMTP）', en: 'Email (IMAP/SMTP)' },
     bind: 'credentials',
+    // 邮箱地址即天然账号标识，内部键自动生成。
+    autoAccountId: true,
     fields: [
       { key: 'address', label: { zh: '邮箱地址', en: 'Email address' }, secret: false, required: true },
       { key: 'imapHost', label: { zh: 'IMAP 主机', en: 'IMAP host' }, secret: false, required: true },

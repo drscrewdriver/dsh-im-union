@@ -239,9 +239,9 @@ window.__ModuleLoader__.load({
       }
 
       var submitNew = function () {
-        // 纯出站通知类（meta.notifyOnly）：账号 ID 对用户无意义，自动生成内部键。
+        // 账号 ID 自动生成类（通知类与 email 等天然标识渠道）：内部键自动生成。
         var record = form;
-        if (selectedChannel && selectedChannel.notifyOnly && form.accountId === '') {
+        if (selectedChannel && selectedChannel.autoAccountId && form.accountId === '') {
           record = Object.assign({}, form, {
             accountId: form.channel + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
           });
@@ -507,8 +507,8 @@ window.__ModuleLoader__.load({
                 })
               )
             ),
-            // 纯出站通知类：隐藏账号 ID（提交时自动生成内部键）。
-            selectedChannel && selectedChannel.notifyOnly
+            // 账号 ID 自动生成类：隐藏输入框（提交时自动生成内部键）。
+            selectedChannel && selectedChannel.autoAccountId
               ? null
               : createElement(
                   'label',
@@ -535,7 +535,7 @@ window.__ModuleLoader__.load({
             createElement(
               'div',
               { style: { marginTop: 8 } },
-              createElement('button', { onClick: submitNew, disabled: busy || form.channel === '' || (!(selectedChannel && selectedChannel.notifyOnly) && form.accountId === '') }, t('accounts.save')),
+              createElement('button', { onClick: submitNew, disabled: busy || form.channel === '' || (!(selectedChannel && selectedChannel.autoAccountId) && form.accountId === '') }, t('accounts.save')),
               createElement(
                 'button',
                 { style: { marginLeft: 6 }, onClick: function () { setAddOpen(false); } },
