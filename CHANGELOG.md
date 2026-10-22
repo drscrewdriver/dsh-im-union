@@ -2,6 +2,57 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.3.1（中文环境语言修复 + 投稿审查修复）
+
+### Added
+
+- `@whiskeysockets/baileys` 声明为 `optionalDependencies`（^6.7.24，随包分发；离线被跳过时渠道启动明确报错不崩溃），修复 awesome 投稿审查指出的「WhatsApp 依赖不随包」问题
+- README 双语新增「安装前提」小节：baileys 随包机制、飞书语音档需系统 ffmpeg（二进制不随包）、iMessage 仅 macOS
+
+### Fixed
+
+- 声明面陈旧枚举串同步：`package.json` description、`dsh.plugin.json` 双语 description、`scripts/gen-locales.mjs`（及 9 语 locale 产物）中「0.2.1-alpha.3」统一改「0.2.1-rc.2」，与 hosts.mjs 12 tag 枚举对齐（管理块本就同源，此次清的是手写残留）
+- 中文环境面板锁英文：宿主初始 HTML 是 `<html lang="en">`，i18n 启动后才改写为真实语言（真机实测 zh-CN）；client 在 factory 顶层冻结语言判定，装载早于宿主 i18n → 中文环境锁死英文面。改为**取词时懒解析** `<html lang>`（`currentLang()`），未知/缺空前缀保守归 zh，其余语言缺键逐条回落 zh 词典；宿主词典层保留逐键优先（`hostDictionary`），语言判定不再走它
+
+## 0.3.0（私聊准入 + 会话偏好 + 连接保稳）
+
+针对真机反馈三连修：发消息无反应（白名单静默拒）、无预设/模型入口（创建参数丢失）、编辑触发替换凭据（全量重建）。
+
+### Added
+
+- 私聊准入两档（对齐 IM助理）：`approved`=仅白名单（缺省，D6 默认拒绝不变）/`all`=所有私聊；账号行显示「私聊全开」标签，编辑弹窗可切
+- 拒绝可见化：私聊被拒回一次带对方 userId 的未授权提示（每用户 10 分钟冷却，防回复风暴）；群聊仅在显式 @ 且开关关闭时提示一次，未 @ 保持静默
+- 账号级会话偏好：工作区 cwd / Agent 预设 / 模型（provider+model）/ 推理等级，仅在该账号新建会话时应用；存储于 accounts.json（`session` 对象），设置页弹窗编辑（选项来自新 `/session-catalog` 目录：现有会话 cwd 去重 + sessionController.modelCatalog + agentPresets.list）
+- createSession 主路径换 `sessionController.create`（锚点 dsh-repo packages/api/session-controller：SessionCreateRequest 收 `sessionId/cwd/agentPreset`，sessionIdHint 幂等采纳；老线回退 agents.create meta 路径）；模型偏好 create 后 `selectModel` 落位，失败只降级不阻断建会话
+- `/session-catalog` 只读目录接口（回包零凭据）
+
+### Fixed
+
+- 「发消息无反应」根因：扫码绑定后无任何代码把用户加入白名单（网关注释声称「渠道层自动入表」但渠道层未实现）→ 全部私聊被静默丢弃；现由拒绝提示 + 准入两档双路解决
+- 编辑保存触发「替换凭据」体感：upsert 原来无条件 teardown+重连；现在仅渠道/config 变化或提供新 secret 值才重建，别名/白名单/准入/偏好编辑原位生效（`updatePolicy` 下发，不再重挂 onMessage——顺带修掉 setAllowlist 重复注册监听导致的消息双投）
+
+## 0.2.0（设置面板重设计）
+
+对齐 dsh-im（DSH-IM）渠道卡视觉与 dsh-im-connect（IM助理）账号手风琴两个参照系的净室重写。
+
+### Added
+
+- 面板 v2 骨架：头部（品牌 + 副标语 + GitHub/刷新）→ 统计条（渠道/账号/在线）→ 折叠「运行时诊断」（代际/后端/凭据/上传/产物/Connector + 渠道实现度清单）→ 渠道手风琴卡
+- 渠道卡：品牌色块 logo（15 渠道净室简化 glyph，非官方素材）+ 「仅通知 / 仅 macOS / 规划中」标签 + 账号数 + 添加账号；未实现渠道垫底灰显
+- 账号行：别名 + 内部键 + 状态徽章（已连接/未连接/已暂停）+ 凭据缺失提示（缺哪些键）+ 检查连接 / 编辑 / 暂停恢复 / 两步删除；白名单编辑收进折叠节，纯通知渠道自动隐藏
+- 添加/编辑统一弹窗：微信为扫码流（先建档 skipConnect 再取码，confirmed 后别名/配置保留）；其余渠道按 meta.fields 出双列表单，secret 用 password 框（留空=保持）、helpUrl 外链、必填星标
+- 账号编辑：/accounts 回显明文 config（按 meta plain 字段白名单过滤，secret 永不回显，D4 同源）供编辑预填
+- UI 语言按宿主 `<html lang>` 选取内置词典（9 语，缺键逐条回落 zh）
+
+### Fixed
+
+- client 把 plain 字段也塞进 secrets 提交，而 upsert 只入库 secret 字段——email 的 address/imapHost/smtpHost 等必填明文、飞书语音档位等全部被静默丢弃；现按字段类型归位（plain → record.config，secret → secrets）
+
+### Changed
+
+- 样式从内联 style 改为单 `<style data-plugin>` 注入；颜色全部走 `var(--dsw-alias-*, fallback)` 消费链（本地 `--diu-*` 别名），暗/浅色零分支，窄容器容器查询降列
+- /state 渠道清单增发 hostRequirement（设置页打「仅 macOS」标签）
+
 ## 0.1.0（首个功能版，dist-tag=latest）
 
 M1–M3 代码侧全量：12 渠道适配器（11 平台）+ 跨版本窄腰 + 会话引擎 + 管理面。

@@ -31,11 +31,25 @@ import { zipSync } from './zip.js'
 import type { ApprovalOutcome, ApprovalRequest, QuestionAnswer, QuestionRequest } from '../host-compat/interaction.js'
 import type { ChannelAdapter, Receipt, ReplyStream, SemanticMessage } from '../channels/types.js'
 
+export interface AccountSessionPrefs {
+  /** 会话工作目录（宿主 session.create 的 cwd，直接决定 Agent 的项目目录）。 */
+  cwd?: string
+  /** Agent 预设 id（session.create 的 agentPreset）。 */
+  agentPreset?: string
+  provider?: string
+  model?: string
+  reasoningEffort?: string
+}
+
 export interface AccountPolicy {
   /** 私聊白名单 userId 集合；空集合=拒绝所有私聊（扫码自动入表由渠道层维护）。 */
   dmAllowlist: Set<string>
   /** 群聊总开关（默认开，触发仍需 @）。 */
   groupEnabled: boolean
+  /** 私聊准入档位：approved=仅白名单（默认拒绝红线默认值）；all=接受所有私聊（用户显式开启）。 */
+  privateAccess: 'approved' | 'all'
+  /** 账号级会话偏好：仅在该账号**新建**会话时生效，已有会话不受影响。 */
+  session?: AccountSessionPrefs
 }
 
 export interface EngineDeps {
@@ -59,6 +73,8 @@ export interface EngineDeps {
   onInboundDm?: (accountId: string, message: SemanticMessage) => void
   /** /export 渠道文件面缺位时的本地落盘目录。 */
   exportDir?: string
+  /** 拒绝提示冷却（默认 10 分钟；测试可缩短）。 */
+  rejectNoticeCooldownMs?: number
 }
 
 interface TurnState {
@@ -124,6 +140,8 @@ export class ImUnionEngine {
   private muted = new Set<string>()
   /** /goal 目标备忘（chatKey → 文本，IM 侧存储不碰宿主）。 */
   private goals = new Map<string, string>()
+  /** 拒绝提示冷却键（账号+用户 / 账号+群）：窗口内只提示一次，防回复风暴。 */
+  private rejectionNotices = new Set<string>()
   /** 投递 seq → 原文全文（/delivery retry 补发用；重启即清，摘要在盘）。 */
   private outbox = new Map<number, string>()
   /** 碎片合并的上一次私聊消息上下文（submit 回调重建 SemanticMessage）。 */
@@ -149,9 +167,25 @@ export class ImUnionEngine {
       policy: {
         dmAllowlist: new Set(policy?.dmAllowlist ?? []),
         groupEnabled: policy?.groupEnabled ?? true,
+        privateAccess: policy?.privateAccess === 'all' ? 'all' : 'approved',
+        ...(policy?.session !== undefined ? { session: policy.session } : {}),
       },
     })
     adapter.onMessage((message) => void this.handleInbound(accountId, message))
+  }
+
+  /** 凭据无关的编辑（别名/白名单/准入档位/会话偏好）原位同步策略，不重建适配器。 */
+  updatePolicy(accountId: string, policy: Partial<AccountPolicy>): void {
+    const entry = this.accounts.get(accountId)
+    if (entry === undefined) return
+    entry.policy = {
+      dmAllowlist: new Set(policy.dmAllowlist ?? entry.policy.dmAllowlist),
+      groupEnabled: policy.groupEnabled ?? entry.policy.groupEnabled,
+      privateAccess: policy.privateAccess === 'all' || policy.privateAccess === 'approved'
+        ? policy.privateAccess
+        : entry.policy.privateAccess,
+      session: policy.session !== undefined ? policy.session : entry.policy.session,
+    }
   }
 
   unregister(accountId: string): void {
@@ -191,7 +225,48 @@ export class ImUnionEngine {
     if (message.address.kind === 'group') {
       return account.policy.groupEnabled && shouldRespondToGroup(message.mentionedBot)
     }
+    // 私聊准入两档（D6 默认拒绝仍在）：approved=仅白名单；all=用户显式放行所有私聊。
+    if (account.policy.privateAccess === 'all') return true
     return account.policy.dmAllowlist.has(message.userId)
+  }
+
+  /**
+   * 拒绝可见化（排障关键）：白名单/准入拒绝曾是纯静默丢弃，用户表现为
+   * 「发消息无反应」无从诊断。现在私聊拒绝回一次带 userId 的提示（每用户
+   * 冷却窗口内只提示一次，避免对陌生人的回复风暴）；群聊仅在显式 @ 且
+   * 群开关关闭时提示，未 @ 的静默丢弃保持不变。
+   */
+  private async rejectInbound(accountId: string, message: SemanticMessage): Promise<void> {
+    const cooldownMs = this.deps.rejectNoticeCooldownMs ?? 10 * 60 * 1000
+    const adapter = this.accounts.get(accountId)?.adapter
+    if (adapter === undefined) return
+    if (message.address.kind === 'group') {
+      if (!message.mentionedBot) return
+      if (!this.accounts.get(accountId)!.policy.groupEnabled) {
+        const key = `${accountId}:group:${message.address.chatId}`
+        if (this.rejectionNotices.has(key)) return
+        this.rejectionNotices.add(key)
+        try {
+          await adapter.reply(message.address, '本账号群聊接收已关闭：请在设置面板打开该账号的群聊开关。')
+        } catch {
+          // 提示投递失败不溯源（拒绝路径本来就不处理消息）。
+        }
+      }
+      return
+    }
+    const key = `${accountId}:${message.userId}`
+    if (this.rejectionNotices.has(key)) return
+    this.rejectionNotices.add(key)
+    setTimeout(() => this.rejectionNotices.delete(key), cooldownMs)
+    try {
+      await adapter.reply(
+        message.address,
+        `未授权私聊：本账号私聊准入为「仅已批准用户」。\n` +
+          `请让管理员把你的用户 ID（${message.userId}）加入白名单，或在设置面板把私聊准入改为「所有私聊」。`,
+      )
+    } catch {
+      // 同上：提示失败静默。
+    }
   }
 
   /** 入站主流程：命令面板（T1.1）先分派，非命令入会话队列。 */
@@ -201,7 +276,10 @@ export class ImUnionEngine {
     // 主动投递双向同步观察（T2.6）：必须在 admitted 之前——白名单外的私聊
     // 正是 syncBack 候选来源；只喂 dm。
     if (message.address.kind === 'dm') this.deps.onInboundDm?.(accountId, message)
-    if (!this.admitted(accountId, message)) return
+    if (!this.admitted(accountId, message)) {
+      await this.rejectInbound(accountId, message)
+      return
+    }
     // 审批/提问回复优先消费（发起者限定在 broker 内裁决，D5）。
     if (this.broker.consumeInbound(accountId, message.address, message.userId, message.text)) return
     const key = `${message.address.channel}:${message.address.chatId}`
@@ -295,18 +373,33 @@ export class ImUnionEngine {
   /**
    * 隐式 imu: 形 id → 宿主真会话 id：首次使用时 createSession 并绑定；
    * 失败则继续用隐式 id（老线/降级面下 follow/prompt 自有报错路径，不阻断命令面）。
+   * 账号级会话偏好（cwd/预设/模型）只在这一刻应用——新会话生效，存量会话不动。
    */
-  private async ensureSessionId(address: ChatAddress, binding: Binding, title?: string): Promise<string> {
+  private async ensureSessionId(address: ChatAddress, binding: Binding, accountId: string, title?: string): Promise<string> {
     const { sessionApi, router } = this.deps
     if (sessionApi.backend !== 'native' || !binding.sessionId.startsWith('imu:')) return binding.sessionId
+    const prefs = this.accounts.get(accountId)?.policy.session
     try {
       const workspace = this.workspaceOverrides.get(chatOverrideKey(address))
       const info = await sessionApi.createSession({
         sessionIdHint: binding.sessionId,
         ...(workspace !== undefined ? { workspace } : {}),
+        ...(prefs?.cwd !== undefined && prefs.cwd !== '' && workspace === undefined ? { cwd: prefs.cwd } : {}),
+        ...(prefs?.agentPreset !== undefined && prefs.agentPreset !== '' ? { preset: prefs.agentPreset } : {}),
+        ...(prefs?.model !== undefined && prefs.model !== ''
+          ? { model: prefs.model, ...(prefs.provider !== undefined && prefs.provider !== '' ? { provider: prefs.provider } : {}), ...(prefs.reasoningEffort !== undefined && prefs.reasoningEffort !== '' ? { reasoningEffort: prefs.reasoningEffort } : {}) }
+          : {}),
         ...(title !== undefined && title !== '' ? { title } : {}),
       })
       router.bind(address, info.id)
+      // 账号级模型偏好同步喂给视觉判定（selections 以 chatKey 键控）。
+      if (prefs?.model !== undefined && prefs.model !== '') {
+        this.selections.set(chatKey(address), {
+          model: prefs.model,
+          ...(prefs.provider !== undefined && prefs.provider !== '' ? { provider: prefs.provider } : {}),
+          ...(prefs.reasoningEffort !== undefined && prefs.reasoningEffort !== '' ? { reasoningEffort: prefs.reasoningEffort } : {}),
+        })
+      }
       return info.id
     } catch (error) {
       this.log.warn(`createSession 失败，继续使用隐式 id: ${(error as Error).message}`)
@@ -321,6 +414,7 @@ export class ImUnionEngine {
     const sessionId = await this.ensureSessionId(
       message.address,
       binding,
+      accountId,
       sessionTitle(message.address.channel, message.text),
     )
     // 审批回路由登记：后发起的任务覆盖先前记录（与活跃任务一致）。

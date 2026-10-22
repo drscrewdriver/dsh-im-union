@@ -35,6 +35,7 @@ function fakeAdapter(channel = 'telegram') {
     label: channel,
     caps: { maxMessageLength: 100 },
     state,
+    listeners: [],
     get connected() {
       return state.connected
     },
@@ -46,7 +47,8 @@ function fakeAdapter(channel = 'telegram') {
       state.events.push('disconnect')
       state.connected = false
     },
-    onMessage() {
+    onMessage(listener) {
+      this.listeners.push(listener)
       return () => {}
     },
     async reply() {
@@ -63,8 +65,13 @@ function fakeEngine() {
   return {
     registered: [],
     unregistered: [],
+    policyUpdates: new Map(),
     registerAccount(adapter, accountId, policy) {
       this.registered.push({ adapter, accountId, policy })
+    },
+    updatePolicy(accountId, policy) {
+      const prev = this.policyUpdates.get(accountId) ?? {}
+      this.policyUpdates.set(accountId, { ...prev, ...policy })
     },
     unregister(accountId) {
       this.unregistered.push(accountId)
@@ -135,6 +142,75 @@ test('listPublic：零 secret 值只报 configured；alias/paused 透传', async
   assert.ok(!JSON.stringify(rows).includes('SECRET-VALUE'), '任何视图不得携带 secret 值')
 })
 
+test('listPublic：config 回显按 meta plain 字段白名单过滤（设置页编辑预填）', async () => {
+  const { manager } = makeManager()
+  // telegram 的 meta：botToken(secret) 唯一 secret，无 plain 字段 → config 应为空对象。
+  await manager.upsert(rec({ config: { botToken: ' pretend-plain ', stray: 'x' } }), { botToken: 'SECRET-VALUE' })
+  let rows = await manager.listPublic()
+  assert.deepEqual(rows[0].config, {}, '非 plain 键（含与 secret 同名的杂键）一律不回显')
+  // email 的 meta 含 address/imapHost/smtpHost 等 plain 字段 → 命中键回显。
+  await manager.upsert({
+    accountId: 'm1',
+    channel: 'email',
+    paused: true,
+    config: { address: 'bot@example.com', imapHost: 'imap.example.com', stray: 'x' },
+  })
+  rows = await manager.listPublic()
+  const emailRow = rows.find((r) => r.accountId === 'm1')
+  assert.deepEqual(emailRow.config, { address: 'bot@example.com', imapHost: 'imap.example.com' })
+})
+
+test('upsert 免重建：别名/偏好/准入编辑不断连；config 或 secret 变化才重建', async () => {
+  const { manager, adapters, engine } = makeManager()
+  await manager.upsert(rec(), { botToken: 'T0KKN' })
+  assert.equal(adapters.length, 1)
+  // 别名 + 会话偏好 + 准入档位编辑：零重建零断连，策略原位下发。
+  await manager.upsert(rec({
+    alias: '改名',
+    privateAccess: 'all',
+    session: { cwd: '/tmp/proj', model: 'deepseek-chat', provider: 'deepseek', reasoningEffort: 'high' },
+  }), {})
+  assert.equal(adapters.length, 1, '凭据无关编辑不新建适配器')
+  assert.equal(adapters[0].state.events.includes('disconnect'), false, '凭据无关编辑不断连')
+  // 策略已原位同步到引擎（白名单/准入/偏好）。
+  const policy = engine.policyUpdates.get('a1')
+  assert.equal(policy.privateAccess, 'all')
+  assert.equal(policy.session.cwd, '/tmp/proj')
+  assert.equal(policy.session.model, 'deepseek-chat')
+  // config 变化 → 重建（旧适配器先断）。
+  await manager.upsert(rec({ config: { voiceEnabled: 'true' } }), {})
+  assert.equal(adapters.length, 2)
+  assert.deepEqual(adapters[0].state.events, ['connect', 'disconnect'])
+  // 新 secret → 重建。
+  await manager.upsert(rec(), { botToken: 'T0KKN-2' })
+  assert.equal(adapters.length, 3)
+})
+
+test('setAllowlist 用 updatePolicy 原位下发（不再重复挂 onMessage）', async () => {
+  const { manager, adapters, engine } = makeManager()
+  await manager.upsert(rec(), { botToken: 'x' })
+  const adapter = adapters[0]
+  const listenersBefore = adapter.listeners.length
+  await manager.setAllowlist('a1', ['u9'])
+  assert.equal(adapter.listeners.length, listenersBefore, '白名单保存不得新增 onMessage 监听')
+  assert.ok(engine.policyUpdates.get('a1').dmAllowlist.has('u9'))
+})
+
+test('listPublic：privateAccess/session 回显（编辑预填）', async () => {
+  const { manager } = makeManager()
+  await manager.upsert(rec({
+    privateAccess: 'all',
+    session: { cwd: '/tmp/x', agentPreset: 'standard', stray: 'drop' },
+  }), { botToken: 'x' })
+  const rows = await manager.listPublic()
+  assert.equal(rows[0].privateAccess, 'all')
+  assert.deepEqual(rows[0].session, { cwd: '/tmp/x', agentPreset: 'standard' }, '偏好回显按白名单键过滤')
+  // 缺省档位归一为 approved。
+  await manager.upsert(rec({ accountId: 'a2' }), { botToken: 'y' })
+  const rows2 = await manager.listPublic()
+  assert.equal(rows2.find((r) => r.accountId === 'a2').privateAccess, 'approved')
+})
+
 test('校验：accountId 形态/未知渠道/未实现渠道三路拒', async () => {
   const { manager } = makeManager()
   await assert.rejects(manager.upsert(rec({ accountId: 'bad id!' })), AccountValidationError)
@@ -149,15 +225,22 @@ test('校验：accountId 形态/未知渠道/未实现渠道三路拒', async ()
   }
 })
 
-test('重复 upsert：旧适配器先断后重建（重启生效）', async () => {
+test('重复 upsert：凭据无关编辑不断连；连接事实变化才断旧建新', async () => {
   const { manager, engine, adapters } = makeManager()
   await manager.upsert(rec(), { botToken: 'x' })
+  // 别名编辑：原位生效，适配器不重建（修掉「改个名也断连重连」的替换凭据体感）。
   await manager.upsert(rec({ alias: '改名' }), {})
+  assert.equal(adapters.length, 1)
+  assert.deepEqual(adapters[0].state.events, ['connect'])
+  assert.equal(engine.unregistered.length, 0)
+  const rows = await manager.listPublic()
+  assert.equal(rows[0].alias, '改名')
+  // config 变化：旧适配器先断后重建（重启生效语义不变）。
+  await manager.upsert(rec({ config: { flag: '1' } }), {})
+  assert.equal(adapters.length, 2)
   assert.deepEqual(adapters[0].state.events, ['connect', 'disconnect'])
   assert.equal(adapters[1].state.connected, true)
   assert.equal(engine.unregistered[0], 'a1')
-  const rows = await manager.listPublic()
-  assert.equal(rows[0].alias, '改名')
 })
 
 test('remove：断连 + secret 清库 + 文件移除', async () => {
@@ -185,13 +268,15 @@ test('setPaused：暂停断连、恢复重连；startAll 跳过暂停号', async
   assert.equal(adapters.length, 2, 'startAll 不重复建已在位/暂停号')
 })
 
-test('setAllowlist：整值替换并重注引擎策略（D6 数据源）', async () => {
+test('setAllowlist：整值替换并原位下发引擎策略（D6 数据源，不重挂监听）', async () => {
   const { manager, engine } = makeManager()
   await manager.upsert(rec({ dmAllowlist: ['u1'] }), { botToken: 'x' })
   const ok = await manager.setAllowlist('a1', ['u2', 'u3'])
   assert.equal(ok, true)
-  const last = engine.registered.at(-1)
-  assert.deepEqual([...last.policy.dmAllowlist], ['u2', 'u3'])
+  // updatePolicy 原位下发（老实现走 registerAccount 会重复挂 onMessage → 消息双投）。
+  const policy = engine.policyUpdates.get('a1')
+  assert.ok(policy !== undefined, '策略已下发引擎')
+  assert.deepEqual([...policy.dmAllowlist], ['u2', 'u3'])
   assert.deepEqual(manager.list()[0].dmAllowlist, ['u2', 'u3'])
 })
 

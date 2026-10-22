@@ -8,11 +8,11 @@ DeepSeek Harness 的 IM 联合桥——净室重写，能力合集来自社区�
 
 ## 状态
 
-**0.1.0 功能版**：P0/P1/P2 十二个渠道适配器（覆盖 11 个平台，企微含机器人与自建应用两适配器）、跨版本窄腰、会话引擎、审批/提问 IM 闭环、多账号管理面均已交付（单测 574 项；宿主农场 0.1.2/0.1.5/0.1.7/0.2.1 四线冒烟全绿）。真机验收项逐项登记在 CHANGELOG；能力分期见开发仓计划台账。
+**0.3.1**：15 个渠道适配器（覆盖 12 个平台，含邮件；企微/钉钉/QQ 各含机器人与自建应用或推送两档）、跨版本窄腰、会话引擎、审批/提问 IM 闭环、多账号管理面均已交付（单测 658 项；宿主农场 0.1.2/0.1.5/0.1.7/0.2.1 四线冒烟全绿；0.2.1-rc.2 已按桌面 profile 装机双回读实证，农场专属格待补）。真机验收项逐项登记在 CHANGELOG；能力分期见开发仓计划台账。
 
 能力总览：
 
-- **渠道**：微信（官方 iLink 扫码）、飞书（长连/流式卡片/语音档可选）、Telegram、Discord、企微智能机器人（长连）、钉钉（stream+AI Card）、QQ 官方机器人、Slack（Socket Mode）、WhatsApp（Baileys 扫码）、Matrix、iMessage（仅 macOS）、企微自建应用（回调）等；未配置渠道零依赖零加载（懒 import）。
+- **渠道**：微信（官方 iLink 扫码）、飞书（长连/流式卡片/语音档可选，语音需系统 ffmpeg）、Telegram、Discord、企微智能机器人（长连）、钉钉（stream+AI Card，另有自定义机器人推送档）、QQ 官方机器人（另有推送档）、Slack（Socket Mode）、WhatsApp（Baileys 扫码，依赖随包 optionalDependencies 分发）、Matrix、iMessage（仅 macOS）、企微自建应用（回调）、邮件（IMAP/SMTP 线程路由）等；未配置渠道零依赖零加载（懒 import）。
 - **IM 内闭环**：24 命令面板（/help /status /new /stop /steer /model(s) /reasoning /preset(s) /session(s) /workspace(s) /fork /rename /queue /mute /unbind /goal /delivery /export /speak /menu）；工具审批与交互提问原聊天回答（默认拒绝、5 分钟超时、发起者限定）。
 - **跨版本**：设置面 gen1/gen2/gen3 三态自适配；能力探测优先，禁版本号分支。
 
@@ -23,6 +23,12 @@ dsh plugin --profile web add dsh-im-union@latest --registry=https://registry.npm
 ```
 
 装好后在宿主侧栏/设置页的「IM 联合桥」面板添加账号：大部分渠道走凭据绑定（Bot Token/App 凭据，secret 字段只单向入库不回显）；微信/WhatsApp 走扫码绑定；企微自建应用需将本插件管理面回调 URL（`/api/dsh-im-union/wecom-app/callback`）配入后台接收服务器。隐私与凭据红线见 `SECURITY.md`；第三方依赖声明见 `THIRD_PARTY_NOTICES.md`（净室重实现，不复制任何上游源码）。
+
+**安装前提**：
+
+- WhatsApp 渠道的 `@whiskeysockets/baileys` 已声明为 `optionalDependencies`，随包自动安装；若安装时离线被跳过，渠道启动时会明确报「未安装」并拒绝，不崩溃。
+- 飞书语音档需要系统 `ffmpeg` 在 PATH 中（转码二进制不随包分发，仅启用语音档时才会调用）。
+- iMessage 渠道仅 macOS 可用。
 
 ## 开发
 

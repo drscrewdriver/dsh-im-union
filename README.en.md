@@ -8,11 +8,11 @@ A union IM bridge for DeepSeek Harness — a clean-room reimplementation merging
 
 ## Status
 
-**0.1.0 feature release**: all 12 channel adapters (11 platforms; WeCom contributes two: intelligent bot + self-built app), the cross-version narrow waist, session engine, approval/question IM loop and multi-account management are delivered (574 unit tests; host-farm smoke green on 0.1.2 / 0.1.5 / 0.1.7 / 0.2.1 lines). Outstanding real-device acceptance items are registered in CHANGELOG.
+**0.3.1**: all 15 channel adapters (12 platforms including email; WeCom/DingTalk/QQ each contribute two: bot + self-built app or notify tier), the cross-version narrow waist, session engine, approval/question IM loop and multi-account management are delivered (658 unit tests; host-farm smoke green on 0.1.2 / 0.1.5 / 0.1.7 / 0.2.1 lines; 0.2.1-rc.2 verified by a real desktop-profile install with double read-back, its dedicated farm cell still pending). Outstanding real-device acceptance items are registered in CHANGELOG.
 
 Highlights:
 
-- **Channels**: WeChat (official iLink QR bind), Feishu/Lark (long-connection, streaming cards, optional voice tier), Telegram, Discord, WeCom intelligent bot, DingTalk (stream + AI Card), QQ official bot, Slack (Socket Mode, zero SDK), WhatsApp (Baileys QR pairing), Matrix, iMessage (macOS only), WeCom self-built app (signed callback webhook), and more; unconfigured channels load nothing (lazy imports).
+- **Channels**: WeChat (official iLink QR bind), Feishu/Lark (long-connection, streaming cards, optional voice tier requiring system ffmpeg), Telegram, Discord, WeCom intelligent bot, DingTalk (stream + AI Card, plus a custom-robot notify tier), QQ official bot (plus notify tier), Slack (Socket Mode, zero SDK), WhatsApp (Baileys QR pairing; the dependency ships as an optionalDependency), Matrix, iMessage (macOS only), WeCom self-built app (signed callback webhook), Email (IMAP/SMTP thread routing), and more; unconfigured channels load nothing (lazy imports).
 - **In-chat loop**: 24 commands (`/help /status /new /stop /steer /model(s) /reasoning /preset(s) /session(s) /workspace(s) /fork /rename /queue /mute /unbind /goal /delivery /export /speak /menu`); tool approvals and agent questions answered in the originating chat (deny-by-default, 5-minute expiry, initiator only).
 - **Cross-version**: settings surface auto-adapts gen1/gen2/gen3; capability probing only, never version branches.
 
@@ -23,6 +23,12 @@ dsh plugin --profile web add dsh-im-union@latest --registry=https://registry.npm
 ```
 
 Then add accounts in the "IM union bridge" panel: most channels use credential binding (secrets are one-way into the vault and never echoed back); WeChat/WhatsApp use QR pairing; the WeCom self-built app channel requires pointing your callback URL (`/api/dsh-im-union/wecom-app/callback`) in its console. See `SECURITY.md` for the non-negotiable privacy red lines and `THIRD_PARTY_NOTICES.md` for the clean-room provenance.
+
+**Install prerequisites**:
+
+- The WhatsApp channel's `@whiskeysockets/baileys` is declared in `optionalDependencies` and installs with the package; if skipped while offline, the channel fails fast with a clear "not installed" message instead of crashing.
+- The Feishu voice tier requires system `ffmpeg` on PATH (the transcoding binary is not shipped; it is only invoked when the voice tier is enabled).
+- The iMessage channel is macOS only.
 
 ## Development
 

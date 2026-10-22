@@ -18,6 +18,7 @@ import { registerAdminApi, type AdminRequest, type AdminHandler } from './admin/
 import { ChatRouter } from './engine/router.js'
 import { ImUnionEngine } from './engine/gateway.js'
 import { AccountManager, AccountValidationError, type AccountRecord } from './engine/account-manager.js'
+import type { AccountSessionPrefs } from './engine/gateway.js'
 import { DeliveryLog } from './engine/delivery-log.js'
 import { FragmentBuffer } from './engine/fragments.js'
 import { ProactiveDelivery, handleHttp as handleProactiveHttp } from './engine/proactive.js'
@@ -32,8 +33,15 @@ import { PLUGIN_NAME } from './host-compat/session-source.js'
 
 export const name = PLUGIN_NAME
 
-/** 只 inject 必然存在的服务；可选服务在 services.ts 软读。 */
-export const inject = ['webServer']
+/**
+ * inject 策略（desktop/Electron 线实证后的修订）：
+ * - webServer：web profile 的锚，必然存在；
+ * - agents/agentPresets：会话子系统的核心服务，全支持线（0.1.2+，dsh-im-connect
+ *   同 peer range 同款 inject 先例）必有。desktop 宿主上插件 apply 可能早于这些
+ *   服务的 fiber 激活，软读会拿丢（ctx.get strict 语义）——声明进 inject 走 cordis
+ *   等待语义，宿主备好服务才跑 apply；其余服务照旧软读（可选面，缺位=降级）。
+ */
+export const inject = ['webServer', 'agents', 'agentPresets']
 
 export interface UnionPluginConfig {
   stateDir: string
@@ -55,6 +63,17 @@ function accountRecordFromBody(body: unknown): { record: AccountRecord; secrets:
   if (Array.isArray(r.dmAllowlist)) record.dmAllowlist = r.dmAllowlist.map((v) => String(v))
   if (typeof r.groupEnabled === 'boolean') record.groupEnabled = r.groupEnabled
   if (typeof r.paused === 'boolean') record.paused = r.paused
+  if (r.privateAccess === 'all' || r.privateAccess === 'approved') record.privateAccess = r.privateAccess
+  // 会话偏好：只收白名单字符串键（sanitize 在 manager 侧再兜一道）。
+  if (r.session !== null && typeof r.session === 'object') {
+    const rawSession = r.session as Record<string, unknown>
+    const session: AccountSessionPrefs = {}
+    for (const key of ['cwd', 'agentPreset', 'provider', 'model', 'reasoningEffort'] as const) {
+      const value = rawSession[key]
+      if (typeof value === 'string' && value !== '') session[key] = value
+    }
+    record.session = session
+  }
   const secrets: Record<string, string> = {}
   if (b.secrets !== null && typeof b.secrets === 'object') {
     for (const [k, v] of Object.entries(b.secrets as Record<string, unknown>)) {
@@ -205,6 +224,35 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     '/accounts': async ({ respond }: AdminRequest) => {
       respond(200, { ok: true, accounts: await accounts.listPublic() })
     },
+    /** 会话偏好目录（设置页下拉数据源）：工作区 cwd 聚合 + 模型目录 + 预设清单。 */
+    '/session-catalog': async ({ respond }: AdminRequest) => {
+      const empty = { ok: true, backend: sessionApi.backend, workspaces: [] as string[], providers: [] as unknown[], defaults: null, presets: [] as unknown[] }
+      if (sessionApi.backend !== 'native') {
+        respond(200, empty)
+        return
+      }
+      try {
+        const [catalog, presets, sessions] = await Promise.all([
+          sessionApi.modelCatalog(),
+          sessionApi.presetsList(),
+          sessionApi.listSessions().catch(() => []),
+        ])
+        // 工作区候选 = 现有会话 cwd 去重（workspaceController 无 list 面，feed 流
+        // 不适合一次性拉取；cwd 直传 create 已由宿主 commands.ts:99-102 落位）。
+        const workspaces = [...new Set(sessions.map((s) => s.cwd).filter((v): v is string => typeof v === 'string' && v !== ''))]
+        respond(200, {
+          ok: true,
+          backend: sessionApi.backend,
+          workspaces,
+          providers: catalog?.groups ?? [],
+          defaults: catalog?.default ?? null,
+          presets,
+        })
+      } catch (error) {
+        log.warn(`session-catalog 组装失败（回空目录）: ${error instanceof Error ? error.message : String(error)}`)
+        respond(200, empty)
+      }
+    },
     '/accounts/save': async ({ body, respond }: AdminRequest) => {
       try {
         const { record, secrets } = accountRecordFromBody(body)
@@ -342,6 +390,10 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
           autoAccountId: true,
           // 纯出站通知类：client 隐藏白名单编辑块，manager 拒写策略字段。
           notifyOnly: CHANNEL_META[id].notifyOnly === true,
+          // 本机条件渠道（iMessage=macOS 等）：设置页据此打标签灰显提示。
+          ...(CHANNEL_META[id].hostRequirement !== undefined
+            ? { hostRequirement: CHANNEL_META[id].hostRequirement }
+            : {}),
           // 表单驱动元数据（零敏感：字段名/标签/形态，不含值）。
           fields: CHANNEL_META[id].fields.map((f) => ({
             key: f.key,

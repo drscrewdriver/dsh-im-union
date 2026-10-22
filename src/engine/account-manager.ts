@@ -12,7 +12,7 @@ import type { ChannelAdapter } from '../channels/types.js'
 import { CHANNEL_META } from '../channels/meta.js'
 import { createAdapter, hasChannel } from '../channels/registry.js'
 import { credentialRef, type SecretVault } from '../credentials/vault.js'
-import type { AccountPolicy, ImUnionEngine } from './gateway.js'
+import type { AccountPolicy, AccountSessionPrefs, ImUnionEngine } from './gateway.js'
 
 export interface AccountRecord {
   accountId: string
@@ -22,6 +22,10 @@ export interface AccountRecord {
   dmAllowlist?: string[]
   groupEnabled?: boolean
   paused?: boolean
+  /** 私聊准入档位：approved（缺省）=仅白名单；all=接受所有私聊。 */
+  privateAccess?: 'approved' | 'all'
+  /** 账号级会话偏好：仅在该账号新建会话时应用。 */
+  session?: AccountSessionPrefs
 }
 
 export interface PublicAccount {
@@ -34,6 +38,46 @@ export interface PublicAccount {
   /** 白名单是管理员自录配置（非平台回流的原始用户标识），设置页需回显编辑。 */
   dmAllowlist: string[]
   groupEnabled?: boolean
+  /** 管理员自录明文配置回显（仅 meta 的 plain 字段；secret 永不在此，D4）。 */
+  config: Record<string, string>
+  /** 私聊准入档位回显（设置页编辑预填）。 */
+  privateAccess: 'approved' | 'all'
+  /** 会话偏好回显（全部为管理员自录字符串；缺失键=宿主默认）。 */
+  session: AccountSessionPrefs
+}
+
+const SESSION_PREF_KEYS: ReadonlyArray<keyof AccountSessionPrefs> = ['cwd', 'agentPreset', 'provider', 'model', 'reasoningEffort']
+
+/** 连接相关形态比较：渠道或任一 config 键值变化即视为需要重建适配器。 */
+function configRelevantChanged(a: Record<string, string> | undefined, b: Record<string, string> | undefined): boolean {
+  const ka = Object.keys(a ?? {}).sort()
+  const kb = Object.keys(b ?? {}).sort()
+  if (ka.length !== kb.length) return true
+  const fa = a ?? {}
+  const fb = b ?? {}
+  for (const key of ka) {
+    if (fa[key] !== fb[key]) return true
+  }
+  return false
+}
+
+function hasSecretValues(secrets: Record<string, string> | undefined): boolean {
+  if (secrets === undefined) return false
+  for (const value of Object.values(secrets)) {
+    if (typeof value === 'string' && value !== '') return true
+  }
+  return false
+}
+
+function sanitizeSessionPrefs(input: AccountRecord['session']): AccountSessionPrefs {
+  const out: AccountSessionPrefs = {}
+  if (input === undefined || input === null || typeof input !== 'object') return out
+  const raw = input as Record<string, unknown>
+  for (const key of SESSION_PREF_KEYS) {
+    const value = raw[key]
+    if (typeof value === 'string' && value !== '') out[key] = value
+  }
+  return out
 }
 
 interface LiveAccount {
@@ -131,8 +175,19 @@ export class AccountManager {
       record = { ...record, dmAllowlist: undefined, groupEnabled: undefined }
     }
     const index = this.records.findIndex((r) => r.accountId === record.accountId)
-    if (index >= 0) {
+    const existing = index >= 0 ? this.records[index] : undefined
+    // 重建判据（只看连接相关事实）：渠道变化 / config 变化 / 有新 secret 值。
+    // 别名/白名单/准入档位/会话偏好/暂停态等编辑**不断连**——修掉「改个名字
+    // 也触发适配器重建」的替换凭据体感。
+    const needsRebuild =
+      existing !== undefined &&
+      (existing.channel !== record.channel ||
+        configRelevantChanged(existing.config, record.config) ||
+        hasSecretValues(secrets))
+    if (needsRebuild) {
       await this.teardown(record.accountId)
+    }
+    if (index >= 0) {
       this.records[index] = record
     } else {
       this.records.push(record)
@@ -147,9 +202,34 @@ export class AccountManager {
       }
     }
     this.persist()
-    if (record.paused !== true && opts?.skipConnect !== true) {
+    if (needsRebuild || existing === undefined) {
+      // 新账号或连接事实变化：按暂停/跳过语义重建连接。
+      if (record.paused !== true && opts?.skipConnect !== true) {
+        await this.ensureConnected(record.accountId)
+      }
+      return
+    }
+    // 凭据无关编辑：原位同步策略与暂停态，在线适配器不动。
+    await this.syncPolicy(record)
+    const live = this.live.get(record.accountId)
+    if (record.paused === true && live?.adapter !== undefined) {
+      await this.teardown(record.accountId)
+    } else if (record.paused !== true && live?.adapter === undefined && opts?.skipConnect !== true) {
       await this.ensureConnected(record.accountId)
     }
+  }
+
+  /** 编辑后的策略原位下发（引擎 updatePolicy，不重复挂 onMessage）。 */
+  private async syncPolicy(record: AccountRecord): Promise<void> {
+    const live = this.live.get(record.accountId)
+    if (live?.adapter === undefined) return
+    const notify = this.isNotifyOnly(record.channel)
+    this.deps.engine.updatePolicy(record.accountId, {
+      dmAllowlist: new Set(notify ? [] : record.dmAllowlist ?? []),
+      groupEnabled: record.groupEnabled ?? true,
+      privateAccess: record.privateAccess === 'all' ? 'all' : 'approved',
+      ...(record.session !== undefined ? { session: sanitizeSessionPrefs(record.session) } : {}),
+    })
   }
 
   async remove(accountId: string): Promise<boolean> {
@@ -193,9 +273,11 @@ export class AccountManager {
     this.persist()
     const live = this.live.get(accountId)
     if (live?.adapter !== undefined) {
-      this.deps.engine.registerAccount(live.adapter, accountId, {
+      // updatePolicy 原位下发（registerAccount 会重复挂 onMessage → 消息双投，禁用）。
+      this.deps.engine.updatePolicy(accountId, {
         dmAllowlist: new Set(userIds),
-        groupEnabled: record.groupEnabled,
+        groupEnabled: record.groupEnabled ?? true,
+        privateAccess: record.privateAccess === 'all' ? 'all' : 'approved',
       })
     }
     return true
@@ -231,6 +313,15 @@ export class AccountManager {
         const value = await this.deps.vault.resolve(credentialRef(record.channel, `${record.accountId}.${field.key}`))
         fields.push({ key: field.key, configured: value !== undefined })
       }
+      // 明文配置按 meta plain 字段白名单过滤后回显（设置页编辑预填）；
+      // meta 之外的杂键与 secret 键一律不出现（D4 同源纪律）。
+      const plainKeys = new Set(
+        (CHANNEL_META[record.channel]?.fields ?? []).filter((f) => !f.secret).map((f) => f.key),
+      )
+      const config: Record<string, string> = {}
+      for (const [key, value] of Object.entries(record.config ?? {})) {
+        if (plainKeys.has(key) && typeof value === 'string') config[key] = value
+      }
       const live = this.live.get(record.accountId)
       const notify = this.isNotifyOnly(record.channel)
       rows.push({
@@ -243,6 +334,9 @@ export class AccountManager {
         // 通知类不回显策略字段（存储态也已剥除，双向一致）。
         dmAllowlist: notify ? [] : record.dmAllowlist ?? [],
         groupEnabled: notify ? undefined : record.groupEnabled,
+        config,
+        privateAccess: record.privateAccess === 'all' ? 'all' : 'approved',
+        session: sanitizeSessionPrefs(record.session),
       })
     }
     return rows
@@ -279,6 +373,8 @@ export class AccountManager {
       this.deps.engine.registerAccount(adapter, accountId, {
         dmAllowlist: new Set(record.dmAllowlist ?? []),
         groupEnabled: record.groupEnabled,
+        privateAccess: record.privateAccess === 'all' ? 'all' : 'approved',
+        ...(record.session !== undefined ? { session: sanitizeSessionPrefs(record.session) } : {}),
       })
       await adapter.connect()
       this.live.set(accountId, { record, adapter, connected: true })

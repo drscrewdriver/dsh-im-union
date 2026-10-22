@@ -43,13 +43,27 @@ const cache = new WeakMap<CordisLike, UnionCapabilities>()
 
 /** 软读服务：ctx.get 缺失、未注册抛错、返回 undefined 一律归一为 undefined。 */
 export function optionalService<T = unknown>(ctx: CordisLike, name: string): T | undefined {
-  if (typeof ctx.get !== 'function') return undefined
-  try {
-    return ctx.get(name) as T | undefined
-  } catch {
-    // Cordis 对未注册服务抛错——静默即"该线没有这个面"，走降级。
-    return undefined
+  if (typeof ctx.get === 'function') {
+    try {
+      const value = ctx.get(name)
+      if (value !== undefined) return value as T | undefined
+    } catch {
+      // Cordis 对未注册服务抛错——继续走反射兜底，静默即"该线没有这个面"。
+    }
   }
+  // desktop/Electron 线兜底：ctx.get 是 strict 语义（cordis lib/index.js:770，
+  // 提供方 fiber 未激活 state!==2 即 undefined），插件 apply 可能早于会话子系统
+  // 激活。ctx.reflect.get(name, false) 是免 inject 要求 + 非严格的读取口（同文件
+  // :756），命中在册但未激活的服务；两路都空 = 该线真没有，照旧降级。
+  const reflect = (ctx as { reflect?: { get?: (name: string, strict?: boolean) => unknown } }).reflect
+  if (typeof reflect?.get === 'function') {
+    try {
+      return reflect.get(name, false) as T | undefined
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
 }
 
 function isFunctionOn(value: unknown, key: string): boolean {

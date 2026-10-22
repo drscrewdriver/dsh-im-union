@@ -1,7 +1,7 @@
 {
   "name": "dsh-im-union",
-  "version": "0.1.0",
-  "description": "Union IM bridge for DeepSeek Harness — clean-room merge of dsh-im and dsh-im-connect capabilities, compatible across 0.1.2-rc.1 .. 0.2.1-alpha.3 hosts.",
+  "version": "0.3.1",
+  "description": "Union IM bridge for DeepSeek Harness — clean-room merge of dsh-im and dsh-im-connect capabilities, compatible across 0.1.2-rc.1 .. 0.2.1-rc.2 hosts.",
   "type": "module",
   "license": "MIT",
   "main": "lib/index.js",
@@ -106,6 +106,9 @@
     "imapflow": "^2.5.2",
     "nodemailer": "^10.1.2",
     "qrcode": "^1.5.4"
+  },
+  "optionalDependencies": {
+    "@whiskeysockets/baileys": "^6.7.24"
   },
   "repository": {
     "type": "git",

@@ -7,7 +7,7 @@
  * 各线参数契约差异（如 agents.create 单参/双参、0.1.5 显式传 Agent）在 M1
  * 用逐线契约测试坐实后在本文件内收敛，调用方不见版本差异。
  */
-import type { CordisLike } from '../types.js'
+import type { CordisLike, LoggerLike } from '../types.js'
 import { optionalService, sessionServices, type UnionCapabilities } from './services.js'
 
 export class UnsupportedError extends Error {
@@ -47,7 +47,11 @@ export interface PresetInfo {
 
 export interface CreateSessionOptions {
   workspace?: string
+  /** 会话工作目录（sessionController.create 的 cwd；与 workspace 二选一，cwd 优先直传）。 */
+  cwd?: string
   model?: string
+  provider?: string
+  reasoningEffort?: string
   preset?: string
   /** IM 侧生成的稳定会话 id（imu: 前缀），宿主不接受时由实现方生成并回传。 */
   sessionIdHint?: string
@@ -141,10 +145,14 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
   const sessionListFn = asFn<{ list(...args: any[]): any }>(sessionController, 'list')
   const selectModelFn = asFn<{ selectModel(...args: any[]): any }>(sessionController, 'selectModel')
   const catalogFn = asFn<{ modelCatalog(...args: any[]): any }>(sessionController, 'modelCatalog')
+  const sessionCreateFn = asFn<{ create(...args: any[]): any }>(sessionController, 'create')
   const presetsListFn = asFn<{ list(...args: any[]): any }>(caps.agentPresets, 'list')
   const presetSelectFn = asFn<{ select(...args: any[]): any }>(caps.agentPresets, 'select')
   const forkFn = asFn<{ fork(...args: any[]): any }>(sessionController, 'fork')
   const renameFn = asFn<{ rename(...args: any[]): any }>(sessionController, 'rename')
+  const log = typeof (ctx as { logger?: unknown }).logger === 'function'
+    ? (ctx as unknown as { logger: (name: string) => LoggerLike }).logger('dsh-im-union')
+    : { warn() {}, info() {}, debug() {}, error() {} }
 
   /**
    * 形态归一：宿主 @Remote 面收 request 对象（@0.2.x 锚点 api/session-controller），
@@ -198,20 +206,77 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
   return {
     backend: 'native',
     async createSession(options) {
-      // TODO(M1-contract): 逐线坐实 create 的参数形态（seed/meta/agentOptions），
-      // 0.1.5 线需显式传 Agent 的分支在此收敛。
-      //
       // title 面查实（宿主 0.2.x 线源码锚点，本仓 dsh-repo 对照）：
       // - packages/api/session-controller/src/types.ts:265-270 SessionCreateRequest =
       //   {workspaceId?, cwd?, sessionId?, agentPreset?}——**无 title 字段**；
-      // - packages/core/agent/src/index.ts:78-85 CreateAgentOptions.meta 白名单 =
-      //   {cwd,parentSession,isSeeded,origin,delegationDepth,agentPreset}——**无 title**，
-      //   且 origin 只允许 'subagent'（现有 meta.origin:'dsh-im-union' 属来源标记位，
-      //   宿主侧不保证入会话列表）；
-      // - 唯一 title 面 = sessionController.rename（types.ts:289-292），rename 成功后
-      //   宿主 settle 'title' 投影单元，列表行同步刷新
-      //   （packages/api/session-controller/src/client/sessions/session.ts:348-358）
-      //   → 渠道角标前缀走 create+rename 两步，不伪称 create 直接收 title。
+      // - 主路径走 sessionController.create（cwd 直接落 Agent 项目目录、sessionIdHint
+      //   幂等采纳、agentPreset 建会话即装），锚点 commands.ts:87-129；
+      // - 老线/主路径被拒（如预设不存在）→ 回退 agents.create meta 路径（仅 origin/
+      //   workspace 白名单，锚点 packages/core/agent/src/index.ts:78-85），不伪称偏好已生效；
+      // - 唯一 title 面 = sessionController.rename（types.ts:289-292）→ create+rename 两步。
+      const wanted = typeof options.title === 'string' ? options.title.trim() : ''
+      const applyModelSelection = async (id: string): Promise<void> => {
+        if (options.model === undefined || options.model === '') return
+        if (typeof selectModelFn !== 'function') {
+          log.warn('模型选择面缺位，账号级模型偏好未生效')
+          return
+        }
+        try {
+          await callWithShapeFallback(
+            () =>
+              selectModelFn.call(sessionController, {
+                sessionId: id,
+                ...(options.provider !== undefined && options.provider !== '' ? { provider: options.provider } : {}),
+                model: options.model,
+                ...(options.reasoningEffort !== undefined && options.reasoningEffort !== ''
+                  ? { reasoningEffort: options.reasoningEffort }
+                  : {}),
+              }) as Promise<void>,
+            () => selectModelFn.call(sessionController, id, options.model) as Promise<void>,
+          )
+        } catch (error) {
+          log.warn(`模型偏好落位失败（会话照常创建）: ${(error as Error).message}`)
+        }
+      }
+      const renameIfWanted = async (id: string): Promise<SessionInfo> => {
+        if (wanted !== '') {
+          const applied = await renameTitle(id, wanted)
+          if (applied) return { id, title: wanted }
+        }
+        return { id }
+      }
+
+      if (typeof sessionCreateFn === 'function') {
+        const request: Record<string, unknown> = {}
+        if (options.sessionIdHint !== undefined && options.sessionIdHint.startsWith('imu:')) {
+          // 显式 id 走宿主幂等采纳（commands.ts:98 sessionId ?? brandString）。
+          request.sessionId = options.sessionIdHint
+        }
+        if (options.cwd !== undefined && options.cwd !== '') {
+          request.cwd = options.cwd
+        } else if (options.workspace !== undefined && options.workspace !== '') {
+          request.workspaceId = options.workspace
+        }
+        if (options.preset !== undefined && options.preset !== '') request.agentPreset = options.preset
+        try {
+          const value = (await sessionCreateFn.call(sessionController, request)) as unknown
+          const id =
+            value !== null && typeof value === 'object' && typeof (value as { sessionId?: unknown }).sessionId === 'string'
+              ? (value as { sessionId: string }).sessionId
+              : options.sessionIdHint
+          if (id === undefined) throw new Error('session.create 回包无 sessionId')
+          await applyModelSelection(id)
+          const info = await renameIfWanted(id)
+          if (options.sessionIdHint !== undefined && id !== options.sessionIdHint) {
+            // 宿主采纳了别的 id 形态（规范化/碰撞回退）——交由调用方 router.bind 落新绑定。
+            log.info(`session.create 采纳新 id: ${options.sessionIdHint} -> ${id}`)
+          }
+          return info
+        } catch (error) {
+          log.warn(`sessionController.create 被拒，回退 agents.create: ${(error as Error).message}`)
+        }
+      }
+
       const created = await create.call(agents, {
         seed: [],
         meta: { origin: 'dsh-im-union', workspace: options.workspace },
@@ -221,11 +286,9 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
         (created && typeof created.id === 'string' && created.id) ||
         options.sessionIdHint ||
         `imu:union:generated:${Date.now()}`
-      const wanted = typeof options.title === 'string' ? options.title.trim() : ''
-      if (wanted !== '') {
-        const applied = await renameTitle(id, wanted)
-        if (applied) return { id, title: wanted }
-      }
+      await applyModelSelection(id)
+      const info = await renameIfWanted(id)
+      if (info.title !== undefined) return info
       const title = created && typeof created.title === 'string' ? created.title : undefined
       return { id, title }
     },

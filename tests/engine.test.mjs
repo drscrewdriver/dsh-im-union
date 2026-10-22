@@ -56,11 +56,48 @@ const dmMessage = (text, userId = 'u1') => ({
   mentionedBot: false,
 })
 
-test('私聊白名单为空即拒（默认拒绝红线）', async () => {
+test('私聊白名单为空即拒（默认拒绝红线）：消息不处理但回一次带 userId 的提示', async () => {
   const adapter = fakeAdapter()
   const { engine } = makeEngine(adapter, { dmAllowlist: new Set() })
   await engine.handleInbound('acct-1', dmMessage('/help'))
+  // 拒绝可见化：不执行命令（默认拒绝红线不变），但回一次未授权提示便于排障。
+  assert.equal(adapter.replies.length, 1)
+  assert.match(adapter.replies[0].text, /未授权/)
+  assert.match(adapter.replies[0].text, /u1/)
+  await engine.handleInbound('acct-1', dmMessage('/help'))
+  await engine.handleInbound('acct-1', dmMessage('你好'))
+  // 冷却窗口内不重复提示，消息也绝不进会话。
+  assert.equal(adapter.replies.length, 1)
+})
+
+test('privateAccess=all 接受所有私聊；准入档位经 updatePolicy 原位切换', async () => {
+  const adapter = fakeAdapter()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(), privateAccess: 'all' })
+  await engine.handleInbound('acct-1', dmMessage('/help'))
+  // 命令得到执行（回复不是未授权提示）。
+  assert.equal(adapter.replies.length, 1)
+  assert.doesNotMatch(adapter.replies[0].text, /未授权/)
+  engine.updatePolicy('acct-1', { privateAccess: 'approved' })
+  await engine.handleInbound('acct-1', dmMessage('/help'))
+  assert.match(adapter.replies[1].text, /未授权/)
+})
+
+test('群聊关闭且被 @ 时提示一次；未 @ 静默', async () => {
+  const adapter = fakeAdapter()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']), groupEnabled: false })
+  const groupMessage = (mentioned) => ({
+    address: addressOf('telegram', 'group', 'g1'),
+    userId: 'u1',
+    text: '@bot 你好',
+    mentionedBot: mentioned,
+  })
+  await engine.handleInbound('acct-1', groupMessage(false))
   assert.equal(adapter.replies.length, 0)
+  await engine.handleInbound('acct-1', groupMessage(true))
+  assert.equal(adapter.replies.length, 1)
+  assert.match(adapter.replies[0].text, /群聊接收已关闭/)
+  await engine.handleInbound('acct-1', groupMessage(true))
+  assert.equal(adapter.replies.length, 1)
 })
 
 test('白名单内 /help 得到命令列表', async () => {
@@ -288,10 +325,12 @@ test('同渠道双账号：白名单各自独立，入站由来源账号适配�
   engine.registerAccount(b, 'acct-b', { dmAllowlist: new Set(['u1']) })
   const msg = dmMessage('/help')
   await engine.handleInbound('acct-a', msg)
-  assert.equal(a.replies.length, 0, 'acct-a 空白名单即拒')
+  // 拒绝可见化：拒一回一次提示（不执行命令），只投到来源账号自己的适配器。
+  assert.equal(a.replies.length, 1, 'acct-a 空白名单即拒（带未授权提示）')
+  assert.match(a.replies[0].text, /未授权/)
   await engine.handleInbound('acct-b', msg)
   assert.equal(b.replies.length, 1, 'acct-b 白名单内放行且回到自己适配器')
-  assert.equal(a.replies.length, 0, '不被同渠道账号串台')
+  assert.match(b.replies[0].text, /\/status/)
   engine.unregister('acct-b')
   await engine.handleInbound('acct-b', msg)
   assert.equal(b.replies.length, 1, '注销后账号消息整体丢弃')
