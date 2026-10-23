@@ -1779,30 +1779,34 @@ select.diu-input { appearance: auto; }
         });
       };
       var inserted = false;
-      // ① 原生 tab registry（宿主自带，或 dsh-im-connect 壳挂在 occupant 上）：
-      //    直接插 channels 页签，与会话树同层出现（order 排后不抢位）。
-      try {
-        var read = ctx.slots.entriesOfSlot || ctx.slots.entries;
-        var entries = (read && read.call(ctx.slots, 'sidebar.workspaces')) || [];
-        for (var i = 0; i < entries.length; i++) {
-          var entry = entries[i];
-          var registry = (entry && entry.__dshNativeTabs) || (entry && entry.component && entry.component.__dshNativeTabs) || null;
-          if (registry && typeof registry.insert === 'function') {
-            registry.insert({
-              id: 'im-union-channels',
-              label: t('rail.title'),
-              order: 25,
-              matchSession: function (id) { return String(id).indexOf('im:union:') === 0; },
-              render: function (props) { return renderRail(props); },
-            });
-            inserted = true;
-            console.info('[dsh-im-union] \u6e20\u9053\u9875\u7b7e\u5df2\u63d2\u5165\u539f\u751f tab registry');
-            break;
+      // ① 原生 tab registry（宿主自带，或 dsh-im-connect 壳挂在 occupant 上）。
+      //    插件加载有先后：im-connect 的壳在 apply 时点尤其常还没就位（真机实证）——
+      //    照参考 sync 形态轮询重试 250ms×32，插入成功即停。
+      var tryRegistry = function () {
+        try {
+          var read = ctx.slots.entriesOfSlot || ctx.slots.entries;
+          var entries = (read && read.call(ctx.slots, 'sidebar.workspaces')) || [];
+          for (var i = 0; i < entries.length; i++) {
+            var entry = entries[i];
+            var registry = (entry && entry.__dshNativeTabs) || (entry && entry.component && entry.component.__dshNativeTabs) || null;
+            if (registry && typeof registry.insert === 'function') {
+              var hasImConnect = false;
+              try { hasImConnect = typeof registry.getTabs === 'function' && registry.getTabs().some(function (tb) { return tb && tb.id === 'channels'; }); } catch (_) {}
+              registry.insert({
+                id: 'im-union-channels',
+                label: hasImConnect ? 'Union' : t('rail.title'),
+                order: 25,
+                matchSession: function (id) { return String(id).indexOf('im:union:') === 0; },
+                render: function (props) { return renderRail(props); },
+              });
+              return true;
+            }
           }
-        }
-      } catch (error) { console.info('[dsh-im-union] \u539f\u751f\u9875\u7b7e\u63a2\u6d4b\u4e0d\u53ef\u7528\uff1a', error && error.message); }
-      // ② 独立 sidebar.channels 槽（宿主提供即用；SlotOwnershipError 等按不可用处理）。
-      if (!inserted) {
+        } catch (error) { console.info('[dsh-im-union] native tab probe unavailable: ', error && error.message); return true; }
+        return false;
+      };
+      // ② 独立 sidebar.channels 槽（宿主提供即用）；都不成则仅日志（③）。
+      var tryStandaloneSlot = function () {
         try {
           if (typeof ctx.slots.inject === 'function' && typeof ctx.slots.register === 'function') {
             ctx.slots.inject('sidebar.channels', function () {
@@ -1814,12 +1818,29 @@ select.diu-input { appearance: auto; }
                 },
               }, function () { return renderRail(null); });
             });
-            inserted = true;
-            console.info('[dsh-im-union] \u6e20\u9053\u89c6\u89d2\u8d70 sidebar.channels \u72ec\u7acb\u69fd');
+            return true;
           }
-        } catch (error) { console.info('[dsh-im-union] sidebar.channels \u69fd\u4e0d\u53ef\u7528\uff1a', error && error.message); }
-      }
-      if (!inserted) console.info('[dsh-im-union] \u6e20\u9053\u89c6\u89d2\u65e0\u53ef\u7528\u6302\u70b9\uff08\u672c\u7248\u5230\u6b64\u4e3a\u6b62\uff1b/sessions \u547d\u4ee4\u9762\u4ecd\u53ef\u7ba1\u7406\u4f1a\u8bdd\uff09');
+        } catch (error) { console.info('[dsh-im-union] sidebar.channels slot unavailable: ', error && error.message); }
+        return false;
+      };
+      var tries = 0;
+      var mountTimer = window.setInterval(function () {
+        tries += 1;
+        if (!inserted && tryRegistry()) {
+          inserted = true;
+          window.clearInterval(mountTimer);
+          console.info('[dsh-im-union] channels tab inserted into native registry (try ' + tries + ')');
+          return;
+        }
+        if (tries >= 32) {
+          window.clearInterval(mountTimer);
+          if (!inserted && tryStandaloneSlot()) {
+            inserted = true;
+            console.info('[dsh-im-union] channels rail on standalone sidebar.channels slot');
+          }
+          if (!inserted) console.info('[dsh-im-union] channels rail: no mount point (sessions still manageable via /sessions)');
+        }
+      }, 250);
       startRailPolling();
     }
 
