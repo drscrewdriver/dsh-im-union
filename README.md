@@ -31,6 +31,78 @@ dsh plugin --profile web add dsh-im-union@latest --registry=https://registry.npm
 - 飞书语音档需要系统 `ffmpeg` 在 PATH 中（转码二进制不随包分发，仅启用语音档时才会调用）。
 - iMessage 渠道仅 macOS 可用。
 
+## 使用说明
+
+装好后在宿主设置页/侧栏的「IM 联合桥」面板管理账号与偏好；日常操作全部可在聊天内完成（发 `/help` 看命令）。
+
+### 添加账号
+
+三类绑定形态，面板按渠道元数据自动出表单：
+
+| 形态 | 渠道 | 说明 |
+|---|---|---|
+| 凭据表单（9） | telegram / discord / slack / matrix / imessage / wecom-app / email / dingtalk-notify / qq-notify | 填 Bot Token 或 App 凭据；secret 字段只单向入库，任何回包零凭据 |
+| 凭据或扫码（4） | feishu / wecom / dingtalk / qq | 二选一：填应用凭据，或走面板扫码建机器人 |
+| 扫码（2） | weixin / whatsapp | 微信走官方 iLink 扫码；WhatsApp 走 Baileys 配对 |
+
+账号 ID 由系统自动生成（`<channel>-<ts36><rand>`），**无需也不应手填**；「别名」才是给人看的名字，可在面板设置。
+
+### 命令面板（25 条）
+
+| 组 | 命令 |
+|---|---|
+| 会话 | `/help` `/menu` `/status` `/new` `/stop` `/steer <文本>` `/sessions [all] [页]` `/session <序号\|id片段>` `/fork` `/rename <标题>` `/unbind` `/goal <文本\|->` `/queue` `/mute` |
+| 模型与预设 | `/models` `/model <id>` `/reasoning <档位>` `/presets` `/preset <名称>` `/workspaces` `/workspace <路径\|->` |
+| 投递与抄送 | `/delivery [retry <序号>]` `/export` `/relay <账号\|->` `/speak <文本>` |
+
+命令默认只对白名单用户开放；群聊只认显式 @ 本机器人。工具审批与交互提问在原聊天回答（默认拒绝、发起者限定、5 分钟超时）。
+
+### 通知抄送（`/relay`）
+
+把**当前会话**每回合的最终回答镜像到一个纯出站通知账号（钉钉群 webhook / QQ 主动推送）：
+
+```text
+/relay                          列出本会话绑定（未绑定时回用法提示）
+/relay -                        解绑
+/relay <账号>                    绑定；<账号> 可为代理键 ID 或别名
+/relay <账号>:<targetId>         绑定并指定推送目标
+```
+
+- **解析顺序**：先按账号 ID 直查，未命中再按别名**唯一**匹配；别名歧义时直接拒绝并提示改用账号 ID，绝不猜。
+- **targetId 按渠道**：钉钉的 webhook 已锁定目标群，可省；QQ 用 `chatId` 作 openid/group_openid，**必填**。
+- **语义**：会话级绑定、重复绑定即换目标（覆盖）、多会话可指向同一账号；抄送文本带 `[源渠道/会话短id]` 前缀与同款收轮后缀；投递结果不明时**绝不自动重发**，失败落 `plugin.log`。
+- `/new` 轮换后新会话不继承旧绑定（需重新 `/relay`）；一个会话同时只指向一个通知账号。
+
+### 侧栏「任务 / 频道」
+
+插件把宿主侧栏包成两个自持页签：**任务**=官方会话树（已过滤 IM 会话，不会冒出「未分组」条目）、**频道**=按渠道分组的 IM 会话列表（搜索、运行状态点、点击打开）。检测到侧栏已被其它插件接管时**完全不插手**，此时渠道列表退化为设置面板内的卡片。
+
+### 模型白名单
+
+设置面板「模型白名单」框一行一个 `provider/model`（留空=不限）。非空时 `/models` 只列白名单内、`/model` 越界被拒并回列可用项；账号级模型偏好不受约束。用途：模型异常时 IM 远端仍有可切的兜底集合。
+
+### 图表（svg → 图片）
+
+需要图示时让助手输出一个 `svg` 代码围栏（完整内联 SVG、白底深色前景、宽 ≤1000），插件会渲染成 PNG 作为图片消息发出；渲染依赖不在位或渠道不支持图片时降级为纯文字，不阻断回答。
+
+### IM 简洁预设
+
+插件向宿主注册 `im-concise` 预设并作为 IM 会话默认：persona 完整模式（从源头阻断 GenUI 围栏、裸 HTML 等富结构注入）+ 简短纯文字纪律。账号「会话偏好 → Agent 预设」可改用其它预设；出站净化作为兜底安全网始终生效。
+
+### 管理 API
+
+`/api/dsh-im-union/*` 复用宿主登录态（每请求过 Host/Origin/Cookie 三查），回包零凭据零内部异常细节：
+
+| 组 | 端点 |
+|---|---|
+| 探针 | `/ping` `/state` |
+| 账号 | `/accounts` `/accounts/save` `/accounts/pause` `/accounts/remove` `/accounts/allowlist` `/accounts/check` |
+| 目录 | `/session-catalog` `/channels` |
+| 扫码 | `/weixin/qr/start` `/weixin/qr/status` |
+| 主动投递 | `/proactive/send` `/proactive/targets` `/proactive/targets/remove` `/proactive/syncback` |
+| 抄送与白名单 | `/relay-bindings` `/relay-bindings/bind` `/relay-bindings/unbind` `/model-whitelist` |
+| 其它 | `/connector/jobs` `/connector/jobs/cancel` `/wecom-app/callback`（第三方回调，验签即认证） |
+
 ## 开发
 
 ```sh

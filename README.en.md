@@ -31,6 +31,78 @@ Then add accounts in the "IM union bridge" panel: most channels use credential b
 - The Feishu voice tier requires system `ffmpeg` on PATH (the transcoding binary is not shipped; it is only invoked when the voice tier is enabled).
 - The iMessage channel is macOS only.
 
+## Usage
+
+After installing, manage accounts and preferences from the **IM Union Bridge** section of the host's settings page; day-to-day operation happens entirely inside chat (`/help` lists the commands).
+
+### Adding an account
+
+Three bind shapes; the panel renders each form from channel metadata:
+
+| Bind | Channels | Notes |
+|---|---|---|
+| Credentials (9) | telegram / discord / slack / matrix / imessage / wecom-app / email / dingtalk-notify / qq-notify | Bot token or app credentials; secret fields are written one-way and never returned by any response |
+| Credentials or QR (4) | feishu / wecom / dingtalk / qq | Either fill app credentials, or create the bot by scanning from the panel |
+| QR (2) | weixin / whatsapp | WeChat via the official iLink QR bind; WhatsApp via Baileys pairing |
+
+Account IDs are generated (`<channel>-<ts36><rand>`) — **you never fill one in**. The *alias* is the human-facing name and is editable in the panel.
+
+### Command panel (25)
+
+| Group | Commands |
+|---|---|
+| Session | `/help` `/menu` `/status` `/new` `/stop` `/steer <text>` `/sessions [all] [page]` `/session <index\|id-fragment>` `/fork` `/rename <title>` `/unbind` `/goal <text\|->` `/queue` `/mute` |
+| Models & presets | `/models` `/model <id>` `/reasoning <tier>` `/presets` `/preset <name>` `/workspaces` `/workspace <path\|->` |
+| Delivery & relay | `/delivery [retry <n>]` `/export` `/relay <account\|->` `/speak <text>` |
+
+Commands are gated by the per-account allowlist; in groups only explicit @-mentions trigger them. Tool approvals and agent questions are answered in the originating chat (deny-by-default, initiator only, 5-minute expiry).
+
+### Final-answer relay (`/relay`)
+
+Mirror every turn's final answer of the **current session** to a send-only notify account (DingTalk group webhook / QQ active push):
+
+```text
+/relay                          list this session's binding (prints usage when unbound)
+/relay -                        unbind
+/relay <account>                bind; <account> is the surrogate ID or the alias
+/relay <account>:<targetId>     bind and set the push target explicitly
+```
+
+- **Resolution order**: surrogate ID first, then a **unique** alias match. An ambiguous alias is refused outright with a hint to use the account ID — the plugin never guesses.
+- **targetId per channel**: DingTalk's webhook already pins the destination group, so it may be omitted; QQ uses `chatId` as openid/group_openid and **requires** it.
+- **Semantics**: session-scoped, re-binding overwrites, many sessions may point at one account; the mirrored text carries a `[source-channel/session]` prefix plus the same turn-end suffix; an uncertain delivery is **never re-sent** (failures land in `plugin.log`).
+- `/new` rotation does not inherit the binding (re-run `/relay`), and one session targets one notify account at a time.
+
+### Tasks / Channels sidebar
+
+The plugin wraps the host sidebar into two self-owned tabs: **Tasks** renders the official session tree with IM sessions filtered out (they never surface as "ungrouped" rows), **Channels** shows IM sessions grouped by messenger with search, a running indicator and click-to-open. When another plugin already owns the slot the plugin **stands down entirely** and the channel list remains available as a card inside the settings panel.
+
+### Model allowlist
+
+Enter one `provider/model` per line in the settings textarea (empty = no restriction). When set, `/models` lists only allowlisted models and `/model` rejects anything else while echoing the usable set; account-level model preferences are exempt. Purpose: when a model misbehaves, an IM-side user still has a vetted fallback to switch to.
+
+### Charts (svg → image)
+
+Ask for a diagram and the assistant emits a single `svg` code fence (complete inline SVG, white background, dark foreground, width ≤ 1000); the plugin renders it to PNG and sends it as an image. With no renderer available, or on channels that cannot take images, it degrades to text instead of blocking the answer.
+
+### IM-concise agent preset
+
+The plugin registers an `im-concise` agent preset with the host and uses it for IM sessions by default: a complete-mode persona that keeps rich-structure injections (GenUI fences, raw HTML) out of text-only chats, plus short plain-text discipline. Override it per account under *session preferences → Agent preset*; reply sanitisation stays on as a backstop either way.
+
+### Administration API
+
+`/api/dsh-im-union/*` reuses the host login session (every request passes the Host/Origin/Cookie checks) and returns zero credentials and zero internal error detail:
+
+| Group | Endpoints |
+|---|---|
+| Probes | `/ping` `/state` |
+| Accounts | `/accounts` `/accounts/save` `/accounts/pause` `/accounts/remove` `/accounts/allowlist` `/accounts/check` |
+| Catalogs | `/session-catalog` `/channels` |
+| QR bind | `/weixin/qr/start` `/weixin/qr/status` |
+| Proactive delivery | `/proactive/send` `/proactive/targets` `/proactive/targets/remove` `/proactive/syncback` |
+| Relay & allowlist | `/relay-bindings` `/relay-bindings/bind` `/relay-bindings/unbind` `/model-whitelist` |
+| Misc | `/connector/jobs` `/connector/jobs/cancel` `/wecom-app/callback` (third-party webhook; signature verification *is* the authentication) |
+
 ## Development
 
 ```sh
