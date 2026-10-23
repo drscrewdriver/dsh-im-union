@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { ImUnionEngine, addressOf, splitText, extractAssistantText } from '../lib/engine/gateway.js'
+import { ImUnionEngine, addressOf, splitText, extractAssistantText, normalizeCommandExec } from '../lib/engine/gateway.js'
 import { ChatRouter } from '../lib/engine/router.js'
 
 const fakeLogger = () => ({ debug() {}, info() {}, warn() {}, error() {} })
@@ -44,7 +44,7 @@ function makeEngine(adapter, policy, extra = {}) {
     async selectModel() {},
   }
   const router = new ChatRouter()
-  const engine = new ImUnionEngine({ ctx, caps, sessionApi, router, turnTimeoutMs: extra.turnTimeoutMs })
+  const engine = new ImUnionEngine({ ctx, caps, sessionApi, router, eventTap: extra.eventTap, turnTimeoutMs: extra.turnTimeoutMs })
   engine.registerAccount(adapter, 'acct-1', policy)
   return { engine, router }
 }
@@ -347,7 +347,7 @@ test('/new 解除绑定后下一条重开宿主真会话并复用', async () => 
   await waitUntil(() => session.state.prompted.length === 1)
   session.emit(turnEnd())
   await inflight
-  // T1.1 后：隐式 imu: id 首次使用时 createSession 换宿主真 id（stub 回 'x'）
+  // T1.1 后：隐式 im:union: id 首次使用时 createSession 换宿主真 id（stub 回 'x'）
   assert.equal(session.state.prompted[0].sessionId, 'x')
   const second = engine.handleInbound('acct-1', dmMessage('again'))
   await waitUntil(() => session.state.prompted.length === 2)
@@ -392,4 +392,164 @@ test('无 statusProgress 档位：进度事件不产生额外流式拍（回归�
   assert.equal(adapter.streams[0].updates[0], '正文')
   session.emit(turnEnd())
   await inflight
+})
+
+test('normalizeCommandExec：缺省全开；非布尔键回退', () => {
+  assert.deepEqual(normalizeCommandExec(undefined), { dm: true, group: true })
+  assert.deepEqual(normalizeCommandExec({ dm: false }), { dm: false, group: true })
+  assert.deepEqual(normalizeCommandExec('junk', { dm: false, group: false }), { dm: false, group: false })
+  assert.deepEqual(normalizeCommandExec({ dm: 'no', group: 0 }), { dm: true, group: true })
+})
+
+test('命令执行开关：关闭只拦 / 命令并明说；/mute 保留逃生门；重开后恢复', async () => {
+  const adapter = fakeAdapter()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']), commandExec: { dm: false, group: true } })
+  await engine.handleInbound('acct-1', dmMessage('/help'))
+  assert.equal(adapter.replies.length, 1)
+  assert.match(adapter.replies[0].text, /私聊命令执行已关闭/)
+  // /mute 是静音期唯一逃生门：命令开关关闭也不拦（否则永久静默）。
+  await engine.handleInbound('acct-1', dmMessage('/mute'))
+  assert.equal(adapter.replies.length, 2)
+  assert.match(adapter.replies[1].text, /已静音/)
+  engine.updatePolicy('acct-1', { commandExec: { dm: true, group: true } })
+  await engine.handleInbound('acct-1', dmMessage('/help'))
+  assert.equal(adapter.replies.length, 3)
+  assert.doesNotMatch(adapter.replies[2].text, /已关闭/)
+})
+
+test('群聊命令执行开关独立于私聊档', async () => {
+  const adapter = fakeAdapter()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']), commandExec: { dm: true, group: false } })
+  await engine.handleInbound('acct-1', dmMessage('/help'))
+  assert.equal(adapter.replies.length, 1)
+  assert.doesNotMatch(adapter.replies[0].text, /已关闭/)
+  await engine.handleInbound('acct-1', {
+    address: addressOf('telegram', 'group', 'g1'),
+    userId: 'u1',
+    text: '/help',
+    mentionedBot: true,
+  })
+  assert.equal(adapter.replies.length, 2)
+  assert.match(adapter.replies[1].text, /群聊命令执行已关闭/)
+})
+
+test('权限预设：updatePolicy 改权限即对该账号已回路会话补应用；同值重存不重复', async () => {
+  const applied = []
+  const adapter = fakeAdapter()
+  const sessionApi = {
+    backend: 'native',
+    async createSession() { return { id: 'imu:union:1' } },
+    async prompt() {},
+    follow() { return () => {} },
+    async cancel() {},
+    async listSessions() { return [] },
+    async selectModel() {},
+    async applyPermission(sessionId, preset) { applied.push([sessionId, preset]); return { ok: true } },
+  }
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi })
+  engine.sessionChats.set('imu:union:1', {
+    accountId: 'acct-1',
+    address: addressOf('telegram', 'dm', 'c1'),
+    userId: 'u1',
+  })
+  engine.updatePolicy('acct-1', { session: { permission: 'yolo' } })
+  await new Promise((r) => setTimeout(r, 0))
+  assert.deepEqual(applied, [['imu:union:1', 'yolo']])
+  engine.updatePolicy('acct-1', { session: { permission: 'yolo' } })
+  await new Promise((r) => setTimeout(r, 0))
+  assert.equal(applied.length, 1, '同值再存不重复应用')
+})
+
+test('相对 cwd 偏好被丢弃：不透传 createSession，会话照常建立；绝对路径正常透传', async () => {
+  const session = liveSession()
+  const created = []
+  session.createSession = async (options) => {
+    created.push(options)
+    return { id: 's-rel' }
+  }
+  const adapter = fakeAdapter()
+  const { engine, router } = makeEngine(
+    adapter,
+    { dmAllowlist: new Set(['u1']), session: { cwd: 'rewrite-agently' } },
+    { sessionApi: session },
+  )
+  const inflight = engine.handleInbound('acct-1', dmMessage('你好'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(assistantEvent('好的'))
+  session.emit(turnEnd())
+  await inflight
+  assert.equal(created.length, 1)
+  assert.equal(created[0].cwd, undefined, '相对 cwd 不透传')
+  assert.equal(session.state.prompted[0].sessionId, 's-rel')
+
+  // 换绝对路径偏好 + 解绑重开（既有显式绑定按设计不重建）。
+  engine.updatePolicy('acct-1', { session: { cwd: 'E:/proj/rewrite-agently' } })
+  router.unbind(addressOf('telegram', 'dm', 'c1'))
+  const inflight2 = engine.handleInbound('acct-1', dmMessage('再来一个'))
+  await waitUntil(() => session.state.prompted.length === 2)
+  session.emit(turnEnd('completed', 2))
+  await inflight2
+  assert.equal(created[1].cwd, 'E:/proj/rewrite-agently', '绝对 cwd 照常透传')
+})
+
+test('createSession 失败 → prompt 失败时回包带参考号 + 根因链', async () => {
+  const session = liveSession()
+  session.createSession = async () => {
+    throw new Error('workspace 目录不存在')
+  }
+  session.prompt = async (sessionId) => {
+    if (sessionId.startsWith('im:')) throw new Error('session not found: ' + sessionId)
+  }
+  const adapter = fakeAdapter()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session })
+  await engine.handleInbound('acct-1', dmMessage('你好'))
+  const last = adapter.replies[adapter.replies.length - 1].text
+  assert.match(last, /任务提交失败（参考号 IMU-/)
+  assert.match(last, /session not found/, '症状错误对用户可见')
+  assert.match(last, /会话创建此前已失败：workspace 目录不存在/, '根因链对用户可见')
+})
+
+test('事件总线优先：tap 扇出驱动回合投递，总线在位时不走 follow', async () => {
+  const session = liveSession()
+  let followCalls = 0
+  session.follow = () => {
+    followCalls += 1
+    return () => {}
+  }
+  const listeners = new Map()
+  const tap = {
+    subscribe(sessionId, onEvent) {
+      listeners.set(sessionId, onEvent)
+      return () => listeners.delete(sessionId)
+    },
+  }
+  const adapter = fakeAdapter()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session, eventTap: tap })
+  const inflight = engine.handleInbound('acct-1', dmMessage('你好'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  listeners.get('x')?.({ type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'reasoning', text: '(思考)' }, { type: 'text', text: '总线回答' }] } } })
+  listeners.get('x')?.({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  await inflight
+  assert.equal(followCalls, 0, '总线在位时不走 follow')
+  assert.equal(adapter.replies.length, 1)
+  assert.match(adapter.replies[0].text, /总线回答/)
+})
+
+test('排障基线日志：入站/会话解析（请求 id → 宿主 id）/回合完成摘要落 info', async () => {
+  const infos = []
+  const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
+  const session = liveSession()
+  session.createSession = async () => ({ id: 'host-real-1' })
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, {
+    sessionApi: session,
+    logger: () => ({ debug() {}, info: (m) => infos.push(String(m)), warn() {}, error() {} }),
+  })
+  const inflight = engine.handleInbound('acct-1', dmMessage('你好'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(assistantEvent('回答'))
+  session.emit(turnEnd('completed', 1))
+  await inflight
+  assert.ok(infos.some((x) => /入站：telegram\/dm 自 u1/.test(x)), '入站行（排障对号基线）')
+  assert.ok(infos.some((x) => /宿主实际 id host-real-1/.test(x)), '请求 id 与宿主 id 分叉可见')
+  assert.ok(infos.some((x) => /回合完成：telegram\/dm turn=1 收轮=completed 投递 \d+ 字/.test(x)), '投递摘要行')
 })

@@ -2,6 +2,77 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.3.9（入站失聪根因 + 全链路排障可见性）
+
+### Fixed
+
+- **多轮对话后「无反应」且零日志（desktop 真机实证）**：投递账本显示插件侧四个回合全部 `delivered`（微信服务器受理），但 12:16 后入站零记录——微信 iLink 长轮询循环在会话过期（`-14`）等故障下**静默退出**，而连接器生命周期日志从未接线（工厂调用漏传 `logger`，缺省无操作函数），排障死角。现：连接器日志接通 plugin.log（info 级：连接建立/轮询退出/`-14` 过期/退避重试全部可见）；`-14` 会话过期在设置页账号行以红条提示「需重新扫码」；`TimeoutError` 死分支清理（超时已被归一为不确定错误走退避重试，永不退轮——回归测试锁定）
+- **排障基线日志（plugin.log 可见）**：入站到达（渠道/类型/用户）、会话解析（请求 id → 宿主实际 id，UI 会话列表对号的关键证据）、回合完成摘要（turn/收轮原因/投递字数）三级 info 落盘——此后任何「没反应」都能在日志对上号
+
+## 0.3.8（会话事件总线 + im: 前缀——频道分组与回传闭环）
+
+### Fixed
+
+- **回答不回传（desktop 真机实证）**：@Remote('follow') 是 stream 形态，直调结果不产出事件帧——回合事件零到达，全部走 10 分钟看门狗超时。新增会话事件面：宿主 cordis 总线 **session/event**（core/session Events 声明的全量 firehose，envelope {type,seq,time,data} 与引擎消费形一致）按 sessionId 扇出给每回合订阅者，总线优先、缺位自动回退 follow 旧路；启动日志标明当前事件面
+- **wx 会话落在「任务/未分组」**：宿主侧栏按 sessionId 前缀分「频道」页（dsh-im-connect 源码锚点：「IM 与任务的区分靠 sessionId 的 im: 前缀」），旧 imu: 前缀永远进不了频道。隐式会话 id 改为 **im:union:<channel>:<kind>:<chatId>**（union 段防其它 IM 插件撞名）。旧绑定在内存、重启即换新前缀；旧 imu: 会话仍在盘上，可从任务列表手动删除
+
+## 0.3.7（0.2.x 宿主 Remote 形态收敛——任务提交 roundtrip 闭环）
+
+### Fixed
+
+- **desktop 真机实证「任务提交失败：Cannot read properties of undefined (reading 'throwIfAborted')」**：0.2.x 线 `@Remote('prompt')` 签名是 `(request, signal)`（index.ts:346-349 进门即 `signal.throwIfAborted()`），旧调用只传 request 一参。现 prompt/steer/list 全部按新形态带 `AbortController().signal`，并补 `clientTimeZone`（类型面可选）；老线位置参形保留为回退
+- **follow 双形态收敛**：0.2.x 线 `follow({address}, signal)` 返回 **AsyncIterable 帧流**（snapshot / event / assistant-stream 三种），旧线 `(sessionId, onEvent) → 退订函数`。运行时探测：返回异步迭代器即泵帧（只投 `event` 帧的 `.event`，snapshot 防重放、assistant-stream 为 Web 呈现专用均不投），否则以正确实参落旧形态；退订 = abort 泵
+
+## 0.3.6（插件自有文件日志 + 检查连接不再 500）
+
+### Added
+
+- **`<stateDir>/plugin.log`**：desktop/Electron 宿主的日志管线无文件落点（AppData 只有 crash dump，~/.dsh/logs 只有 CLI 启动日志），管理面 500 的「请查看本机日志」无处可看。插件现在把 info/warn/error 分流追加到 plugin.log（512KB 滚动保留 .1），宿主管线照走；管理面 500 的真实错误随之落盘
+- 「检查连接」在适配器构建失败（如凭据缺失工厂即抛）时不再抛 500「操作失败」——转诊断行 `{name:'connect', status:'failed', hint}`，面板直接看到原因
+
+## 0.3.5（凭据读取面修复——botToken「缺失」真相收口）
+
+### Fixed
+
+- **凭据缺失（真机 desktop 实证三层叠加，token 其实一直在库里）**：
+  ① `ServiceVault.resolve` 只解包 `{ secret }`，而宿主锚点（packages/credentials/credentials）的 resolve 回 **`ResolvedCredential { value, source }`**——值在宿主凭据库里、读取永远 miss。现按 `裸串 / { value } / { secret }` 三形解包，空串按缝规则视作未存储；
+  ② 历史写入路径遗留**双前缀 ref**（真机 `.credentials.yaml` 里是 `IM_UNION_WEIXIN_WEIXIN_<id>_BOTTOKEN`，规范 ref 是单前缀）——读取增加旧别名兜底，命中即自愈写回规范 ref（归一失败不阻断本次应答）；
+  ③ 0.3.3 迁移包装的顺序缺陷：`primary.set` 后**不回读就删旧文件副本**——主库读写形态不一致时会把唯一副本删成永久丢失。现改为回读校验通过才清理，回读失败保留旧副本并告警（set 路径同纪律）
+
+## 0.3.4（会话后端惰性升级 + 权限预设/命令执行开关——账号设置补齐）
+
+### Fixed
+
+- desktop 装上 0.3.2/0.3.3 后仍报「当前宿主缺少 会话后端 接口」：真机证明会话子系统在 desktop 上是**晚于插件 apply 才提供**（不是已提供未激活——reflect 非严格读同样拿不到），任何 apply 期冻结探测都必然误判 none 且永不恢复
+- session-api 重构为**惰性后端**：apply 未见子系统时起步 none 面，`backend` 每次访问（引擎每回合 / /session-catalog / /state 诊断都经此）重新软读；子系统一旦就绪立即升级原生面并**粘住不回退**（服务提供后不会消失），升级打一条 info 日志；`probeSessionBackend` 导出供诊断复用；agentPresets 改升级时点软读（不再依赖 caps 快照）
+
+### Added
+
+- **权限预设**（对齐 dsh-im-connect / webhook 宿主锚点 `permissionPresets`）：账号会话偏好新增「权限预设」——`/session-catalog` 回宿主 `permissionPresets` 目录（names+optionOf+defaultPreset）；新会话在 create 后 `permissionPresets.set(session, preset)` 落位（webhook 范式）；**改偏好即生效**：对该账号已回路会话逐个补应用（同值重存不重复）
+- **命令执行开关**（im-connect 同款语义）：账号设置新增「私聊命令执行」「群聊命令执行」两档，关闭只拦 `/` 命令并回提示明说，普通对话不受影响；`/mute` 保留为静音期唯一逃生门
+- 编辑弹窗设置面常显：后端未就绪时不再整块隐藏——准入/命令开关/工作区（插件本地语义）照常可编辑即时生效，模型/预设/权限等宿主目录类下拉禁用并提示自动升级
+
+## 0.3.3（凭据迁移 + 会话偏好可见性）
+
+### Fixed
+
+- **0.3.2 回归**：desktop 上 credentials 服务接线修好后 vault 主存从文件切到宿主凭据库，旧文件库里已存的 secret（微信 botToken）被孤儿化 → 账号「凭据缺失」掉线。vault 增加迁移包装：主库 resolve 未命中时查历史文件库，命中即自动搬迁进主库再返回（带日志）；set/unset 双清旧文件副本防旧值复活；迁移失败不阻断（本次按旧值应答，下次再试）
+
+### Changed
+
+- 账号卡新增会话偏好摘要行（目录尾段 · 预设 · 模型@推理档），有值才显示——修「新设置藏在编辑弹窗里不可见」
+
+## 0.3.2（desktop/Electron 宿主会话后端修复 + 软读接线全面审计）
+
+### Fixed
+
+- desktop/Electron 宿主报「当前宿主缺少 会话后端 接口，该能力已降级」且会话偏好全区不可选——两处宿主线差异叠加：
+  ① desktop 上插件 apply 可能早于 agents/sessionController 提供方 fiber 激活，`ctx.get` 的 strict 语义（cordis lib/index.js:770，fiber.state!==2 即 undefined）把已在册的服务读丢 → `optionalService` 增加 `ctx.reflect.get(name, false)` 非严格反射兜底（cordis :756 免 inject 要求读取口）；
+  ② 顶层 inject 只声明 webServer，未走 cordis 等待语义 → 对照 dsh-im-connect 同 peer range 同款先例，inject 增加 `agents`/`agentPresets`，宿主备好服务才跑 apply
+- 同类软读接线全量审计后补齐（同一 strict 语义下的另外两处静默降级）：
+  inject 再增 `credentials`（读丢 → 凭据静默降级明文文件 vault，安全质量损失）与 `llm`（读丢 → 图片输入视觉判定永远 unknown，图片一律走降级文案）——两者均为 dsh-im-connect 同 peer range inject 表成员（全支持线必有）且有实际消费点；`settings-compat.configFormsOf` 的裸 `ctx.get` 补同一 reflect 兜底（内联实现，避免与 services.ts 成 import 环）
+- 接线判定口径（审计结论，注释同步进 inject 声明处）：核心必有服务（webServer/agents/agentPresets/credentials/llm）走 inject 等待语义；真可选面（sessionController/workspaceController/sessionPersistence/connection/configForms/fileUploads/workspaceFiles）保持软读 + reflect 兜底，缺位照旧诚实降级；无消费点的 permissionPresets/agentDefaultModel/tools 不接线
+
 ## 0.3.1（中文环境语言修复 + 投稿审查修复）
 
 ### Added

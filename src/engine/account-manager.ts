@@ -12,7 +12,7 @@ import type { ChannelAdapter } from '../channels/types.js'
 import { CHANNEL_META } from '../channels/meta.js'
 import { createAdapter, hasChannel } from '../channels/registry.js'
 import { credentialRef, type SecretVault } from '../credentials/vault.js'
-import type { AccountPolicy, AccountSessionPrefs, ImUnionEngine } from './gateway.js'
+import { normalizeCommandExec, type AccountPolicy, type AccountSessionPrefs, type ImUnionEngine } from './gateway.js'
 
 export interface AccountRecord {
   accountId: string
@@ -24,6 +24,8 @@ export interface AccountRecord {
   paused?: boolean
   /** 私聊准入档位：approved（缺省）=仅白名单；all=接受所有私聊。 */
   privateAccess?: 'approved' | 'all'
+  /** 命令执行开关（私聊/群聊各一档；缺省/缺键=开）。 */
+  commandExec?: { dm: boolean; group: boolean }
   /** 账号级会话偏好：仅在该账号新建会话时应用。 */
   session?: AccountSessionPrefs
 }
@@ -34,6 +36,8 @@ export interface PublicAccount {
   alias?: string
   paused: boolean
   connected: boolean
+  /** 渠道会话态不可自愈故障（微信 -14 过期）：true 时设置页红条提示重扫。 */
+  sessionExpired?: boolean
   secretFields: Array<{ key: string; configured: boolean }>
   /** 白名单是管理员自录配置（非平台回流的原始用户标识），设置页需回显编辑。 */
   dmAllowlist: string[]
@@ -42,11 +46,13 @@ export interface PublicAccount {
   config: Record<string, string>
   /** 私聊准入档位回显（设置页编辑预填）。 */
   privateAccess: 'approved' | 'all'
+  /** 命令执行开关回显（设置页编辑预填；缺键=开）。 */
+  commandExec: { dm: boolean; group: boolean }
   /** 会话偏好回显（全部为管理员自录字符串；缺失键=宿主默认）。 */
   session: AccountSessionPrefs
 }
 
-const SESSION_PREF_KEYS: ReadonlyArray<keyof AccountSessionPrefs> = ['cwd', 'agentPreset', 'provider', 'model', 'reasoningEffort']
+const SESSION_PREF_KEYS: ReadonlyArray<keyof AccountSessionPrefs> = ['cwd', 'agentPreset', 'provider', 'model', 'reasoningEffort', 'permission']
 
 /** 连接相关形态比较：渠道或任一 config 键值变化即视为需要重建适配器。 */
 function configRelevantChanged(a: Record<string, string> | undefined, b: Record<string, string> | undefined): boolean {
@@ -93,6 +99,8 @@ export interface AccountManagerDeps {
   vault: SecretVault
   engine: ImUnionEngine
   logWarn: (msg: string) => void
+  /** 连接器生命周期日志入口（info 级进 plugin.log）；缺省静默（测试无宿主日志面）。 */
+  logInfo?: (msg: string) => void
   /** 测试注入点；缺省走 registry.createAdapter（懒加载工厂表）。 */
   adapterFactory?: (record: AccountRecord, secrets: Record<string, string | undefined>) => Promise<ChannelAdapter> | ChannelAdapter
 }
@@ -107,6 +115,10 @@ export class AccountManager {
       accountId: record.accountId,
       config: record.config ?? {},
       secrets,
+      // 连接器生命周期（轮询退出/-14 过期/退避）此前无人接线，排障死角（desktop 实证）。
+      logger: (msg: string) => {
+        this.deps.logInfo?.(msg)
+      },
     })
 
   constructor(private readonly deps: AccountManagerDeps) {
@@ -146,16 +158,51 @@ export class AccountManager {
   }
 
   private secretRefsOf(record: AccountRecord): string[] {
-    return (CHANNEL_META[record.channel]?.fields ?? [])
-      .filter((f) => f.secret)
-      .map((f) => credentialRef(record.channel, `${record.accountId}.${f.key}`))
+    const refs: string[] = []
+    for (const f of CHANNEL_META[record.channel]?.fields ?? []) {
+      if (!f.secret) continue
+      refs.push(credentialRef(record.channel, `${record.accountId}.${f.key}`))
+      refs.push(...this.secretRefAliases(record, f.key))
+    }
+    return refs
+  }
+
+  /**
+   * 旧版引用别名：某些历史写入路径把 ref 拼成 `channel-accountId` 双前缀
+   * （真机实证：desktop 的 .credentials.yaml 里是 IM_UNION_WEIXIN_WEIXIN_<id>_BOTTOKEN，
+   * 而规范 ref 是单前缀——值在库里、读取永远 miss）。读取兼容别名并在命中时
+   * 自愈归一到规范 ref。
+   */
+  private secretRefAliases(record: AccountRecord, key: string): string[] {
+    const primary = credentialRef(record.channel, `${record.accountId}.${key}`)
+    const doubled = credentialRef(record.channel, `${record.channel}-${record.accountId}.${key}`)
+    return doubled === primary ? [] : [doubled]
+  }
+
+  /** 规范 ref 优先，旧别名兜底；别名命中即写回规范 ref（归一失败不阻断本次应答）。 */
+  private async resolveSecret(record: AccountRecord, key: string): Promise<string | undefined> {
+    const primary = credentialRef(record.channel, `${record.accountId}.${key}`)
+    const value = await this.deps.vault.resolve(primary)
+    if (value !== undefined) return value
+    for (const alias of this.secretRefAliases(record, key)) {
+      const legacyValue = await this.deps.vault.resolve(alias)
+      if (legacyValue === undefined) continue
+      try {
+        await this.deps.vault.set(primary, legacyValue)
+        this.deps.logWarn(`凭据引用已归一：${alias} -> ${primary}`)
+      } catch (error) {
+        this.deps.logWarn(`凭据引用归一失败（${primary}，本次按旧别名值应答）: ${(error as Error).message}`)
+      }
+      return legacyValue
+    }
+    return undefined
   }
 
   private async secretsOf(record: AccountRecord): Promise<Record<string, string | undefined>> {
     const secrets: Record<string, string | undefined> = {}
     for (const field of CHANNEL_META[record.channel]?.fields ?? []) {
       if (!field.secret) continue
-      secrets[field.key] = await this.deps.vault.resolve(credentialRef(record.channel, `${record.accountId}.${field.key}`))
+      secrets[field.key] = await this.resolveSecret(record, field.key)
     }
     return secrets
   }
@@ -172,7 +219,7 @@ export class AccountManager {
   async upsert(record: AccountRecord, secrets?: Record<string, string>, opts?: { skipConnect?: boolean }): Promise<void> {
     this.validate(record)
     if (this.isNotifyOnly(record.channel)) {
-      record = { ...record, dmAllowlist: undefined, groupEnabled: undefined }
+      record = { ...record, dmAllowlist: undefined, groupEnabled: undefined, commandExec: undefined }
     }
     const index = this.records.findIndex((r) => r.accountId === record.accountId)
     const existing = index >= 0 ? this.records[index] : undefined
@@ -228,6 +275,7 @@ export class AccountManager {
       dmAllowlist: new Set(notify ? [] : record.dmAllowlist ?? []),
       groupEnabled: record.groupEnabled ?? true,
       privateAccess: record.privateAccess === 'all' ? 'all' : 'approved',
+      commandExec: normalizeCommandExec(record.commandExec),
       ...(record.session !== undefined ? { session: sanitizeSessionPrefs(record.session) } : {}),
     })
   }
@@ -310,7 +358,7 @@ export class AccountManager {
       const fields: Array<{ key: string; configured: boolean }> = []
       for (const field of CHANNEL_META[record.channel]?.fields ?? []) {
         if (!field.secret) continue
-        const value = await this.deps.vault.resolve(credentialRef(record.channel, `${record.accountId}.${field.key}`))
+        const value = await this.resolveSecret(record, field.key)
         fields.push({ key: field.key, configured: value !== undefined })
       }
       // 明文配置按 meta plain 字段白名单过滤后回显（设置页编辑预填）；
@@ -330,25 +378,34 @@ export class AccountManager {
         alias: record.alias,
         paused: record.paused === true,
         connected: live?.adapter?.connected === true,
+        ...((live?.adapter as { authExpired?: boolean } | undefined)?.authExpired === true
+          ? { sessionExpired: true }
+          : {}),
         secretFields: fields,
         // 通知类不回显策略字段（存储态也已剥除，双向一致）。
         dmAllowlist: notify ? [] : record.dmAllowlist ?? [],
         groupEnabled: notify ? undefined : record.groupEnabled,
         config,
         privateAccess: record.privateAccess === 'all' ? 'all' : 'approved',
+        commandExec: normalizeCommandExec(record.commandExec),
         session: sanitizeSessionPrefs(record.session),
       })
     }
     return rows
   }
 
-  /** 连接检查：适配器不在位则临时构建（不保持连接）；诊断已过脱敏纪律（E5）。 */
+  /** 连接检查：适配器不在位则临时构建（不保持连接）；诊断已过脱敏纪律（E5）。
+   * 构建失败（如凭据缺失工厂即抛）不再上抛 500——转诊断行，面板直接可见原因。 */
   async check(accountId: string): Promise<unknown[]> {
     const record = this.records.find((r) => r.accountId === accountId)
     if (record === undefined) throw new AccountValidationError(`账号不存在：${accountId}`)
     let adapter = this.live.get(accountId)?.adapter
     if (adapter === undefined) {
-      adapter = await this.buildAdapter(record)
+      try {
+        adapter = await this.buildAdapter(record)
+      } catch (error) {
+        return [{ name: 'connect', status: 'failed', hint: `适配器构建失败：${(error as Error).message}` }]
+      }
     }
     if (typeof adapter.diagnose !== 'function') return [{ name: 'diagnose', status: 'unverified', hint: '渠道未实现诊断面' }]
     return adapter.diagnose()
@@ -374,10 +431,12 @@ export class AccountManager {
         dmAllowlist: new Set(record.dmAllowlist ?? []),
         groupEnabled: record.groupEnabled,
         privateAccess: record.privateAccess === 'all' ? 'all' : 'approved',
+        commandExec: normalizeCommandExec(record.commandExec),
         ...(record.session !== undefined ? { session: sanitizeSessionPrefs(record.session) } : {}),
       })
       await adapter.connect()
       this.live.set(accountId, { record, adapter, connected: true })
+      this.deps.logInfo?.(`账号 ${accountId}（${record.channel}）已连接`)
       return true
     } catch (error) {
       this.deps.logWarn(`账号 ${accountId} 连接失败: ${(error as Error).message}`)

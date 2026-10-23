@@ -47,8 +47,18 @@ class ServiceVault implements SecretVault {
   async resolve(ref: string): Promise<string | undefined> {
     const value = await this.credentials.resolve!(ref)
     if (typeof value === 'string') return value
-    if (value !== null && typeof value === 'object' && typeof (value as { secret?: unknown }).secret === 'string') {
-      return (value as { secret: string }).secret
+    if (value !== null && typeof value === 'object') {
+      // 宿主锚点（dsh-repo packages/credentials/credentials lib/types）：resolve 回
+      // ResolvedCredential { value, source }；im-connect 兼容形声明同为 { value }；
+      // 更早变体 { secret }。缝规则：空串=未存储，视作 undefined。
+      const unwrapped = value as { value?: unknown; secret?: unknown }
+      const inner =
+        typeof unwrapped.value === 'string' && unwrapped.value !== ''
+          ? unwrapped.value
+          : typeof unwrapped.secret === 'string' && unwrapped.secret !== ''
+            ? unwrapped.secret
+            : undefined
+      if (inner !== undefined) return inner
     }
     return undefined
   }
@@ -123,11 +133,98 @@ class FileVault implements SecretVault {
   }
 }
 
-/** 依能力选 vault：credentials 服务在 → 主存；否则文件回退（原子写+0600）。 */
-export function createVault(credentials: CredentialsLike | undefined, stateDir: string): SecretVault {
+/**
+ * 迁移包装（0.3.3）：desktop/Electron 线修复 inject 接线后，credentials 服务从
+ * 软读丢失变为可达——vault 主存从文件切到宿主凭据库，**旧文件库里已存的 secret
+ * 会被孤儿化**（真机实证：微信 botToken 缺失、bot 掉线）。本包装在主库 resolve
+ * 未命中时查旧文件库，命中即搬迁进主库再返回；写/删双清旧文件副本防复活。
+ */
+class MigratingVault implements SecretVault {
+  readonly kind: SecretVault['kind']
+  constructor(
+    private readonly primary: SecretVault,
+    private readonly legacy: SecretVault,
+    private readonly logWarn: (msg: string) => void,
+  ) {
+    this.kind = primary.kind
+  }
+
+  /**
+   * 写主库并回读校验：只有主库确认可读才允许清理旧副本。0.3.3 的教训——
+   * 主库写入面与读取面形态不一致时（真机实证：resolve 解包漏 {value}），
+   * 先 unset 旧副本会把唯一副本删成永久丢失。
+   * 返回 true=主库已确认持久化；false=回读失败（调用方保留旧副本并告警）。
+   */
+  private async setPrimaryVerified(ref: string, secret: string): Promise<boolean> {
+    await this.primary.set(ref, secret)
+    try {
+      return (await this.primary.resolve(ref)) !== undefined
+    } catch {
+      return false
+    }
+  }
+
+  async resolve(ref: string): Promise<string | undefined> {
+    const value = await this.primary.resolve(ref)
+    if (value !== undefined) return value
+    const legacyValue = await this.legacy.resolve(ref)
+    if (legacyValue === undefined) return undefined
+    try {
+      const persisted = await this.setPrimaryVerified(ref, legacyValue)
+      if (persisted) {
+        try {
+          await this.legacy.unset(ref)
+        } catch {
+          // 旧副本清理失败不影响迁移结果。
+        }
+        this.logWarn(`凭据 ${ref} 已从文件 vault 迁移到宿主凭据库`)
+      } else {
+        // 本次仍按旧值应答；旧副本保留，下次访问再试。
+        this.logWarn(`凭据 ${ref} 迁移后主库回读失败，保留旧文件副本防丢失`)
+      }
+    } catch (error) {
+      // 迁移失败不阻断使用：本次仍按旧值应答，下次访问再试。
+      this.logWarn(`凭据 ${ref} 迁移失败（本次按旧文件值应答）: ${(error as Error).message}`)
+    }
+    return legacyValue
+  }
+
+  async set(ref: string, secret: string): Promise<void> {
+    const persisted = await this.setPrimaryVerified(ref, secret)
+    if (!persisted) {
+      // 写入不可回读：不丢旧副本，但调用方必须知道主库可能没落盘。
+      this.logWarn(`凭据 ${ref} 写入后主库回读失败——旧文件副本保留，请检查宿主凭据服务`)
+    }
+    try {
+      if (persisted) await this.legacy.unset(ref)
+    } catch {
+      // 旧副本清理失败不影响主写。
+    }
+  }
+
+  async unset(ref: string): Promise<void> {
+    await this.primary.unset(ref)
+    try {
+      await this.legacy.unset(ref)
+    } catch {
+      // 同上。
+    }
+  }
+
+  async describe(): Promise<VaultDescriptor[]> {
+    return this.primary.describe()
+  }
+}
+
+/** 依能力选 vault：credentials 服务在 → 主存（带文件库迁移）；否则文件回退（原子写+0600）。 */
+export function createVault(
+  credentials: CredentialsLike | undefined,
+  stateDir: string,
+  logWarn?: (msg: string) => void,
+): SecretVault {
   const fileVault = new FileVault(join(stateDir, 'secrets.json'))
   if (credentials !== undefined && typeof credentials.set === 'function' && typeof credentials.resolve === 'function') {
-    return new ServiceVault(credentials, fileVault)
+    return new MigratingVault(new ServiceVault(credentials, fileVault), fileVault, logWarn ?? (() => undefined))
   }
   return fileVault
 }

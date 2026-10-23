@@ -302,3 +302,24 @@ test('caps 文件面：fileIn/fileOut=true 且 sendFile 为函数（声明=实�
   assert.equal(adapter.caps.fileIn, true)
   assert.equal(typeof adapter.sendFile, 'function')
 })
+
+test('传输失败后退避重试不退轮（desktop 实证：静默 return 使入站永久失聪）', async () => {
+  let polls = 0
+  const seen = []
+  const logs = []
+  const { adapter } = makeAdapter((url) => {
+    if (!url.endsWith('/getupdates')) return okJson({ ret: 0 })
+    polls += 1
+    if (polls === 1) throw new Error('ECONNRESET') // post 归一为 Uncertain → 退避重试而非退轮
+    return okJson({
+      ret: 0,
+      msgs: [{ from_user_id: 'u1@im.wechat', context_token: 'ctx-2', item_list: [{ type: 1, text_item: { text: '还在吗' } }] }],
+    })
+  }, { logger: (m) => logs.push(String(m)) })
+  adapter.onMessage((m) => seen.push(m))
+  await adapter.connect()
+  await new Promise((r) => setTimeout(r, 1800)) // 首次退避 1s + 长轮询 hold 余量
+  assert.ok(logs.some((x) => /连接建立/.test(x)), '连接生命周期日志经 logger 出面')
+  assert.ok(seen.length >= 1, '失败一轮后下一轮消息照常入站（不永久失聪）')
+  await adapter.disconnect()
+})

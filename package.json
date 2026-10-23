@@ -1,6 +1,6 @@
 {
   "name": "dsh-im-union",
-  "version": "0.3.1",
+  "version": "0.3.9",
   "description": "Union IM bridge for DeepSeek Harness — clean-room merge of dsh-im and dsh-im-connect capabilities, compatible across 0.1.2-rc.1 .. 0.2.1-rc.2 hosts.",
   "type": "module",
   "license": "MIT",

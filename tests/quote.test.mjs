@@ -123,7 +123,7 @@ test('createSession：title 经 rename 落地并回 SessionInfo.title', async ()
     },
   })
   const api = createSessionApi(ctx, nativeCaps)
-  const info = await api.createSession({ sessionIdHint: 'imu:telegram:dm:c1', title: '[TG] 干活' })
+  const info = await api.createSession({ sessionIdHint: 'im:union:telegram:dm:c1', title: '[TG] 干活' })
   assert.equal(info.id, 's-1')
   assert.equal(info.title, '[TG] 干活')
   assert.deepEqual(calls[0].request, { seed: [], meta: { origin: 'dsh-im-union', workspace: undefined } }, 'create 面不塞 title')
@@ -170,7 +170,7 @@ test('createSession：无 title 入参时不发 rename 调用', async () => {
     }),
     nativeCaps,
   )
-  const info = await api.createSession({ sessionIdHint: 'imu:slack:group:c1' })
+  const info = await api.createSession({ sessionIdHint: 'im:union:slack:group:c1' })
   assert.equal(info.id, 's-4')
   assert.equal(renames, 0)
   assert.equal(info.title, undefined)
@@ -256,7 +256,7 @@ test('runTurn：首次建会话把 `[TG] 首条正文` 作为 title 透传给 cr
   await inflight
   assert.equal(session.state.created.length, 1)
   assert.equal(session.state.created[0].title, '[TG] 帮我看看这份日志里的报错')
-  assert.equal(session.state.created[0].sessionIdHint, 'imu:telegram:dm:c1')
+  assert.equal(session.state.created[0].sessionIdHint, 'im:union:telegram:dm:c1')
 })
 
 test('runTurn：quoteText 在位时拼进 prompt，缺位时正文原样', async () => {

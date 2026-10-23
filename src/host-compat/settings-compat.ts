@@ -159,14 +159,28 @@ export function volatileField<F extends object>(field: F): F {
   return typeof volatile === 'function' ? ((volatile as () => F).call(field) as F) : field
 }
 
-/** gen3 的 configForms 服务软读（老线无此服务 → undefined，只留 persist key）。 */
+/** gen3 的 configForms 服务软读（老线无此服务 → undefined，只留 persist key）。
+ * 与 services.optionalService 同款双路：ctx.get strict 语义在 desktop 线可能把
+ * 已在册但 fiber 未激活的服务读丢（gen 误降级），补 ctx.reflect.get 非严格兜底；
+ * 内联实现避免与 services.ts 成 import 环（后者 import 本文件的 gen 判定）。 */
 export function configFormsOf(ctx: CordisLike): unknown {
-  if (typeof ctx.get !== 'function') return undefined
-  try {
-    return ctx.get('configForms')
-  } catch {
-    return undefined
+  if (typeof ctx.get === 'function') {
+    try {
+      const value = ctx.get('configForms')
+      if (value !== undefined) return value
+    } catch {
+      // 未注册抛错 → 走反射兜底。
+    }
   }
+  const reflect = (ctx as { reflect?: { get?: (name: string, strict?: boolean) => unknown } }).reflect
+  if (typeof reflect?.get === 'function') {
+    try {
+      return reflect.get('configForms', false)
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
 }
 
 /** 0.1.7 的 volatile 配置字段是带 get() 的稳定引用，读取时必须取当前快照。 */

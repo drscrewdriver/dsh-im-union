@@ -12,6 +12,8 @@ import { join } from 'node:path'
 import type { CordisLike } from './types.js'
 import { detectCapabilities } from './host-compat/services.js'
 import { createSessionApi } from './host-compat/session-api.js'
+import { createSessionEventTap } from './host-compat/session-event-tap.js'
+import { initPluginFileLog, withFileLog } from './plugin-log.js'
 import { attachInteraction } from './host-compat/interaction.js'
 import { createVault } from './credentials/vault.js'
 import { registerAdminApi, type AdminRequest, type AdminHandler } from './admin/api.js'
@@ -36,12 +38,15 @@ export const name = PLUGIN_NAME
 /**
  * inject 策略（desktop/Electron 线实证后的修订）：
  * - webServer：web profile 的锚，必然存在；
- * - agents/agentPresets：会话子系统的核心服务，全支持线（0.1.2+，dsh-im-connect
- *   同 peer range 同款 inject 先例）必有。desktop 宿主上插件 apply 可能早于这些
- *   服务的 fiber 激活，软读会拿丢（ctx.get strict 语义）——声明进 inject 走 cordis
- *   等待语义，宿主备好服务才跑 apply；其余服务照旧软读（可选面，缺位=降级）。
+ * - agents/agentPresets/credentials/llm：会话/凭据/模型子系统的核心服务，全支持线
+ *   （0.1.2+，dsh-im-connect 同 peer range 同款 inject 先例）必有。desktop 宿主上
+ *   插件 apply 可能早于这些服务的 fiber 激活，软读会拿丢（ctx.get strict 语义）：
+ *   agents/agentPresets 读丢=会话后端误判 none；credentials 读丢=凭据静默降级
+ *   明文文件；llm 读丢=图片视觉判定永远未知。声明进 inject 走 cordis 等待语义，
+ *   宿主备好服务才跑 apply；sessionController/workspaceController 等真可选面仍
+ *   软读（optionalService 已带 reflect 非严格兜底），缺位照旧降级。
  */
-export const inject = ['webServer', 'agents', 'agentPresets']
+export const inject = ['webServer', 'agents', 'agentPresets', 'credentials', 'llm']
 
 export interface UnionPluginConfig {
   stateDir: string
@@ -64,11 +69,19 @@ function accountRecordFromBody(body: unknown): { record: AccountRecord; secrets:
   if (typeof r.groupEnabled === 'boolean') record.groupEnabled = r.groupEnabled
   if (typeof r.paused === 'boolean') record.paused = r.paused
   if (r.privateAccess === 'all' || r.privateAccess === 'approved') record.privateAccess = r.privateAccess
+  // 命令执行开关（私聊/群聊各一档；只收布尔键，缺键=开）。
+  if (r.commandExec !== null && typeof r.commandExec === 'object') {
+    const rawExec = r.commandExec as Record<string, unknown>
+    const exec: { dm: boolean; group: boolean } = { dm: true, group: true }
+    if (typeof rawExec.dm === 'boolean') exec.dm = rawExec.dm
+    if (typeof rawExec.group === 'boolean') exec.group = rawExec.group
+    record.commandExec = exec
+  }
   // 会话偏好：只收白名单字符串键（sanitize 在 manager 侧再兜一道）。
   if (r.session !== null && typeof r.session === 'object') {
     const rawSession = r.session as Record<string, unknown>
     const session: AccountSessionPrefs = {}
-    for (const key of ['cwd', 'agentPreset', 'provider', 'model', 'reasoningEffort'] as const) {
+    for (const key of ['cwd', 'agentPreset', 'provider', 'model', 'reasoningEffort', 'permission'] as const) {
       const value = rawSession[key]
       if (typeof value === 'string' && value !== '') session[key] = value
     }
@@ -84,15 +97,20 @@ function accountRecordFromBody(body: unknown): { record: AccountRecord; secrets:
 }
 
 export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): void {
-  const log = ctx.logger(PLUGIN_NAME)
+  const log = withFileLog(ctx.logger(PLUGIN_NAME))
   const caps = detectCapabilities(ctx)
   const stateDir =
     config?.stateDir !== undefined && config.stateDir !== ''
       ? config.stateDir
       : join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), PLUGIN_NAME)
   mkdirSync(stateDir, { recursive: true })
+  // 文件日志（0.3.6）：desktop 宿主管线无文件落点，管理面 500 的
+  // 「请查看本机日志」要有处可看。init 在所有可能打日志的组件之前。
+  initPluginFileLog(stateDir)
 
-  const vault = createVault(caps.credentials, stateDir)
+  // vault：credentials 服务可达时主存宿主凭据库，并自动迁移历史文件库 secret
+  // （0.3.2 修接线后 desktop 上主存切换，旧文件值会被孤儿化——真机实证 botToken 缺失）。
+  const vault = createVault(caps.credentials, stateDir, (msg) => log.warn(msg))
   const router = new ChatRouter()
   const sessionApi = createSessionApi(ctx, caps)
 
@@ -113,11 +131,16 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     },
     logWarn: (msg) => log.warn(msg),
   })
+  // 会话事件面（0.3.8）：session/event 总线优先——desktop 线实证 @Remote follow
+  // 流帧直调收不到事件（回合零事件 → 全部看门狗超时）；缺位自动回退 follow 旧路。
+  const eventTap = createSessionEventTap(ctx)
+  log.info(eventTap !== undefined ? '会话事件面：session/event 总线' : '会话事件面：follow 回退（总线缺位）')
   const engine: ImUnionEngine = new ImUnionEngine({
     ctx,
     caps,
     sessionApi,
     router,
+    eventTap,
     vaultKind: vault.kind,
     deliveryLog,
     uploads,
@@ -150,6 +173,7 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     vault,
     engine,
     logWarn: (msg) => log.warn(msg),
+    logInfo: (msg) => log.info(msg),
   })
   void accounts.startAll()
 
@@ -224,18 +248,28 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     '/accounts': async ({ respond }: AdminRequest) => {
       respond(200, { ok: true, accounts: await accounts.listPublic() })
     },
-    /** 会话偏好目录（设置页下拉数据源）：工作区 cwd 聚合 + 模型目录 + 预设清单。 */
+    /** 会话偏好目录（设置页下拉数据源）：工作区 cwd 聚合 + 模型目录 + 预设清单 + 权限预设。 */
     '/session-catalog': async ({ respond }: AdminRequest) => {
-      const empty = { ok: true, backend: sessionApi.backend, workspaces: [] as string[], providers: [] as unknown[], defaults: null, presets: [] as unknown[] }
+      const empty = {
+        ok: true,
+        backend: sessionApi.backend,
+        workspaces: [] as string[],
+        providers: [] as unknown[],
+        defaults: null,
+        presets: [] as unknown[],
+        permissions: [] as unknown[],
+        defaultPermission: null,
+      }
       if (sessionApi.backend !== 'native') {
         respond(200, empty)
         return
       }
       try {
-        const [catalog, presets, sessions] = await Promise.all([
+        const [catalog, presets, sessions, permissions] = await Promise.all([
           sessionApi.modelCatalog(),
           sessionApi.presetsList(),
           sessionApi.listSessions().catch(() => []),
+          sessionApi.permissionCatalog().catch(() => undefined),
         ])
         // 工作区候选 = 现有会话 cwd 去重（workspaceController 无 list 面，feed 流
         // 不适合一次性拉取；cwd 直传 create 已由宿主 commands.ts:99-102 落位）。
@@ -247,6 +281,8 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
           providers: catalog?.groups ?? [],
           defaults: catalog?.default ?? null,
           presets,
+          permissions: permissions?.options ?? [],
+          defaultPermission: permissions?.default ?? null,
         })
       } catch (error) {
         log.warn(`session-catalog 组装失败（回空目录）: ${error instanceof Error ? error.message : String(error)}`)

@@ -183,6 +183,7 @@ export class WeixinAdapter implements ChannelAdapter {
     this.connected = true
     this.pollController = new AbortController()
     if (signal !== undefined) signal.addEventListener('abort', () => this.pollController?.abort(), { once: true })
+    this.log('weixin: 连接建立，入站长轮询启动')
     void this.pollLoop(this.pollController.signal)
   }
 
@@ -242,7 +243,9 @@ export class WeixinAdapter implements ChannelAdapter {
         }
       } catch (error) {
         if (signal.aborted || !this.connected) return
-        if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) return // 长轮询超时/取消：空结果口径，立即下轮
+        // 外部取消才退出；长轮询超时已被 post 归一为不确定错误（走下方退避重试，
+        // 不退出——desktop 实证：静默 return 会让入站永久失聪且零日志）。
+        if (error instanceof Error && error.name === 'AbortError') return
         consecutiveFailures += 1
         // 官方客户端口径：连续失败 3 次退避 30 秒。
         const wait = consecutiveFailures >= 3 ? 30_000 : backoffMs

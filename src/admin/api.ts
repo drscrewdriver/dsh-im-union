@@ -11,6 +11,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { CordisLike, WebServerLike } from '../types.js'
 import { optionalService } from '../host-compat/services.js'
+import { withFileLog } from '../plugin-log.js'
 
 export const BASE_PATH = '/api/dsh-im-union'
 export const CLIENT_HEADER = 'x-dsh-im-union-client'
@@ -98,7 +99,7 @@ export function registerAdminApi(
   opts?: { rawRoutes?: RawRoute[] },
 ): AdminApiHandle {
   const rawPaths = new Map((opts?.rawRoutes ?? []).map((r) => [r.path, r]))
-  const log = ctx.logger('dsh-im-union')
+  const log = withFileLog(ctx.logger('dsh-im-union'))
   const webServer = optionalService<WebServerLike>(ctx, 'webServer')
   if (webServer === undefined || typeof webServer.register !== 'function') {
     log.warn('宿主无 webServer 服务，管理 API 未注册（仅影响设置页，不影响已运行机器人）')

@@ -66,7 +66,7 @@ test('isCommandName：路径样文本不误入命令表', () => {
 
 test('/help 与 /menu 同表且覆盖全部登记命令', async () => {
   const { deps } = fakeDeps()
-  const help = await runCommand(deps, dm, 'imu:telegram:dm:c1', parseCommand('/help'))
+  const help = await runCommand(deps, dm, 'im:union:telegram:dm:c1', parseCommand('/help'))
   assert.match(help, /\/steer/)
   assert.match(help, /\/reasoning/)
   const menu = await runCommand(deps, dm, 's', parseCommand('/menu'))
@@ -75,7 +75,7 @@ test('/help 与 /menu 同表且覆盖全部登记命令', async () => {
 
 test('/status 展示代际/后端/凭据载体/渠道', async () => {
   const { deps } = fakeDeps({ backend: 'none', vaultKind: 'service' })
-  const text = await runCommand(deps, dm, 'imu:telegram:dm:c1', parseCommand('/status'))
+  const text = await runCommand(deps, dm, 'im:union:telegram:dm:c1', parseCommand('/status'))
   assert.match(text, /gen3/)
   assert.match(text, /会话后端: none/)
   assert.match(text, /宿主凭据库/)
@@ -118,10 +118,10 @@ test('/models：目录渲染含默认/通道/失败位；无面降级', async ()
 test('/model：成功记账 selections（chatKey 统一）；provider 前缀解析；失败回文案', async () => {
   const a = fakeDeps()
   assert.match(await runCommand(a.deps, dm, 'sess', parseCommand('/model m-mini')), /已切换模型：m-mini/)
-  assert.deepEqual(a.deps.selections.get('imu:telegram:dm:c1'), { model: 'm-mini' })
+  assert.deepEqual(a.deps.selections.get('im:union:telegram:dm:c1'), { model: 'm-mini' })
   const b = fakeDeps()
   await runCommand(b.deps, dm, 'sess', parseCommand('/model provX/m-main'))
-  assert.deepEqual(b.deps.selections.get('imu:telegram:dm:c1'), { provider: 'provX', model: 'm-main' })
+  assert.deepEqual(b.deps.selections.get('im:union:telegram:dm:c1'), { provider: 'provX', model: 'm-main' })
   assert.deepEqual(b.calls.at(-1)[2], { provider: 'provX', model: 'm-main' })
   const c = fakeDeps({ selectModelFails: true })
   assert.match(await runCommand(c.deps, dm, 'sess', parseCommand('/model bad')), /模型切换失败：bad/)
@@ -129,7 +129,7 @@ test('/model：成功记账 selections（chatKey 统一）；provider 前缀解�
 
 test('/reasoning：有当前模型直接合并；无则取 catalog.default；两缺给引导', async () => {
   const a = fakeDeps()
-  a.deps.selections.set('imu:telegram:dm:c1', { provider: 'p1', model: 'm-main' })
+  a.deps.selections.set('im:union:telegram:dm:c1', { provider: 'p1', model: 'm-main' })
   const callsA = []
   a.deps.sessionApi.selectModel = async (sid, sel) => { callsA.push(sel) }
   assert.match(await runCommand(a.deps, dm, 's1', parseCommand('/reasoning low')), /已设置思考强度：low（模型 m-main）/)

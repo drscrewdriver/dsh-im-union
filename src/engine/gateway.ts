@@ -11,11 +11,12 @@
  *   事件协议决定），`turn/end{reason}` 收轮；订阅先于 prompt（防首事件丢失）。
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import type { CordisLike, LoggerLike } from '../types.js'
 import type { UnionCapabilities } from '../host-compat/services.js'
 import type { SessionApi } from '../host-compat/session-api.js'
 import { UnsupportedError } from '../host-compat/session-api.js'
+import type { SessionEventTap } from '../host-compat/session-event-tap.js'
 import { ChatRouter, chatKey, shouldRespondToGroup, type Binding, type ChatAddress } from './router.js'
 import { chatOverrideKey, isCommandName, parseCommand, runCommand, type CommandDeps } from './commands.js'
 import { InteractionBroker, type ChatSessionRef } from './interactions.js'
@@ -28,6 +29,7 @@ import { extractDeliverables, type DeliverableRef, type DeliverablesCompat } fro
 import { DeliveryLog, MAX_RETRY, type DeliveryStatus } from './delivery-log.js'
 import { FragmentBuffer } from './fragments.js'
 import { zipSync } from './zip.js'
+import { withFileLog } from '../plugin-log.js'
 import type { ApprovalOutcome, ApprovalRequest, QuestionAnswer, QuestionRequest } from '../host-compat/interaction.js'
 import type { ChannelAdapter, Receipt, ReplyStream, SemanticMessage } from '../channels/types.js'
 
@@ -39,6 +41,24 @@ export interface AccountSessionPrefs {
   provider?: string
   model?: string
   reasoningEffort?: string
+  /** 权限预设（宿主 permissionPresets.set：沙箱模式+审批策略一并落位）。 */
+  permission?: string
+}
+
+/** 命令执行开关（私聊/群聊各一档；缺省都开——命令面板是排障入口）。 */
+export interface CommandExecPolicy {
+  dm: boolean
+  group: boolean
+}
+
+export function normalizeCommandExec(input: unknown, fallback?: CommandExecPolicy): CommandExecPolicy {
+  const base: CommandExecPolicy = fallback ?? { dm: true, group: true }
+  if (input === null || typeof input !== 'object') return { ...base }
+  const raw = input as Record<string, unknown>
+  return {
+    dm: typeof raw.dm === 'boolean' ? raw.dm : base.dm,
+    group: typeof raw.group === 'boolean' ? raw.group : base.group,
+  }
 }
 
 export interface AccountPolicy {
@@ -48,6 +68,8 @@ export interface AccountPolicy {
   groupEnabled: boolean
   /** 私聊准入档位：approved=仅白名单（默认拒绝红线默认值）；all=接受所有私聊（用户显式开启）。 */
   privateAccess: 'approved' | 'all'
+  /** 命令面板可执行性（im-connect 同款语义：关闭只拦 / 命令，普通对话不受影响）。 */
+  commandExec: CommandExecPolicy
   /** 账号级会话偏好：仅在该账号**新建**会话时生效，已有会话不受影响。 */
   session?: AccountSessionPrefs
 }
@@ -75,6 +97,8 @@ export interface EngineDeps {
   exportDir?: string
   /** 拒绝提示冷却（默认 10 分钟；测试可缩短）。 */
   rejectNoticeCooldownMs?: number
+  /** 会话事件总线（0.3.8）：session/event firehose 扇出面；缺位回退 sessionApi.follow。 */
+  eventTap?: SessionEventTap
 }
 
 interface TurnState {
@@ -142,6 +166,10 @@ export class ImUnionEngine {
   private goals = new Map<string, string>()
   /** 拒绝提示冷却键（账号+用户 / 账号+群）：窗口内只提示一次，防回复风暴。 */
   private rejectionNotices = new Set<string>()
+  /** chatKey → 最近一次 createSession 失败原因（runTurn 报错时关联根因，成功即清）。 */
+  private lastEnsureFailure = new Map<string, string>()
+  /** 相对 cwd 偏好已告警过的 account+cwd（只告警一次防刷屏）。 */
+  private relativeCwdWarned = new Set<string>()
   /** 投递 seq → 原文全文（/delivery retry 补发用；重启即清，摘要在盘）。 */
   private outbox = new Map<number, string>()
   /** 碎片合并的上一次私聊消息上下文（submit 回调重建 SemanticMessage）。 */
@@ -152,7 +180,7 @@ export class ImUnionEngine {
   private readonly log: LoggerLike
 
   constructor(private readonly deps: EngineDeps) {
-    this.log = deps.ctx.logger('dsh-im-union')
+    this.log = withFileLog(deps.ctx.logger('dsh-im-union'))
     this.broker = new InteractionBroker({
       resolveChat: (sessionId) => this.sessionChats.get(sessionId),
       getAdapter: (accountId) => this.accounts.get(accountId)?.adapter,
@@ -168,6 +196,7 @@ export class ImUnionEngine {
         dmAllowlist: new Set(policy?.dmAllowlist ?? []),
         groupEnabled: policy?.groupEnabled ?? true,
         privateAccess: policy?.privateAccess === 'all' ? 'all' : 'approved',
+        commandExec: normalizeCommandExec(policy?.commandExec),
         ...(policy?.session !== undefined ? { session: policy.session } : {}),
       },
     })
@@ -178,13 +207,28 @@ export class ImUnionEngine {
   updatePolicy(accountId: string, policy: Partial<AccountPolicy>): void {
     const entry = this.accounts.get(accountId)
     if (entry === undefined) return
+    const prevPermission = entry.policy.session?.permission ?? ''
     entry.policy = {
       dmAllowlist: new Set(policy.dmAllowlist ?? entry.policy.dmAllowlist),
       groupEnabled: policy.groupEnabled ?? entry.policy.groupEnabled,
       privateAccess: policy.privateAccess === 'all' || policy.privateAccess === 'approved'
         ? policy.privateAccess
         : entry.policy.privateAccess,
+      commandExec: normalizeCommandExec(policy.commandExec ?? entry.policy.commandExec),
       session: policy.session !== undefined ? policy.session : entry.policy.session,
+    }
+    // 偏好改即生效：权限预设对该账号已回路的会话逐个补应用（新建会话由 create 面自落）。
+    const nextPermission = entry.policy.session?.permission ?? ''
+    if (nextPermission !== '' && nextPermission !== prevPermission) {
+      for (const [sid, ref] of [...this.sessionChats]) {
+        if (ref.accountId !== accountId) continue
+        this.deps.sessionApi
+          .applyPermission(sid, nextPermission)
+          .then((verdict) => {
+            if (!verdict.ok) this.log.warn(`权限预设未落位（${sid}）: ${verdict.message ?? ''}`)
+          })
+          .catch(() => {})
+      }
     }
   }
 
@@ -273,6 +317,8 @@ export class ImUnionEngine {
   async handleInbound(accountId: string, message: SemanticMessage): Promise<void> {
     const adapter = this.accounts.get(accountId)?.adapter
     if (adapter === undefined) return
+    // 入站可见性（排障基线）：此后任何分支（拒绝/命令/回合）都应能在日志对上号。
+    this.log.info(`入站：${message.address.channel}/${message.address.kind} 自 ${message.userId}`)
     // 主动投递双向同步观察（T2.6）：必须在 admitted 之前——白名单外的私聊
     // 正是 syncBack 候选来源；只喂 dm。
     if (message.address.kind === 'dm') this.deps.onInboundDm?.(accountId, message)
@@ -287,6 +333,20 @@ export class ImUnionEngine {
     const text = message.text.trim()
     const command = parseCommand(text)
     if (command !== undefined && isCommandName(command.name)) {
+      // 命令执行开关（im-connect 同款语义）：关闭只拦 / 命令并明说，普通对话不受影响。
+      // 开关判定在静音解除之前放行例外：/mute 仍需可用（否则永久静默）——静音聊天
+      // 的命令门在下方 muted 判定处自然拦截，这里只挡非 /mute 的执行面。
+      const kind = message.address.kind === 'group' ? 'group' : 'dm'
+      const entry = this.accounts.get(accountId)!
+      if (!entry.policy.commandExec[kind] && command.name !== 'mute') {
+        await adapter.reply(
+          message.address,
+          kind === 'group'
+            ? '本账号群聊命令执行已关闭：普通对话不受影响；管理员可在设置面板重新开启。'
+            : '本账号私聊命令执行已关闭：普通对话不受影响；管理员可在设置面板重新开启。',
+        )
+        return
+      }
       // 命令在静音判定之前：静音期必须还能 /mute 解除（否则永久静默）。
       // resolve 对未绑定聊天登记的隐式绑定与 runTurn 惰性解析同值，无额外副作用。
       const sessionId = this.deps.router.resolve(message.address).sessionId
@@ -371,27 +431,44 @@ export class ImUnionEngine {
   }
 
   /**
-   * 隐式 imu: 形 id → 宿主真会话 id：首次使用时 createSession 并绑定；
+   * 隐式 im:union: 形 id → 宿主真会话 id：首次使用时 createSession 并绑定；
    * 失败则继续用隐式 id（老线/降级面下 follow/prompt 自有报错路径，不阻断命令面）。
    * 账号级会话偏好（cwd/预设/模型）只在这一刻应用——新会话生效，存量会话不动。
    */
   private async ensureSessionId(address: ChatAddress, binding: Binding, accountId: string, title?: string): Promise<string> {
     const { sessionApi, router } = this.deps
-    if (sessionApi.backend !== 'native' || !binding.sessionId.startsWith('imu:')) return binding.sessionId
+    if (sessionApi.backend !== 'native' || !binding.sessionId.startsWith('im:')) return binding.sessionId
     const prefs = this.accounts.get(accountId)?.policy.session
+    const addressKey = chatKey(address)
+    const workspace = this.workspaceOverrides.get(chatOverrideKey(address))
+    // cwd 只收绝对路径：宿主 create 把 cwd 原样透传 ensureSession（commands.ts:98-107），
+    // 相对路径落在宿主进程 cwd 下不可控（真机实证：偏好填了裸目录名导致建会话失败）。
+    const cwdPref = workspace === undefined ? (prefs?.cwd ?? '') : ''
+    const cwdUsable = cwdPref !== '' && isAbsolute(cwdPref)
+    if (cwdPref !== '' && !cwdUsable && !this.relativeCwdWarned.has(`${accountId}:${cwdPref}`)) {
+      this.relativeCwdWarned.add(`${accountId}:${cwdPref}`)
+      this.log.warn(
+        `账号 ${accountId} 的工作区目录偏好「${cwdPref}」不是绝对路径，已忽略（宿主默认工作区生效）；请在设置面板填写完整路径`,
+      )
+    }
     try {
-      const workspace = this.workspaceOverrides.get(chatOverrideKey(address))
       const info = await sessionApi.createSession({
         sessionIdHint: binding.sessionId,
         ...(workspace !== undefined ? { workspace } : {}),
-        ...(prefs?.cwd !== undefined && prefs.cwd !== '' && workspace === undefined ? { cwd: prefs.cwd } : {}),
+        ...(cwdUsable ? { cwd: cwdPref } : {}),
         ...(prefs?.agentPreset !== undefined && prefs.agentPreset !== '' ? { preset: prefs.agentPreset } : {}),
         ...(prefs?.model !== undefined && prefs.model !== ''
           ? { model: prefs.model, ...(prefs.provider !== undefined && prefs.provider !== '' ? { provider: prefs.provider } : {}), ...(prefs.reasoningEffort !== undefined && prefs.reasoningEffort !== '' ? { reasoningEffort: prefs.reasoningEffort } : {}) }
           : {}),
+        ...(prefs?.permission !== undefined && prefs.permission !== '' ? { permission: prefs.permission } : {}),
         ...(title !== undefined && title !== '' ? { title } : {}),
       })
       router.bind(address, info.id)
+      // 请求 id 与宿主实际 id 可能不同（宿主可改派）：排障时对 UI 会话列表的关键证据。
+      if (info.id !== binding.sessionId) {
+        this.log.info(`会话已创建：请求 id ${binding.sessionId} → 宿主实际 id ${info.id}`)
+      }
+      this.lastEnsureFailure.delete(addressKey)
       // 账号级模型偏好同步喂给视觉判定（selections 以 chatKey 键控）。
       if (prefs?.model !== undefined && prefs.model !== '') {
         this.selections.set(chatKey(address), {
@@ -402,7 +479,9 @@ export class ImUnionEngine {
       }
       return info.id
     } catch (error) {
-      this.log.warn(`createSession 失败，继续使用隐式 id: ${(error as Error).message}`)
+      const message = error instanceof Error ? error.message : String(error)
+      this.lastEnsureFailure.set(addressKey, message)
+      this.log.warn(`createSession 失败，继续使用隐式 id: ${message}`)
       return binding.sessionId
     }
   }
@@ -513,30 +592,36 @@ export class ImUnionEngine {
     let unsubscribe: (() => void) | undefined
     const pendingDeliverables: DeliverableRef[] = []
     let lastTurn: number | undefined
-    try {
-      unsubscribe = sessionApi.follow(sessionId, (raw) => {
-        const event = raw as SessionEventLike
-        if (typeof event?.data?.turn === 'number') lastTurn = event.data.turn
-        if (event?.type === 'assistant/message') {
-          const text = extractAssistantText(event)
-          if (text !== '') {
-            progressNote = ''
-            segments.push(text)
-            if (!streamBroken) pushProgress()
-          }
-        } else if (event?.type === 'deliverables/presented') {
-          // 产物回传源（T2.4）：present 事件给工作区路径，收轮后再读字节送渠道。
-          for (const ref of extractDeliverables(event)) pendingDeliverables.push(ref)
-        } else if (event?.type === 'tool/call') {
-          const toolName = String(event.data?.name ?? '工具')
-          noteProgress(`🔧 正在执行：${toolName}`)
-        } else if (event?.type === 'step/start') {
-          if (segments.length === 0) noteProgress('🤔 思考中…')
-        } else if (event?.type === 'turn/end' && endReason === undefined) {
-          endReason = String(event.data?.reason?.kind ?? 'completed')
-          markDone()
+    const consume = (raw: unknown): void => {
+      const event = raw as SessionEventLike
+      if (typeof event?.data?.turn === 'number') lastTurn = event.data.turn
+      if (event?.type === 'assistant/message') {
+        const text = extractAssistantText(event)
+        if (text !== '') {
+          progressNote = ''
+          segments.push(text)
+          if (!streamBroken) pushProgress()
         }
-      })
+      } else if (event?.type === 'deliverables/presented') {
+        // 产物回传源（T2.4）：present 事件给工作区路径，收轮后再读字节送渠道。
+        for (const ref of extractDeliverables(event)) pendingDeliverables.push(ref)
+      } else if (event?.type === 'tool/call') {
+        const toolName = String(event.data?.name ?? '工具')
+        noteProgress(`🔧 正在执行：${toolName}`)
+      } else if (event?.type === 'step/start') {
+        if (segments.length === 0) noteProgress('🤔 思考中…')
+      } else if (event?.type === 'turn/end' && endReason === undefined) {
+        endReason = String(event.data?.reason?.kind ?? 'completed')
+        markDone()
+      }
+    }
+    try {
+      // 事件面（0.3.8）：宿主 session/event 总线优先——desktop 线实证 @Remote
+      // follow 流帧直调收不到事件（回合零事件 → 全部看门狗超时）；总线缺位回退 follow 旧路。
+      unsubscribe =
+        this.deps.eventTap !== undefined
+          ? this.deps.eventTap.subscribe(sessionId, consume)
+          : sessionApi.follow(sessionId, consume)
     } catch (error) {
       if (error instanceof UnsupportedError) {
         await adapter.reply(message.address, error.message)
@@ -588,6 +673,9 @@ export class ImUnionEngine {
       } else {
         await this.deliverParts(adapter, message, parts, meta)
       }
+      this.log.info(
+        `回合完成：${message.address.channel}/${message.address.kind} turn=${lastTurn ?? '?'} 收轮=${endReason ?? '?'} 投递 ${finalText.length} 字`,
+      )
       // 产物回传（T2.4）：正文投递完再送文件，缺面退文字清单。
       if (pendingDeliverables.length > 0) {
         await this.deliverablesToChannel(adapter, message, accountId, sessionId, pendingDeliverables)
@@ -600,9 +688,20 @@ export class ImUnionEngine {
         await adapter.reply(message.address, error.message)
         return
       }
+      // 报错带参考号 + 根因链：createSession 失败（如有）一并落日志与回包，
+      // 摆脱「只有参考号、本机日志无处可看」的排障死角（desktop 线实证）。
       const ref = `IMU-${Date.now().toString(36)}`
-      this.log.error(`runTurn 失败: ${error instanceof Error ? error.message : String(error)}`)
-      await adapter.reply(message.address, `任务提交失败，请查看本机日志（参考号 ${ref}）`)
+      const detail = error instanceof Error ? error.message : String(error)
+      const root = this.lastEnsureFailure.get(chatKey(message.address))
+      this.log.error(
+        `runTurn 失败（${ref}）: ${detail}` + (root !== undefined ? `；此前 createSession 失败: ${root}` : ''),
+      )
+      await adapter.reply(
+        message.address,
+        `任务提交失败（参考号 ${ref}）：${detail.slice(0, 200)}` +
+          (root !== undefined ? `\n（会话创建此前已失败：${root.slice(0, 160)}）` : '') +
+          `\n详情见插件日志 plugin.log。`,
+      )
       try {
         stream?.abort()
       } catch {

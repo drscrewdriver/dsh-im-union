@@ -309,3 +309,47 @@ test('文件态重载：新实例读回既有账号（重启不丢配置）', as
   const rows = await second.listPublic()
   assert.equal(rows[0].secretFields[0].configured, true)
 })
+
+test('旧引用别名兜底：双前缀历史 ref 命中即自愈归一到规范 ref', async () => {
+  const store = fakeVault()
+  const { manager, warns } = makeManager({ vault: store })
+  // 规范 ref 缺失、旧双前缀 ref 在库（真机 desktop 形态：IM_UNION_WEIXIN_WEIXIN_<id>_BOTTOKEN）。
+  const aliasRef = credentialRef('weixin', 'weixin-wx1.botToken')
+  await store.set(aliasRef, 'token-from-legacy')
+  await manager.upsert({ accountId: 'wx1', channel: 'weixin' }, undefined, { skipConnect: true })
+  const rows = await manager.listPublic()
+  const row = rows.find((r) => r.accountId === 'wx1')
+  assert.equal(row.secretFields.find((f) => f.key === 'botToken')?.configured, true, '别名兜底命中 → configured')
+  assert.equal(await store.resolve(credentialRef('weixin', 'wx1.botToken')), 'token-from-legacy', '已自愈写回规范 ref')
+  assert.ok(warns.some((m) => m.includes('归一')), '归一有日志')
+})
+
+test('check：适配器构建失败转诊断行（不再抛 500「操作失败」）', async () => {
+  const { manager } = makeManager({
+    adapterFactory: () => {
+      throw new Error('缺少凭据： botToken')
+    },
+  })
+  await manager.upsert({ accountId: 'wx9', channel: 'weixin' }, undefined, { skipConnect: true })
+  const rows = await manager.check('wx9')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].name, 'connect')
+  assert.equal(rows[0].status, 'failed')
+  assert.match(rows[0].hint ?? '', /botToken/)
+})
+
+test('listPublic：渠道会话态不可自愈故障（authExpired）→ sessionExpired 位（红条提示重扫）', async () => {
+  const expired = fakeAdapter('weixin')
+  Object.defineProperty(expired, 'authExpired', { value: true })
+  const first = makeManager({ adapterFactory: () => expired })
+  await first.manager.upsert({ accountId: 'wx-exp', channel: 'weixin' }, undefined, { skipConnect: true })
+  await first.manager.ensureConnected('wx-exp')
+  const rows = await first.manager.listPublic()
+  assert.equal(rows[0].sessionExpired, true, '过期适配器透出红条位')
+
+  const healthy = makeManager()
+  await healthy.manager.upsert(rec({ accountId: 'tg-ok', channel: 'telegram' }), undefined, { skipConnect: true })
+  await healthy.manager.ensureConnected('tg-ok')
+  const rows2 = await healthy.manager.listPublic()
+  assert.notEqual(rows2[0].sessionExpired, true, '健康适配器无该位')
+})

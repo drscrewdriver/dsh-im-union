@@ -118,4 +118,6 @@ export type ChannelFactory = (options: {
   config: Record<string, string>
   secrets: Record<string, string | undefined>
   signal?: AbortSignal
+  /** 连接器生命周期日志出口（轮询退出/退避/-14 过期等），宿主接线到 plugin.log。 */
+  logger?: (msg: string) => void
 }) => Promise<ChannelAdapter> | ChannelAdapter

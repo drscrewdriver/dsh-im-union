@@ -97,6 +97,7 @@ window.__ModuleLoader__.load({
         'accounts.remove': '删除',
         'accounts.remove.confirm': '确认删除',
         'accounts.state.connected': '已连接',
+        'accounts.state.expired': '会话过期，需重新扫码',
         'accounts.state.disconnected': '未连接',
         'accounts.state.paused': '已暂停',
         'accounts.secret.missing': '凭据缺失：{keys}',
@@ -105,6 +106,7 @@ window.__ModuleLoader__.load({
         'accounts.allowlist': '私聊白名单',
         'accounts.allowlist.hint': '每行一个用户 ID；留空 = 拒绝所有私聊',
         'accounts.allowlist.save': '保存白名单',
+        'accounts.prefs': '会话偏好',
         'accounts.saved': '已保存',
         'accounts.saved.bindhint': '已保存（未连接）：用「生成登录二维码」完成扫码授权后自动连接',
         'accounts.removed': '已删除',
@@ -131,8 +133,8 @@ window.__ModuleLoader__.load({
         'modal.editSecretHint': '凭据留空表示保持现有值不变。',
         'modal.autoId': '账号 ID 由系统自动生成，无需填写；别名用于列表展示。',
         'modal.session.title': '会话偏好（新会话生效）',
-        'modal.session.hint': '仅对该账号新建的会话生效；已绑定的会话保持不变。',
-        'modal.session.none': '当前宿主无会话后端，会话偏好不可用。',
+        'modal.session.hint': '工作区/模型/预设/权限对新会话生效；权限预设同时即时应用到该账号已活跃会话；命令执行开关即时生效。',
+        'modal.session.none': '会话后端未就绪（宿主就绪后自动升级，无需重启）；以下设置仍可编辑保存，命令执行/准入/工作区即时生效。',
         'access.title': '私聊准入',
         'access.approved': '仅已批准用户',
         'access.all': '所有私聊',
@@ -146,6 +148,12 @@ window.__ModuleLoader__.load({
         'prefs.model.default': '宿主默认',
         'prefs.effort': '推理等级',
         'prefs.effort.default': '模型默认',
+        'prefs.permission': '权限预设',
+        'prefs.permission.default': '宿主默认',
+        'exec.dm': '私聊命令执行',
+        'exec.group': '群聊命令执行',
+        'exec.on': '允许',
+        'exec.off': '关闭',
         'catalog.loading': '目录读取中…',
         'check.title': '诊断结果',
         'check.passed': '通过',
@@ -204,6 +212,7 @@ window.__ModuleLoader__.load({
         'accounts.remove': 'Remove',
         'accounts.remove.confirm': 'Confirm remove',
         'accounts.state.connected': 'Connected',
+        'accounts.state.expired': 'Session expired — re-scan QR',
         'accounts.state.disconnected': 'Disconnected',
         'accounts.state.paused': 'Paused',
         'accounts.secret.missing': 'Credential missing: {keys}',
@@ -212,6 +221,7 @@ window.__ModuleLoader__.load({
         'accounts.allowlist': 'DM allowlist',
         'accounts.allowlist.hint': 'One user ID per line; empty = reject all DMs',
         'accounts.allowlist.save': 'Save allowlist',
+        'accounts.prefs': 'Session prefs',
         'accounts.saved': 'Saved',
         'accounts.saved.bindhint': 'Saved (disconnected): use "Get login QR code" to bind, it connects automatically',
         'accounts.removed': 'Removed',
@@ -238,8 +248,8 @@ window.__ModuleLoader__.load({
         'modal.editSecretHint': 'Leave credentials blank to keep the current values.',
         'modal.autoId': 'The account ID is generated automatically; the alias is for display only.',
         'modal.session.title': 'Session preferences (new sessions only)',
-        'modal.session.hint': 'Applies to sessions this account creates later; existing sessions are untouched.',
-        'modal.session.none': 'No session backend on this host; session preferences are unavailable.',
+        'modal.session.hint': 'Workspace/model/preset/permission apply to sessions this account creates later; the permission preset also applies to this account\'s live sessions right away; command switches take effect immediately.',
+        'modal.session.none': 'Session backend not ready yet (auto-upgrades once the host provides it — no restart needed); the settings below stay editable, and command switches / DM access / workspace apply immediately.',
         'access.title': 'DM access',
         'access.approved': 'Approved users only',
         'access.all': 'Everyone',
@@ -253,19 +263,25 @@ window.__ModuleLoader__.load({
         'prefs.model.default': 'Host default',
         'prefs.effort': 'Reasoning effort',
         'prefs.effort.default': 'Model default',
+        'prefs.permission': 'Permission preset',
+        'prefs.permission.default': 'Host default',
+        'exec.dm': 'DM commands',
+        'exec.group': 'Group commands',
+        'exec.on': 'Allow',
+        'exec.off': 'Block',
         'catalog.loading': 'Loading catalog…',
         'check.title': 'Diagnostics',
         'check.passed': 'passed',
         'check.failed': 'failed',
         'check.unverified': 'unverified',
       },
-      ja: { 'settings.title': 'IM Union', 'accounts.title': 'アカウント', 'accounts.add': '追加', 'accounts.edit': '編集', 'accounts.save': '保存', 'modal.cancel': 'キャンセル', 'accounts.check': '接続確認', 'accounts.pause': '一時停止', 'accounts.resume': '再開', 'accounts.remove': '削除', 'accounts.state.connected': '接続済', 'accounts.state.disconnected': '未接続', 'accounts.state.paused': '停止中', 'check.passed': '成功', 'check.failed': '失敗', 'check.unverified': '未検証' },
-      ko: { 'settings.title': 'IM Union', 'accounts.title': '계정', 'accounts.add': '추가', 'accounts.edit': '편집', 'accounts.save': '저장', 'modal.cancel': '취소', 'accounts.check': '연결 확인', 'accounts.pause': '일시정지', 'accounts.resume': '재개', 'accounts.remove': '삭제', 'accounts.state.connected': '연결됨', 'accounts.state.disconnected': '미연결', 'accounts.state.paused': '정지됨', 'check.passed': '통과', 'check.failed': '실패', 'check.unverified': '미검증' },
-      fr: { 'settings.title': 'IM Union', 'accounts.title': 'Comptes', 'accounts.add': 'Ajouter', 'accounts.edit': 'Modifier', 'accounts.save': 'Enregistrer', 'modal.cancel': 'Annuler', 'accounts.check': 'Vérifier', 'accounts.pause': 'Suspendre', 'accounts.resume': 'Reprendre', 'accounts.remove': 'Supprimer', 'accounts.state.connected': 'Connecté', 'accounts.state.disconnected': 'Déconnecté', 'accounts.state.paused': 'Suspendu', 'check.passed': 'réussi', 'check.failed': 'échoué', 'check.unverified': 'non vérifié' },
-      de: { 'settings.title': 'IM Union', 'accounts.title': 'Konten', 'accounts.add': 'Hinzufügen', 'accounts.edit': 'Bearbeiten', 'accounts.save': 'Speichern', 'modal.cancel': 'Abbrechen', 'accounts.check': 'Verbindung prüfen', 'accounts.pause': 'Pausieren', 'accounts.resume': 'Fortsetzen', 'accounts.remove': 'Entfernen', 'accounts.state.connected': 'Verbunden', 'accounts.state.disconnected': 'Getrennt', 'accounts.state.paused': 'Pausiert', 'check.passed': 'ok', 'check.failed': 'fehlgeschlagen', 'check.unverified': 'ungeprüft' },
-      it: { 'settings.title': 'IM Union', 'accounts.title': 'Account', 'accounts.add': 'Aggiungi', 'accounts.edit': 'Modifica', 'accounts.save': 'Salva', 'modal.cancel': 'Annulla', 'accounts.check': 'Controlla', 'accounts.pause': 'Pausa', 'accounts.resume': 'Riprendi', 'accounts.remove': 'Rimuovi', 'accounts.state.connected': 'Connesso', 'accounts.state.disconnected': 'Disconnesso', 'accounts.state.paused': 'In pausa', 'check.passed': 'ok', 'check.failed': 'fallito', 'check.unverified': 'non verificato' },
-      ru: { 'settings.title': 'IM Union', 'accounts.title': 'Аккаунты', 'accounts.add': 'Добавить', 'accounts.edit': 'Изменить', 'accounts.save': 'Сохранить', 'modal.cancel': 'Отмена', 'accounts.check': 'Проверить', 'accounts.pause': 'Пауза', 'accounts.resume': 'Возобновить', 'accounts.remove': 'Удалить', 'accounts.state.connected': 'Подключено', 'accounts.state.disconnected': 'Отключено', 'accounts.state.paused': 'Пауза', 'check.passed': 'успех', 'check.failed': 'ошибка', 'check.unverified': 'не проверено' },
-      es: { 'settings.title': 'IM Union', 'accounts.title': 'Cuentas', 'accounts.add': 'Añadir', 'accounts.edit': 'Editar', 'accounts.save': 'Guardar', 'modal.cancel': 'Cancelar', 'accounts.check': 'Comprobar', 'accounts.pause': 'Pausar', 'accounts.resume': 'Reanudar', 'accounts.remove': 'Eliminar', 'accounts.state.connected': 'Conectado', 'accounts.state.disconnected': 'Desconectado', 'accounts.state.paused': 'Pausado', 'check.passed': 'correcto', 'check.failed': 'fallido', 'check.unverified': 'sin verificar' },
+      ja: { 'settings.title': 'IM Union', 'accounts.title': 'アカウント', 'accounts.add': '追加', 'accounts.edit': '編集', 'accounts.save': '保存', 'modal.cancel': 'キャンセル', 'accounts.check': '接続確認', 'accounts.pause': '一時停止', 'accounts.resume': '再開', 'accounts.remove': '削除', 'accounts.state.connected': '接続済', 'accounts.state.expired': 'セッション失効・再スキャン', 'accounts.state.disconnected': '未接続', 'accounts.state.paused': '停止中', 'check.passed': '成功', 'check.failed': '失敗', 'check.unverified': '未検証', 'prefs.permission': '権限プリセット', 'prefs.permission.default': 'ホスト既定', 'exec.dm': 'DMコマンド実行', 'exec.group': 'グループコマンド実行', 'exec.on': '許可', 'exec.off': '遮断' },
+      ko: { 'settings.title': 'IM Union', 'accounts.title': '계정', 'accounts.add': '추가', 'accounts.edit': '편집', 'accounts.save': '저장', 'modal.cancel': '취소', 'accounts.check': '연결 확인', 'accounts.pause': '일시정지', 'accounts.resume': '재개', 'accounts.remove': '삭제', 'accounts.state.connected': '연결됨', 'accounts.state.expired': '세션 만료(재스캔 필요)', 'accounts.state.disconnected': '미연결', 'accounts.state.paused': '정지됨', 'check.passed': '통과', 'check.failed': '실패', 'check.unverified': '미검증', 'prefs.permission': '권한 프리셋', 'prefs.permission.default': '호스트 기본', 'exec.dm': 'DM 명령 실행', 'exec.group': '그룹 명령 실행', 'exec.on': '허용', 'exec.off': '차단' },
+      fr: { 'settings.title': 'IM Union', 'accounts.title': 'Comptes', 'accounts.add': 'Ajouter', 'accounts.edit': 'Modifier', 'accounts.save': 'Enregistrer', 'modal.cancel': 'Annuler', 'accounts.check': 'Vérifier', 'accounts.pause': 'Suspendre', 'accounts.resume': 'Reprendre', 'accounts.remove': 'Supprimer', 'accounts.state.connected': 'Connecté', 'accounts.state.expired': 'Session expirée — rescanner', 'accounts.state.disconnected': 'Déconnecté', 'accounts.state.paused': 'Suspendu', 'check.passed': 'réussi', 'check.failed': 'échoué', 'check.unverified': 'non vérifié', 'prefs.permission': 'Préréglage de permission', 'prefs.permission.default': 'Défaut hôte', 'exec.dm': 'Commandes en MP', 'exec.group': 'Commandes en groupe', 'exec.on': 'Autoriser', 'exec.off': 'Bloquer' },
+      de: { 'settings.title': 'IM Union', 'accounts.title': 'Konten', 'accounts.add': 'Hinzufügen', 'accounts.edit': 'Bearbeiten', 'accounts.save': 'Speichern', 'modal.cancel': 'Abbrechen', 'accounts.check': 'Verbindung prüfen', 'accounts.pause': 'Pausieren', 'accounts.resume': 'Fortsetzen', 'accounts.remove': 'Entfernen', 'accounts.state.connected': 'Verbunden', 'accounts.state.expired': 'Sitzung abgelaufen — neu scannen', 'accounts.state.disconnected': 'Getrennt', 'accounts.state.paused': 'Pausiert', 'check.passed': 'ok', 'check.failed': 'fehlgeschlagen', 'check.unverified': 'ungeprüft', 'prefs.permission': 'Berechtigungsprofil', 'prefs.permission.default': 'Host-Standard', 'exec.dm': 'DM-Befehle', 'exec.group': 'Gruppenbefehle', 'exec.on': 'Erlauben', 'exec.off': 'Blockieren' },
+      it: { 'settings.title': 'IM Union', 'accounts.title': 'Account', 'accounts.add': 'Aggiungi', 'accounts.edit': 'Modifica', 'accounts.save': 'Salva', 'modal.cancel': 'Annulla', 'accounts.check': 'Controlla', 'accounts.pause': 'Pausa', 'accounts.resume': 'Riprendi', 'accounts.remove': 'Rimuovi', 'accounts.state.connected': 'Connesso', 'accounts.state.expired': 'Sessione scaduta — riscansionare', 'accounts.state.disconnected': 'Disconnesso', 'accounts.state.paused': 'In pausa', 'check.passed': 'ok', 'check.failed': 'fallito', 'check.unverified': 'non verificato', 'prefs.permission': 'Preset permessi', 'prefs.permission.default': 'Predefinito host', 'exec.dm': 'Comandi in DM', 'exec.group': 'Comandi in gruppo', 'exec.on': 'Consenti', 'exec.off': 'Blocca' },
+      ru: { 'settings.title': 'IM Union', 'accounts.title': 'Аккаунты', 'accounts.add': 'Добавить', 'accounts.edit': 'Изменить', 'accounts.save': 'Сохранить', 'modal.cancel': 'Отмена', 'accounts.check': 'Проверить', 'accounts.pause': 'Пауза', 'accounts.resume': 'Возобновить', 'accounts.remove': 'Удалить', 'accounts.state.connected': 'Подключено', 'accounts.state.expired': 'Сессия истекла — пересканируйте', 'accounts.state.disconnected': 'Отключено', 'accounts.state.paused': 'Пауза', 'check.passed': 'успех', 'check.failed': 'ошибка', 'check.unverified': 'не проверено', 'prefs.permission': 'Пресет разрешений', 'prefs.permission.default': 'По умолчанию хоста', 'exec.dm': 'Команды в ЛС', 'exec.group': 'Команды в группе', 'exec.on': 'Разрешить', 'exec.off': 'Запретить' },
+      es: { 'settings.title': 'IM Union', 'accounts.title': 'Cuentas', 'accounts.add': 'Añadir', 'accounts.edit': 'Editar', 'accounts.save': 'Guardar', 'modal.cancel': 'Cancelar', 'accounts.check': 'Comprobar', 'accounts.pause': 'Pausar', 'accounts.resume': 'Reanudar', 'accounts.remove': 'Eliminar', 'accounts.state.connected': 'Conectado', 'accounts.state.expired': 'Sesión caducada — reescanear', 'accounts.state.disconnected': 'Desconectado', 'accounts.state.paused': 'Pausado', 'check.passed': 'correcto', 'check.failed': 'fallido', 'check.unverified': 'sin verificar', 'prefs.permission': 'Preajuste de permisos', 'prefs.permission.default': 'Predeterminado del host', 'exec.dm': 'Comandos por DM', 'exec.group': 'Comandos en grupo', 'exec.on': 'Permitir', 'exec.off': 'Bloquear' },
     };
 
     // UI 语言：**取词时懒解析**，不在 factory 顶层冻结。真机实证：宿主初始 HTML
@@ -432,6 +448,8 @@ window.__ModuleLoader__.load({
 .diu-btnPrimary { border-color: transparent; background: var(--diu-accent); color: #fff; }
 .diu-btnPrimary:hover { background: color-mix(in srgb, var(--diu-accent) 88%, #fff); }
 .diu-checkList { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--diu-text) 4%, transparent); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+.diu-accountPrefs { margin-top: 6px; font-size: 12px; color: var(--diu-muted); line-height: 18px; min-width: 0; overflow-wrap: anywhere; }
+.diu-accountPrefsLabel { color: var(--diu-faint); margin-right: 6px; }
 .diu-checkItem { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
 .diu-checkName { color: var(--diu-text); font-weight: 550; }
 .diu-checkHint { color: var(--diu-faint); }
@@ -686,10 +704,25 @@ select.diu-input { appearance: auto; }
       });
       var badge = row.paused
         ? h(Tag, { tone: 'Muted' }, t('accounts.state.paused'))
-        : row.connected
-          ? h(Tag, { tone: 'Ok' }, t('accounts.state.connected'))
-          : h(Tag, { tone: 'Warn' }, t('accounts.state.disconnected'));
+        : row.sessionExpired === true
+          ? h(Tag, { tone: 'Bad' }, t('accounts.state.expired'))
+          : row.connected
+            ? h(Tag, { tone: 'Ok' }, t('accounts.state.connected'))
+            : h(Tag, { tone: 'Warn' }, t('accounts.state.disconnected'));
       var allowValue = allowDraft !== null ? allowDraft : (row.dmAllowlist || []).join('\n');
+      // 会话偏好摘要（可发现性）：有值才显示，避免「新设置藏在弹窗里」。
+      var session0 = row.session || {};
+      var prefBits = [];
+      if (session0.cwd) {
+        var cwdParts = String(session0.cwd).split(/[\\/]/);
+        prefBits.push(cwdParts[cwdParts.length - 1] || session0.cwd);
+      }
+      if (session0.agentPreset) prefBits.push(session0.agentPreset);
+      if (session0.model) prefBits.push((session0.provider ? session0.provider + '/' : '') + session0.model + (session0.reasoningEffort ? '@' + session0.reasoningEffort : ''));
+      if (session0.permission) prefBits.push(t('prefs.permission') + ':' + session0.permission);
+      var exec0 = row.commandExec || {};
+      if (exec0.dm === false) prefBits.push(t('exec.dm') + ':' + t('exec.off'));
+      if (exec0.group === false) prefBits.push(t('exec.group') + ':' + t('exec.off'));
 
       var actions = [
         h('button', { key: 'check', className: 'diu-btn', disabled: busy, onClick: function () { props.onCheck(row.accountId); } },
@@ -764,6 +797,12 @@ select.diu-input { appearance: auto; }
           h('span', { className: 'diu-accountActions' }, actions),
         ),
         checkRows,
+        prefBits.length > 0
+          ? h('div', { className: 'diu-accountPrefs' },
+              h('span', { className: 'diu-accountPrefsLabel' }, t('accounts.prefs')),
+              prefBits.join(' · '),
+            )
+          : null,
         allowBlock,
       );
     }
@@ -851,7 +890,7 @@ select.diu-input { appearance: auto; }
       var errHook = useState('');
       var err = errHook[0];
       var setErr = errHook[1];
-      // 会话偏好（cwd/预设/模型/推理档）+ 私聊准入；模型编码 provider::model。
+      // 会话偏好（cwd/预设/模型/推理档/权限）+ 私聊准入 + 命令执行开关；模型编码 provider::model。
       var prefsHook = useState(function () {
         var s = (editing && account.session) || {};
         return {
@@ -859,10 +898,18 @@ select.diu-input { appearance: auto; }
           agentPreset: typeof s.agentPreset === 'string' ? s.agentPreset : '',
           modelKey: typeof s.model === 'string' && s.model !== '' ? (typeof s.provider === 'string' ? s.provider : '') + '::' + s.model : '',
           reasoningEffort: typeof s.reasoningEffort === 'string' ? s.reasoningEffort : '',
+          permission: typeof s.permission === 'string' ? s.permission : '',
         };
       });
       var prefs = prefsHook[0];
       var setPrefs = prefsHook[1];
+      // 命令执行开关（缺键=开；插值即时生效，不依赖会话后端）。
+      var execHook = useState(function () {
+        var e = (editing && account.commandExec) || {};
+        return { dm: e.dm !== false, group: e.group !== false };
+      });
+      var exec = execHook[0];
+      var setExec = execHook[1];
       var accessHook = useState(editing && account.privateAccess === 'all' ? 'all' : 'approved');
       var privateAccess = accessHook[0];
       var setPrivateAccess = accessHook[1];
@@ -914,6 +961,8 @@ select.diu-input { appearance: auto; }
           var effort = String(prefs.reasoningEffort || '').trim();
           if (effort !== '') session.reasoningEffort = effort;
         }
+        var permission = String(prefs.permission || '').trim();
+        if (permission !== '') session.permission = permission;
         return {
           record: {
             accountId: editing ? account.accountId : genAccountId(channel.id),
@@ -921,6 +970,7 @@ select.diu-input { appearance: auto; }
             alias: String(alias || '').trim(),
             config: config,
             privateAccess: privateAccess === 'all' ? 'all' : 'approved',
+            commandExec: { dm: exec.dm !== false, group: exec.group !== false },
             session: session,
           },
           secrets: secrets,
@@ -1089,8 +1139,12 @@ select.diu-input { appearance: auto; }
       var sessionSection = null;
       if (channel.notifyOnly !== true) {
         var backendNone = catalog !== null && catalog.backend === 'none';
+        // 目录类下拉在「目录未达」或「后端未就绪」时禁用（数据源缺位如实降级），
+        // 但整个设置面常显：命令执行/准入/工作区是本插件本地语义，始终可编辑。
+        var catalogDown = catalog === null || backendNone;
         var providerGroups = (catalog && catalog.providers) || [];
         var presets = (catalog && catalog.presets) || [];
+        var permissions = (catalog && catalog.permissions) || [];
         var workspaces = (catalog && catalog.workspaces) || [];
         var selProvider = '';
         var selModel = '';
@@ -1117,25 +1171,46 @@ select.diu-input { appearance: auto; }
             ),
           );
         });
+        var permissionOptions = [h('option', { key: '_default', value: '' }, t('prefs.permission.default'))];
+        permissions.forEach(function (p) {
+          if (p && typeof p.id === 'string' && p.id !== '') {
+            permissionOptions.push(h('option', { key: p.id, value: p.id }, p.name || p.id));
+          }
+        });
+        var execSelect = function (key, label) {
+          return h('div', { key: key, className: 'diu-field' },
+            h('span', { className: 'diu-label' }, label),
+            h('select', {
+              className: 'diu-input', value: exec[key] === false ? 'off' : 'on',
+              onChange: function (event) { setExec(Object.assign({}, exec, key === 'dm' ? { dm: event.target.value !== 'off' } : { group: event.target.value !== 'off' })); },
+            },
+              h('option', { value: 'on' }, t('exec.on')),
+              h('option', { value: 'off' }, t('exec.off')),
+            ),
+          );
+        };
         sessionSection = h('div', { className: 'diu-sessionBlock' },
           h('div', { className: 'diu-sessionTitle' }, t('modal.session.title')),
-          backendNone
-            ? h('div', { className: 'diu-hint' }, t('modal.session.none'))
-            : h('div', { className: 'diu-fields' },
-                h('div', { className: 'diu-field' },
-                  h('span', { className: 'diu-label' }, t('access.title')),
-                  h('select', {
-                    className: 'diu-input', value: privateAccess,
-                    onChange: function (event) { setPrivateAccess(event.target.value === 'all' ? 'all' : 'approved'); },
-                  },
-                    h('option', { value: 'approved' }, t('access.approved')),
-                    h('option', { value: 'all' }, t('access.all')),
-                  ),
-                ),
-                h('div', { className: 'diu-field' },
-                  h('span', { className: 'diu-label' }, t('prefs.preset')),
-                  h('select', {
-                    className: 'diu-input', value: prefs.agentPreset, disabled: catalog === null,
+          backendNone ? h('div', { className: 'diu-hint' }, t('modal.session.none')) : null,
+          h('div', { className: 'diu-fields' },
+            h('div', { className: 'diu-field' },
+              h('span', { className: 'diu-label' }, t('access.title')),
+              h('select', {
+                className: 'diu-input', value: privateAccess,
+                onChange: function (event) { setPrivateAccess(event.target.value === 'all' ? 'all' : 'approved'); },
+              },
+                h('option', { value: 'approved' }, t('access.approved')),
+                h('option', { value: 'all' }, t('access.all')),
+              ),
+            ),
+            execSelect('dm', t('exec.dm')),
+            execSelect('group', t('exec.group')),
+            h('div', { className: 'diu-field' },
+              h('span', { className: 'diu-label' }, t('prefs.preset')),
+              catalog === null
+                ? h('div', { className: 'diu-hint' }, t('catalog.loading'))
+                : h('select', {
+                    className: 'diu-input', value: prefs.agentPreset, disabled: backendNone,
                     onChange: function (event) { setPrefs(Object.assign({}, prefs, { agentPreset: event.target.value })); },
                   },
                     h('option', { value: '' }, t('prefs.preset.default')),
@@ -1143,43 +1218,52 @@ select.diu-input { appearance: auto; }
                       return h('option', { key: p.id, value: p.id }, p.name || p.id);
                     }),
                   ),
-                ),
-                h('div', { className: 'diu-field diu-fieldWide' },
-                  h('span', { className: 'diu-label' }, t('prefs.workspace')),
-                  h('input', {
-                    className: 'diu-input', list: 'diu-cwd-options', value: prefs.cwd,
-                    placeholder: t('prefs.workspace.placeholder'),
-                    onChange: function (event) { setPrefs(Object.assign({}, prefs, { cwd: event.target.value })); },
-                  }),
-                  h('datalist', { id: 'diu-cwd-options' },
-                    workspaces.map(function (w) { return h('option', { key: w, value: w }); }),
-                  ),
-                ),
-                h('div', { className: 'diu-field' },
-                  h('span', { className: 'diu-label' }, t('prefs.model')),
-                  catalog === null
-                    ? h('div', { className: 'diu-hint' }, t('catalog.loading'))
-                    : h('select', {
-                        className: 'diu-input', value: prefs.modelKey,
-                        onChange: function (event) { setPrefs(Object.assign({}, prefs, { modelKey: event.target.value, reasoningEffort: '' })); },
-                      }, modelOptions),
-                ),
-                efforts.length > 0
-                  ? h('div', { className: 'diu-field' },
-                      h('span', { className: 'diu-label' }, t('prefs.effort')),
-                      h('select', {
-                        className: 'diu-input', value: prefs.reasoningEffort,
-                        onChange: function (event) { setPrefs(Object.assign({}, prefs, { reasoningEffort: event.target.value })); },
-                      },
-                        h('option', { value: '' }, t('prefs.effort.default')),
-                        efforts.map(function (e) {
-                          return h('option', { key: e.id, value: e.id }, e.name || e.id);
-                        }),
-                      ),
-                    )
-                  : null,
-                h('div', { className: 'diu-fieldWide diu-hint' }, t('modal.session.hint')),
+            ),
+            h('div', { className: 'diu-field diu-fieldWide' },
+              h('span', { className: 'diu-label' }, t('prefs.workspace')),
+              h('input', {
+                className: 'diu-input', list: 'diu-cwd-options', value: prefs.cwd,
+                placeholder: t('prefs.workspace.placeholder'),
+                onChange: function (event) { setPrefs(Object.assign({}, prefs, { cwd: event.target.value })); },
+              }),
+              h('datalist', { id: 'diu-cwd-options' },
+                workspaces.map(function (w) { return h('option', { key: w, value: w }); }),
               ),
+            ),
+            h('div', { className: 'diu-field' },
+              h('span', { className: 'diu-label' }, t('prefs.model')),
+              catalog === null
+                ? h('div', { className: 'diu-hint' }, t('catalog.loading'))
+                : h('select', {
+                    className: 'diu-input', value: prefs.modelKey, disabled: backendNone,
+                    onChange: function (event) { setPrefs(Object.assign({}, prefs, { modelKey: event.target.value, reasoningEffort: '' })); },
+                  }, modelOptions),
+            ),
+            efforts.length > 0
+              ? h('div', { className: 'diu-field' },
+                  h('span', { className: 'diu-label' }, t('prefs.effort')),
+                  h('select', {
+                    className: 'diu-input', value: prefs.reasoningEffort,
+                    onChange: function (event) { setPrefs(Object.assign({}, prefs, { reasoningEffort: event.target.value })); },
+                  },
+                    h('option', { value: '' }, t('prefs.effort.default')),
+                    efforts.map(function (e) {
+                      return h('option', { key: e.id, value: e.id }, e.name || e.id);
+                    }),
+                  ),
+                )
+              : null,
+            h('div', { className: 'diu-field' },
+              h('span', { className: 'diu-label' }, t('prefs.permission')),
+              catalogDown
+                ? h('div', { className: 'diu-hint' }, backendNone ? t('modal.session.none') : t('catalog.loading'))
+                : h('select', {
+                    className: 'diu-input', value: prefs.permission,
+                    onChange: function (event) { setPrefs(Object.assign({}, prefs, { permission: event.target.value })); },
+                  }, permissionOptions),
+            ),
+            h('div', { className: 'diu-fieldWide diu-hint' }, t('modal.session.hint')),
+          ),
         );
       }
 

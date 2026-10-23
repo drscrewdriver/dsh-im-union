@@ -45,6 +45,19 @@ export interface PresetInfo {
   name: string
 }
 
+/** 权限预设选项（宿主 permissionPresets.optionOf 的宽松形）。 */
+export interface PermissionOptionInfo {
+  id: string
+  name: string
+  description?: string
+}
+
+export interface PermissionCatalogLike {
+  options: PermissionOptionInfo[]
+  /** 新会话的宿主默认预设（permissionPresets.defaultPreset）。 */
+  default?: string
+}
+
 export interface CreateSessionOptions {
   workspace?: string
   /** 会话工作目录（sessionController.create 的 cwd；与 workspace 二选一，cwd 优先直传）。 */
@@ -53,7 +66,12 @@ export interface CreateSessionOptions {
   provider?: string
   reasoningEffort?: string
   preset?: string
-  /** IM 侧生成的稳定会话 id（imu: 前缀），宿主不接受时由实现方生成并回传。 */
+  /**
+   * 权限预设（宿主 permissionPresets.set(session, name)，webhook 范式：create
+   * 拿到会话后同步应用一次；沙箱+审批旋钮随预设落位）。
+   */
+  permission?: string
+  /** IM 侧生成的稳定会话 id（宿主 IM 约定 im: 前缀），宿主不接受时由实现方生成并回传。 */
   sessionIdHint?: string
   /**
    * 会话列表标题（T3.6 渠道 Logo 前缀，形如 `[TG] 帮我看看这份日志`）。
@@ -78,6 +96,10 @@ export interface SessionApi {
   modelCatalog(): Promise<ModelCatalogLike | undefined>
   presetsList(): Promise<PresetInfo[]>
   presetSelect(nameOrId: string): Promise<{ ok: boolean; message?: string }>
+  /** 权限预设目录（permissionPresets names+optionOf）；服务缺位返回 undefined（面板如实降级）。 */
+  permissionCatalog(): Promise<PermissionCatalogLike | undefined>
+  /** 对既有会话应用权限预设（sessions.get(id) + permissionPresets.set）；ok=false 带原因。 */
+  applyPermission(sessionId: string, preset: string): Promise<{ ok: boolean; message?: string }>
   /** /fork：分叉当前会话，回新会话 id；无面抛 UnsupportedError（/ 命令层降级）。 */
   fork(sessionId: string): Promise<string>
   /** /rename：改会话标题；false=面缺位（不伪装成功）。 */
@@ -90,52 +112,127 @@ function asFn<T extends object>(value: unknown, key: string): T[keyof T] | undef
   return typeof fn === 'function' ? (fn as T[keyof T]) : undefined
 }
 
+/** apply 后再探测（惰性升级与诊断共用同一判据；services.ts 的 apply 期快照仅作初值）。 */
+function sessionGate(services: { agents: unknown; sessionController: unknown; workspaceController: unknown }): boolean {
+  return (
+    asFn<{ create(...args: any[]): any }>(services.agents, 'create') !== undefined &&
+    (asFn<{ prompt(...args: any[]): any }>(services.sessionController, 'prompt') !== undefined ||
+      asFn<{ follow(...args: any[]): any }>(services.workspaceController, 'follow') !== undefined)
+  )
+}
+
+/** apply 后任意时点重探会话后端（真机实证：desktop 线会话子系统晚于插件 apply 提供）。 */
+export function probeSessionBackend(ctx: CordisLike): 'native' | 'none' {
+  return sessionGate(sessionServices(ctx)) ? 'native' : 'none'
+}
+
 export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): SessionApi {
-  const { agents, sessionController, workspaceController } = sessionServices(ctx)
-  const sessionPersistence = optionalService(ctx, 'sessionPersistence')
-
-  if (caps.sessionBackend !== 'native') {
-    return {
-      backend: 'none',
-      async createSession(): Promise<SessionInfo> {
-        throw new UnsupportedError('agents/sessionController')
-      },
-      async prompt(): Promise<void> {
-        throw new UnsupportedError('sessionController.prompt')
-      },
-      async steer(): Promise<boolean> {
-        return false
-      },
-      follow(): () => void {
-        throw new UnsupportedError('session follow')
-      },
-      async cancel(): Promise<void> {
-        throw new UnsupportedError('session cancel')
-      },
-      async listSessions(): Promise<SessionInfo[]> {
-        return []
-      },
-      async selectModel(): Promise<void> {
-        throw new UnsupportedError('model selection')
-      },
-      async modelCatalog(): Promise<ModelCatalogLike | undefined> {
-        return undefined
-      },
-      async presetsList(): Promise<PresetInfo[]> {
-        return []
-      },
-      async presetSelect(): Promise<{ ok: boolean; message?: string }> {
-        return { ok: false, message: '当前宿主无预设面' }
-      },
-      async fork(): Promise<string> {
-        throw new UnsupportedError('session fork')
-      },
-      async rename(): Promise<boolean> {
-        return false
-      },
-    }
+  if (caps.sessionBackend === 'native') {
+    return createNativeSessionApi(ctx, sessionServices(ctx), caps)
   }
+  return createLazySessionApi(ctx, caps)
+}
 
+/**
+ * 惰性 none 面（desktop/Electron 线实证）：会话子系统可能**晚于插件 apply 提供**
+ * ——不是"已提供未激活"（reflect 非严格读也拿不到），apply 期冻结探测必然误判
+ * none 且永不恢复。本面每次访问 backend（引擎每回合、/session-catalog、/state
+ * 都经此）重新软读；子系统一旦就绪立即升级原生面并粘住（服务提供后不消失）。
+ */
+function createLazySessionApi(ctx: CordisLike, caps: UnionCapabilities): SessionApi {
+  let promoted: SessionApi | undefined
+  const logger = typeof (ctx as { logger?: unknown }).logger === 'function'
+    ? (ctx as unknown as { logger: (name: string) => LoggerLike }).logger('dsh-im-union')
+    : undefined
+  const tryPromote = (): SessionApi | undefined => {
+    if (promoted !== undefined) return promoted
+    const services = sessionServices(ctx)
+    if (!sessionGate(services)) return undefined
+    promoted = createNativeSessionApi(ctx, services, caps)
+    if (logger !== undefined) logger.info('会话子系统已就绪：会话后端 none → native（惰性升级）')
+    return promoted
+  }
+  return {
+    get backend() {
+      return tryPromote() !== undefined ? 'native' : 'none'
+    },
+    async createSession(options: CreateSessionOptions): Promise<SessionInfo> {
+      const native = tryPromote()
+      if (native !== undefined) return native.createSession(options)
+      throw new UnsupportedError('agents/sessionController')
+    },
+    async prompt(sessionId: string, input: string | unknown[]): Promise<void> {
+      const native = tryPromote()
+      if (native !== undefined) return native.prompt(sessionId, input)
+      throw new UnsupportedError('sessionController.prompt')
+    },
+    async steer(sessionId: string, text: string): Promise<boolean> {
+      const native = tryPromote()
+      return native !== undefined ? native.steer(sessionId, text) : false
+    },
+    follow(sessionId: string, onEvent: (event: unknown) => void): () => void {
+      const native = tryPromote()
+      if (native !== undefined) return native.follow(sessionId, onEvent)
+      throw new UnsupportedError('session follow')
+    },
+    async cancel(sessionId: string): Promise<void> {
+      const native = tryPromote()
+      if (native !== undefined) return native.cancel(sessionId)
+      throw new UnsupportedError('session cancel')
+    },
+    async listSessions(workspace?: string): Promise<SessionInfo[]> {
+      const native = tryPromote()
+      return native !== undefined ? native.listSessions(workspace) : []
+    },
+    async selectModel(sessionId: string, selection: ModelSelectionInput): Promise<void> {
+      const native = tryPromote()
+      if (native !== undefined) return native.selectModel(sessionId, selection)
+      throw new UnsupportedError('model selection')
+    },
+    async modelCatalog(): Promise<ModelCatalogLike | undefined> {
+      const native = tryPromote()
+      return native !== undefined ? native.modelCatalog() : undefined
+    },
+    async presetsList(): Promise<PresetInfo[]> {
+      const native = tryPromote()
+      return native !== undefined ? native.presetsList() : []
+    },
+    async presetSelect(nameOrId: string): Promise<{ ok: boolean; message?: string }> {
+      const native = tryPromote()
+      return native !== undefined ? native.presetSelect(nameOrId) : { ok: false, message: '当前宿主无预设面' }
+    },
+    async permissionCatalog() {
+      const native = tryPromote()
+      return native !== undefined ? native.permissionCatalog() : undefined
+    },
+    async applyPermission(sessionId: string, preset: string): Promise<{ ok: boolean; message?: string }> {
+      const native = tryPromote()
+      return native !== undefined
+        ? native.applyPermission(sessionId, preset)
+        : { ok: false, message: '会话后端未就绪，权限预设暂不可应用' }
+    },
+    async fork(sessionId: string): Promise<string> {
+      const native = tryPromote()
+      if (native !== undefined) return native.fork(sessionId)
+      throw new UnsupportedError('session fork')
+    },
+    async rename(sessionId: string, title: string): Promise<boolean> {
+      const native = tryPromote()
+      return native !== undefined ? native.rename(sessionId, title) : false
+    },
+  }
+}
+
+function createNativeSessionApi(
+  ctx: CordisLike,
+  services: { agents: unknown; sessionController: unknown; workspaceController: unknown },
+  caps: UnionCapabilities,
+): SessionApi {
+  const { agents, sessionController, workspaceController } = services
+  const sessionPersistence = optionalService(ctx, 'sessionPersistence')
+  // 预设服务双源：惰性升级路径下 apply 期快照可能还没它，运行时软读优先；
+  // 原生首发路径（测试契约）回退 caps 快照。
+  const agentPresets = optionalService(ctx, 'agentPresets') ?? caps.agentPresets
   const create = asFn<{ create(...args: any[]): any }>(agents, 'create')!
   const promptFn = asFn<{ prompt(...args: any[]): any }>(sessionController, 'prompt')
   const followFn = asFn<{ follow(...args: any[]): any }>(sessionController, 'follow')
@@ -146,8 +243,8 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
   const selectModelFn = asFn<{ selectModel(...args: any[]): any }>(sessionController, 'selectModel')
   const catalogFn = asFn<{ modelCatalog(...args: any[]): any }>(sessionController, 'modelCatalog')
   const sessionCreateFn = asFn<{ create(...args: any[]): any }>(sessionController, 'create')
-  const presetsListFn = asFn<{ list(...args: any[]): any }>(caps.agentPresets, 'list')
-  const presetSelectFn = asFn<{ select(...args: any[]): any }>(caps.agentPresets, 'select')
+  const presetsListFn = asFn<{ list(...args: any[]): any }>(agentPresets, 'list')
+  const presetSelectFn = asFn<{ select(...args: any[]): any }>(agentPresets, 'select')
   const forkFn = asFn<{ fork(...args: any[]): any }>(sessionController, 'fork')
   const renameFn = asFn<{ rename(...args: any[]): any }>(sessionController, 'rename')
   const log = typeof (ctx as { logger?: unknown }).logger === 'function'
@@ -174,6 +271,13 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
     }
   }
 
+  /**
+   * 0.2.x 线 @Remote 面（desktop 真机实证）：prompt(request, signal) 进门即
+   * `signal.throwIfAborted()`（index.ts:346-349），list(page) 同收 signal——
+   * 缺参直接 TypeError。本插件无调用方取消语义，每次调用配一个新信号即可。
+   */
+  const freshSignal = (): AbortSignal => new AbortController().signal
+
   function promptRequest(sessionId: string, mode: 'queue' | 'steer', input: string | unknown[]): Record<string, unknown> {
     const content =
       typeof input === 'string'
@@ -181,7 +285,44 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
         : Array.isArray(input)
           ? input
           : [{ type: 'text', text: String(input) }]
-    return { sessionId, mode, content, requestId: `imu-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` }
+    let clientTimeZone: string | undefined
+    try {
+      clientTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
+    } catch {
+      clientTimeZone = undefined
+    }
+    return {
+      sessionId,
+      mode,
+      content,
+      requestId: `imu-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      ...(clientTimeZone !== undefined ? { clientTimeZone } : {}),
+    }
+  }
+
+  /**
+   * 权限预设落地面：sessions.get(id) 取活会话 → permissionPresets.set。
+   * 宿主锚点：packages/interaction/permission-presets（set 记 permission/preset
+   * 事件并写穿 sandbox/mode + approval/policy 旋钮；未知预设名抛错）+
+   * core/session SessionStore.get(id)。服务缺位/会话不在册都回 ok:false，
+   * 不伪装成功。
+   */
+  async function applyPermissionById(sessionId: string, preset: string): Promise<{ ok: boolean; message?: string }> {
+    const sessionsSvc = optionalService(ctx, 'sessions')
+    const permissionPresets = optionalService(ctx, 'permissionPresets')
+    const getFn = asFn<{ get(id: string): unknown }>(sessionsSvc, 'get')
+    const setFn = asFn<{ set(session: unknown, name: string): void }>(permissionPresets, 'set')
+    if (permissionPresets === undefined || getFn === undefined || setFn === undefined) {
+      return { ok: false, message: '宿主未提供权限预设面' }
+    }
+    const session = getFn.call(sessionsSvc, sessionId)
+    if (session === undefined || session === null) return { ok: false, message: '会话不存在或未激活' }
+    try {
+      setFn.call(permissionPresets, session, preset)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, message: `权限预设应用失败：${(error as Error).message}` }
+    }
   }
 
   /**
@@ -245,10 +386,15 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
         }
         return { id }
       }
+      const applyPermissionPref = async (id: string): Promise<void> => {
+        if (options.permission === undefined || options.permission === '') return
+        const verdict = await applyPermissionById(id, options.permission)
+        if (!verdict.ok) log.warn(`权限预设未生效（会话照常创建）: ${verdict.message ?? ''}`)
+      }
 
       if (typeof sessionCreateFn === 'function') {
         const request: Record<string, unknown> = {}
-        if (options.sessionIdHint !== undefined && options.sessionIdHint.startsWith('imu:')) {
+        if (options.sessionIdHint !== undefined && options.sessionIdHint.startsWith('im:')) {
           // 显式 id 走宿主幂等采纳（commands.ts:98 sessionId ?? brandString）。
           request.sessionId = options.sessionIdHint
         }
@@ -266,6 +412,7 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
               : options.sessionIdHint
           if (id === undefined) throw new Error('session.create 回包无 sessionId')
           await applyModelSelection(id)
+          await applyPermissionPref(id)
           const info = await renameIfWanted(id)
           if (options.sessionIdHint !== undefined && id !== options.sessionIdHint) {
             // 宿主采纳了别的 id 形态（规范化/碰撞回退）——交由调用方 router.bind 落新绑定。
@@ -285,8 +432,9 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
         (created && typeof created.sessionId === 'string' && created.sessionId) ||
         (created && typeof created.id === 'string' && created.id) ||
         options.sessionIdHint ||
-        `imu:union:generated:${Date.now()}`
+        `im:union:generated:${Date.now()}`
       await applyModelSelection(id)
+      await applyPermissionPref(id)
       const info = await renameIfWanted(id)
       if (info.title !== undefined) return info
       const title = created && typeof created.title === 'string' ? created.title : undefined
@@ -296,7 +444,7 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
       if (!promptFn) throw new UnsupportedError('sessionController.prompt')
       const request = promptRequest(sessionId, 'queue', input)
       await callWithShapeFallback(
-        () => promptFn.call(sessionController, request) as Promise<void>,
+        () => promptFn.call(sessionController, request, freshSignal()) as Promise<void>,
         () => promptFn.call(sessionController, sessionId, input) as Promise<void>,
       )
     },
@@ -305,7 +453,7 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
       const request = promptRequest(sessionId, 'steer', text)
       try {
         await callWithShapeFallback(
-          () => promptFn.call(sessionController, request) as Promise<void>,
+          () => promptFn.call(sessionController, request, freshSignal()) as Promise<void>,
           () => promptFn.call(sessionController, sessionId, [{ type: 'text', text }]) as Promise<void>,
         )
         return true
@@ -315,10 +463,43 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
       }
     },
     follow(sessionId, onEvent) {
-      // sessionController.follow 优先，缺失退到 workspaceController.follow。
+      // 0.2.x 线（desktop 真机实证）：follow({address}, signal) → AsyncIterable<帧>，
+      // 帧三种——snapshot（忽略，防重放旧文）/event（取 .event 投喂）/assistant-stream
+      // （Web 呈现专用，忽略）；旧线 follow(sessionId, onEvent) → 退订函数。
+      // 运行时探测收敛：新形态返回异步迭代器即泵帧，否则落旧形态。
       const fn = followFn ?? wfFollowFn
       if (!fn) throw new UnsupportedError('session follow')
-      const ret = fn.call(followFn ? sessionController : workspaceController, sessionId, onEvent)
+      const target = followFn ? sessionController : workspaceController
+      if (followFn !== undefined) {
+        let probe: unknown
+        try {
+          probe = fn.call(target, { address: { kind: 'session', sessionId } }, freshSignal())
+        } catch {
+          probe = undefined
+        }
+        if (
+          probe !== null &&
+          typeof probe === 'object' &&
+          Symbol.asyncIterator in (probe as Record<PropertyKey, unknown>)
+        ) {
+          const pump = new AbortController()
+          void (async () => {
+            try {
+              for await (const raw of probe as AsyncIterable<unknown>) {
+                if (pump.signal.aborted) break
+                const frame = raw as { type?: string; event?: unknown }
+                if (frame?.type === 'event' && frame.event !== undefined) onEvent(frame.event)
+              }
+            } catch (error) {
+              if (!pump.signal.aborted) log.warn(`follow 事件流中断: ${(error as Error).message}`)
+            }
+          })()
+          return () => pump.abort()
+        }
+        // probe 非流（老线被静默拒绝/返回杂项）→ 落旧形态以正确实参重试；
+        // 不信任 probe 的函数返回值——老线真退订必须配旧线实参才有意义。
+      }
+      const ret = fn.call(target, sessionId, onEvent)
       if (typeof ret === 'function') return ret as () => void
       return () => undefined
     },
@@ -332,7 +513,11 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
     async listSessions(workspace) {
       // 首选 sessionController.list（摘要带 running/cwd，命令面需要），缺位退 sessionPersistence.list。
       if (sessionListFn) {
-        const value = (await sessionListFn.call(sessionController, workspace !== undefined && workspace !== '' ? { workspace } : {})) as unknown
+        const value = (await sessionListFn.call(
+          sessionController,
+          workspace !== undefined && workspace !== '' ? { workspace } : {},
+          freshSignal(),
+        )) as unknown
         const items = value !== null && typeof value === 'object' && Array.isArray((value as { items?: unknown }).items)
           ? (value as { items: unknown[] }).items
           : Array.isArray(value)
@@ -388,7 +573,7 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
     async presetsList() {
       if (!presetsListFn) return []
       try {
-        const value = await presetsListFn.call(caps.agentPresets)
+        const value = await presetsListFn.call(agentPresets)
         const rows =
           Array.isArray(value) ? value : value !== null && typeof value === 'object' && Array.isArray((value as { items?: unknown }).items) ? (value as { items: unknown[] }).items : []
         return rows
@@ -407,16 +592,44 @@ export function createSessionApi(ctx: CordisLike, caps: UnionCapabilities): Sess
     async presetSelect(nameOrId) {
       if (!presetSelectFn) return { ok: false, message: '当前宿主无预设选择面' }
       try {
-        await presetSelectFn.call(caps.agentPresets, { id: nameOrId })
+        await presetSelectFn.call(agentPresets, { id: nameOrId })
         return { ok: true }
       } catch (error) {
         try {
-          await presetSelectFn.call(caps.agentPresets, nameOrId)
+          await presetSelectFn.call(agentPresets, nameOrId)
           return { ok: true }
         } catch {
           return { ok: false, message: `预设切换失败：${(error as Error).message}` }
         }
       }
+    },
+    async permissionCatalog() {
+      // 每次软读：permissionPresets 可能晚于本面升级才就绪（desktop 线实证）。
+      const permissionPresets = optionalService(ctx, 'permissionPresets')
+      if (permissionPresets === undefined) return undefined
+      try {
+        const names = (permissionPresets as { names?: unknown }).names
+        if (!Array.isArray(names)) return undefined
+        const optionOf = asFn<{ optionOf(name: string): unknown }>(permissionPresets, 'optionOf')
+        const options: PermissionOptionInfo[] = names
+          .filter((n): n is string => typeof n === 'string' && n !== '')
+          .map((n) => {
+            const opt = optionOf !== undefined ? (optionOf.call(permissionPresets, n) as unknown) : undefined
+            const row = opt !== null && typeof opt === 'object' ? (opt as Record<string, unknown>) : undefined
+            return {
+              id: n,
+              name: typeof row?.name === 'string' && row.name !== '' ? row.name : n,
+              ...(typeof row?.description === 'string' && row.description !== '' ? { description: row.description } : {}),
+            }
+          })
+        const def = (permissionPresets as { defaultPreset?: unknown }).defaultPreset
+        return { options, ...(typeof def === 'string' && def !== '' ? { default: def } : {}) }
+      } catch {
+        return undefined
+      }
+    },
+    async applyPermission(sessionId: string, preset: string) {
+      return applyPermissionById(sessionId, preset)
     },
     async fork(sessionId) {
       if (!forkFn) throw new UnsupportedError('session fork')
