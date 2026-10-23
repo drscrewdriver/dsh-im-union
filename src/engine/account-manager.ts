@@ -38,6 +38,9 @@ export interface PublicAccount {
   connected: boolean
   /** 渠道会话态不可自愈故障（微信 -14 过期）：true 时设置页红条提示重扫。 */
   sessionExpired?: boolean
+  /** 最近一次出站发送（设置卡诊断位：「发送失败」vs「受理未送达」一眼可辨）。 */
+  lastSendAt?: number
+  lastSendOk?: boolean
   secretFields: Array<{ key: string; configured: boolean }>
   /** 白名单是管理员自录配置（非平台回流的原始用户标识），设置页需回显编辑。 */
   dmAllowlist: string[]
@@ -101,6 +104,8 @@ export interface AccountManagerDeps {
   logWarn: (msg: string) => void
   /** 连接器生命周期日志入口（info 级进 plugin.log）；缺省静默（测试无宿主日志面）。 */
   logInfo?: (msg: string) => void
+  /** 账号状态目录（连接器游标等协议态落盘位；缺省不传=纯内存态）。 */
+  stateDir?: string
   /** 测试注入点；缺省走 registry.createAdapter（懒加载工厂表）。 */
   adapterFactory?: (record: AccountRecord, secrets: Record<string, string | undefined>) => Promise<ChannelAdapter> | ChannelAdapter
 }
@@ -119,6 +124,7 @@ export class AccountManager {
       logger: (msg: string) => {
         this.deps.logInfo?.(msg)
       },
+      ...(this.deps.stateDir !== undefined && this.deps.stateDir !== '' ? { stateDir: this.deps.stateDir } : {}),
     })
 
   constructor(private readonly deps: AccountManagerDeps) {
@@ -351,6 +357,12 @@ export class AccountManager {
     return out
   }
 
+  /** 最近发送诊断位（不含内容/无 secret，D4）；适配器未暴露时不落字段。 */
+  private lastSendBits(adapter: ChannelAdapter | undefined): { lastSendAt?: number; lastSendOk?: boolean } {
+    const send = (adapter as { lastSend?: { at: number; ok: boolean } } | undefined)?.lastSend
+    return send === undefined ? {} : { lastSendAt: send.at, lastSendOk: send.ok }
+  }
+
   /** 脱敏视图：零 secret 值，只报 configured（D4）。 */
   async listPublic(): Promise<PublicAccount[]> {
     const rows: PublicAccount[] = []
@@ -381,6 +393,7 @@ export class AccountManager {
         ...((live?.adapter as { authExpired?: boolean } | undefined)?.authExpired === true
           ? { sessionExpired: true }
           : {}),
+        ...this.lastSendBits(live?.adapter),
         secretFields: fields,
         // 通知类不回显策略字段（存储态也已剥除，双向一致）。
         dmAllowlist: notify ? [] : record.dmAllowlist ?? [],

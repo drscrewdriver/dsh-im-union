@@ -353,3 +353,19 @@ test('listPublic：渠道会话态不可自愈故障（authExpired）→ session
   const rows2 = await healthy.manager.listPublic()
   assert.notEqual(rows2[0].sessionExpired, true, '健康适配器无该位')
 })
+
+test('listPublic：最近发送诊断位透出（失败标/成功不喧哗/未发送不落字段）', async () => {
+  const adapter = fakeAdapter('weixin')
+  const { manager } = makeManager({ adapterFactory: () => adapter })
+  await manager.upsert({ accountId: 'wx-send', channel: 'weixin' }, undefined, { skipConnect: true })
+  await manager.ensureConnected('wx-send')
+  const none = await manager.listPublic()
+  assert.equal(none[0].lastSendOk, undefined, '未发送过不落字段')
+  adapter.lastSend = { at: 1792732145923, ok: false }
+  const failed = await manager.listPublic()
+  assert.equal(failed[0].lastSendOk, false)
+  assert.equal(failed[0].lastSendAt, 1792732145923)
+  adapter.lastSend = { at: 1792732145999, ok: true }
+  const okRows = await manager.listPublic()
+  assert.equal(okRows[0].lastSendOk, true)
+})

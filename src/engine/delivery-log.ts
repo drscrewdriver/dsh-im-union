@@ -160,6 +160,17 @@ export class DeliveryLog {
     return record
   }
 
+  /** sessionId → 最近一次出站时间（admin /channels 渠道 rail 的「最近活动」源）。 */
+  lastOutBySession(): Map<string, number> {
+    const out = new Map<string, number>()
+    for (const r of this.records) {
+      if (r.direction !== 'out' || r.sessionId === undefined) continue
+      const prev = out.get(r.sessionId)
+      if (prev === undefined || r.at > prev) out.set(r.sessionId, r.at)
+    }
+    return out
+  }
+
   /** 更新既有记录（补发结果回写）；找不到回 undefined。 */
   mark(seq: number, patch: Partial<Pick<DeliveryRecord, 'status' | 'attempts' | 'error' | 'summary'>>): DeliveryRecord | undefined {
     const record = this.records.find((r) => r.seq === seq)

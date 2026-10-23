@@ -98,6 +98,8 @@ window.__ModuleLoader__.load({
         'accounts.remove.confirm': '确认删除',
         'accounts.state.connected': '已连接',
         'accounts.state.expired': '会话过期，需重新扫码',
+        'accounts.send.failed': '最近发送失败',
+        'rail.title': '频道', 'rail.search': '搜索会话', 'rail.loading': '加载中…', 'rail.empty': '暂无 IM 会话', 'rail.error': '加载失败，稍后重试', 'rail.detached': '已解绑', 'time.now': '刚刚', 'time.minutes': '{n} 分钟前', 'time.hours': '{n} 小时前', 'time.days': '{n} 天前',
         'accounts.state.disconnected': '未连接',
         'accounts.state.paused': '已暂停',
         'accounts.secret.missing': '凭据缺失：{keys}',
@@ -213,6 +215,8 @@ window.__ModuleLoader__.load({
         'accounts.remove.confirm': 'Confirm remove',
         'accounts.state.connected': 'Connected',
         'accounts.state.expired': 'Session expired — re-scan QR',
+        'accounts.send.failed': 'Last send failed',
+        'rail.title': 'Channels', 'rail.search': 'Search sessions', 'rail.loading': 'Loading…', 'rail.empty': 'No IM sessions yet', 'rail.error': 'Load failed — retrying', 'rail.detached': 'unbound', 'time.now': 'just now', 'time.minutes': '{n}m ago', 'time.hours': '{n}h ago', 'time.days': '{n}d ago',
         'accounts.state.disconnected': 'Disconnected',
         'accounts.state.paused': 'Paused',
         'accounts.secret.missing': 'Credential missing: {keys}',
@@ -275,13 +279,13 @@ window.__ModuleLoader__.load({
         'check.failed': 'failed',
         'check.unverified': 'unverified',
       },
-      ja: { 'settings.title': 'IM Union', 'accounts.title': 'アカウント', 'accounts.add': '追加', 'accounts.edit': '編集', 'accounts.save': '保存', 'modal.cancel': 'キャンセル', 'accounts.check': '接続確認', 'accounts.pause': '一時停止', 'accounts.resume': '再開', 'accounts.remove': '削除', 'accounts.state.connected': '接続済', 'accounts.state.expired': 'セッション失効・再スキャン', 'accounts.state.disconnected': '未接続', 'accounts.state.paused': '停止中', 'check.passed': '成功', 'check.failed': '失敗', 'check.unverified': '未検証', 'prefs.permission': '権限プリセット', 'prefs.permission.default': 'ホスト既定', 'exec.dm': 'DMコマンド実行', 'exec.group': 'グループコマンド実行', 'exec.on': '許可', 'exec.off': '遮断' },
-      ko: { 'settings.title': 'IM Union', 'accounts.title': '계정', 'accounts.add': '추가', 'accounts.edit': '편집', 'accounts.save': '저장', 'modal.cancel': '취소', 'accounts.check': '연결 확인', 'accounts.pause': '일시정지', 'accounts.resume': '재개', 'accounts.remove': '삭제', 'accounts.state.connected': '연결됨', 'accounts.state.expired': '세션 만료(재스캔 필요)', 'accounts.state.disconnected': '미연결', 'accounts.state.paused': '정지됨', 'check.passed': '통과', 'check.failed': '실패', 'check.unverified': '미검증', 'prefs.permission': '권한 프리셋', 'prefs.permission.default': '호스트 기본', 'exec.dm': 'DM 명령 실행', 'exec.group': '그룹 명령 실행', 'exec.on': '허용', 'exec.off': '차단' },
-      fr: { 'settings.title': 'IM Union', 'accounts.title': 'Comptes', 'accounts.add': 'Ajouter', 'accounts.edit': 'Modifier', 'accounts.save': 'Enregistrer', 'modal.cancel': 'Annuler', 'accounts.check': 'Vérifier', 'accounts.pause': 'Suspendre', 'accounts.resume': 'Reprendre', 'accounts.remove': 'Supprimer', 'accounts.state.connected': 'Connecté', 'accounts.state.expired': 'Session expirée — rescanner', 'accounts.state.disconnected': 'Déconnecté', 'accounts.state.paused': 'Suspendu', 'check.passed': 'réussi', 'check.failed': 'échoué', 'check.unverified': 'non vérifié', 'prefs.permission': 'Préréglage de permission', 'prefs.permission.default': 'Défaut hôte', 'exec.dm': 'Commandes en MP', 'exec.group': 'Commandes en groupe', 'exec.on': 'Autoriser', 'exec.off': 'Bloquer' },
-      de: { 'settings.title': 'IM Union', 'accounts.title': 'Konten', 'accounts.add': 'Hinzufügen', 'accounts.edit': 'Bearbeiten', 'accounts.save': 'Speichern', 'modal.cancel': 'Abbrechen', 'accounts.check': 'Verbindung prüfen', 'accounts.pause': 'Pausieren', 'accounts.resume': 'Fortsetzen', 'accounts.remove': 'Entfernen', 'accounts.state.connected': 'Verbunden', 'accounts.state.expired': 'Sitzung abgelaufen — neu scannen', 'accounts.state.disconnected': 'Getrennt', 'accounts.state.paused': 'Pausiert', 'check.passed': 'ok', 'check.failed': 'fehlgeschlagen', 'check.unverified': 'ungeprüft', 'prefs.permission': 'Berechtigungsprofil', 'prefs.permission.default': 'Host-Standard', 'exec.dm': 'DM-Befehle', 'exec.group': 'Gruppenbefehle', 'exec.on': 'Erlauben', 'exec.off': 'Blockieren' },
-      it: { 'settings.title': 'IM Union', 'accounts.title': 'Account', 'accounts.add': 'Aggiungi', 'accounts.edit': 'Modifica', 'accounts.save': 'Salva', 'modal.cancel': 'Annulla', 'accounts.check': 'Controlla', 'accounts.pause': 'Pausa', 'accounts.resume': 'Riprendi', 'accounts.remove': 'Rimuovi', 'accounts.state.connected': 'Connesso', 'accounts.state.expired': 'Sessione scaduta — riscansionare', 'accounts.state.disconnected': 'Disconnesso', 'accounts.state.paused': 'In pausa', 'check.passed': 'ok', 'check.failed': 'fallito', 'check.unverified': 'non verificato', 'prefs.permission': 'Preset permessi', 'prefs.permission.default': 'Predefinito host', 'exec.dm': 'Comandi in DM', 'exec.group': 'Comandi in gruppo', 'exec.on': 'Consenti', 'exec.off': 'Blocca' },
-      ru: { 'settings.title': 'IM Union', 'accounts.title': 'Аккаунты', 'accounts.add': 'Добавить', 'accounts.edit': 'Изменить', 'accounts.save': 'Сохранить', 'modal.cancel': 'Отмена', 'accounts.check': 'Проверить', 'accounts.pause': 'Пауза', 'accounts.resume': 'Возобновить', 'accounts.remove': 'Удалить', 'accounts.state.connected': 'Подключено', 'accounts.state.expired': 'Сессия истекла — пересканируйте', 'accounts.state.disconnected': 'Отключено', 'accounts.state.paused': 'Пауза', 'check.passed': 'успех', 'check.failed': 'ошибка', 'check.unverified': 'не проверено', 'prefs.permission': 'Пресет разрешений', 'prefs.permission.default': 'По умолчанию хоста', 'exec.dm': 'Команды в ЛС', 'exec.group': 'Команды в группе', 'exec.on': 'Разрешить', 'exec.off': 'Запретить' },
-      es: { 'settings.title': 'IM Union', 'accounts.title': 'Cuentas', 'accounts.add': 'Añadir', 'accounts.edit': 'Editar', 'accounts.save': 'Guardar', 'modal.cancel': 'Cancelar', 'accounts.check': 'Comprobar', 'accounts.pause': 'Pausar', 'accounts.resume': 'Reanudar', 'accounts.remove': 'Eliminar', 'accounts.state.connected': 'Conectado', 'accounts.state.expired': 'Sesión caducada — reescanear', 'accounts.state.disconnected': 'Desconectado', 'accounts.state.paused': 'Pausado', 'check.passed': 'correcto', 'check.failed': 'fallido', 'check.unverified': 'sin verificar', 'prefs.permission': 'Preajuste de permisos', 'prefs.permission.default': 'Predeterminado del host', 'exec.dm': 'Comandos por DM', 'exec.group': 'Comandos en grupo', 'exec.on': 'Permitir', 'exec.off': 'Bloquear' },
+      ja: { 'settings.title': 'IM Union', 'accounts.title': 'アカウント', 'accounts.add': '追加', 'accounts.edit': '編集', 'accounts.save': '保存', 'modal.cancel': 'キャンセル', 'accounts.check': '接続確認', 'accounts.pause': '一時停止', 'accounts.resume': '再開', 'accounts.remove': '削除', 'accounts.state.connected': '接続済', 'accounts.state.expired': 'セッション失効・再スキャン', 'accounts.send.failed': '最終送信失敗', 'rail.title': 'チャンネル', 'rail.search': 'セッション検索', 'rail.loading': '読み込み中…', 'rail.empty': 'IMセッションなし', 'rail.error': '読込失敗・再試行', 'rail.detached': '解除済み', 'time.now': 'たった今', 'time.minutes': '{n}分前', 'time.hours': '{n}時間前', 'time.days': '{n}日前', 'accounts.state.disconnected': '未接続', 'accounts.state.paused': '停止中', 'check.passed': '成功', 'check.failed': '失敗', 'check.unverified': '未検証', 'prefs.permission': '権限プリセット', 'prefs.permission.default': 'ホスト既定', 'exec.dm': 'DMコマンド実行', 'exec.group': 'グループコマンド実行', 'exec.on': '許可', 'exec.off': '遮断' },
+      ko: { 'settings.title': 'IM Union', 'accounts.title': '계정', 'accounts.add': '추가', 'accounts.edit': '편집', 'accounts.save': '저장', 'modal.cancel': '취소', 'accounts.check': '연결 확인', 'accounts.pause': '일시정지', 'accounts.resume': '재개', 'accounts.remove': '삭제', 'accounts.state.connected': '연결됨', 'accounts.state.expired': '세션 만료(재스캔 필요)', 'accounts.send.failed': '마지막 전송 실패', 'rail.title': '채널', 'rail.search': '세션 검색', 'rail.loading': '불러오는 중…', 'rail.empty': 'IM 세션 없음', 'rail.error': '로드 실패·재시도', 'rail.detached': '해제됨', 'time.now': '방금', 'time.minutes': '{n}분 전', 'time.hours': '{n}시간 전', 'time.days': '{n}일 전', 'accounts.state.disconnected': '미연결', 'accounts.state.paused': '정지됨', 'check.passed': '통과', 'check.failed': '실패', 'check.unverified': '미검증', 'prefs.permission': '권한 프리셋', 'prefs.permission.default': '호스트 기본', 'exec.dm': 'DM 명령 실행', 'exec.group': '그룹 명령 실행', 'exec.on': '허용', 'exec.off': '차단' },
+      fr: { 'settings.title': 'IM Union', 'accounts.title': 'Comptes', 'accounts.add': 'Ajouter', 'accounts.edit': 'Modifier', 'accounts.save': 'Enregistrer', 'modal.cancel': 'Annuler', 'accounts.check': 'Vérifier', 'accounts.pause': 'Suspendre', 'accounts.resume': 'Reprendre', 'accounts.remove': 'Supprimer', 'accounts.state.connected': 'Connecté', 'accounts.state.expired': 'Session expirée — rescanner', 'accounts.send.failed': 'Dernier envoi échoué', 'rail.title': 'Canaux', 'rail.search': 'Rechercher', 'rail.loading': 'Chargement…', 'rail.empty': 'Aucune session IM', 'rail.error': 'Échec — nouvelle tentative', 'rail.detached': 'délié', 'time.now': "à l'instant", 'time.minutes': 'il y a {n} min', 'time.hours': 'il y a {n} h', 'time.days': 'il y a {n} j', 'accounts.state.disconnected': 'Déconnecté', 'accounts.state.paused': 'Suspendu', 'check.passed': 'réussi', 'check.failed': 'échoué', 'check.unverified': 'non vérifié', 'prefs.permission': 'Préréglage de permission', 'prefs.permission.default': 'Défaut hôte', 'exec.dm': 'Commandes en MP', 'exec.group': 'Commandes en groupe', 'exec.on': 'Autoriser', 'exec.off': 'Bloquer' },
+      de: { 'settings.title': 'IM Union', 'accounts.title': 'Konten', 'accounts.add': 'Hinzufügen', 'accounts.edit': 'Bearbeiten', 'accounts.save': 'Speichern', 'modal.cancel': 'Abbrechen', 'accounts.check': 'Verbindung prüfen', 'accounts.pause': 'Pausieren', 'accounts.resume': 'Fortsetzen', 'accounts.remove': 'Entfernen', 'accounts.state.connected': 'Verbunden', 'accounts.state.expired': 'Sitzung abgelaufen — neu scannen', 'accounts.send.failed': 'Letzter Versand fehlgeschlagen', 'rail.title': 'Kanäle', 'rail.search': 'Sitzungen suchen', 'rail.loading': 'Lädt…', 'rail.empty': 'Keine IM-Sitzungen', 'rail.error': 'Fehlgeschlagen — erneut', 'rail.detached': 'gelöst', 'time.now': 'gerade eben', 'time.minutes': 'vor {n} Min.', 'time.hours': 'vor {n} Std.', 'time.days': 'vor {n} T.', 'accounts.state.disconnected': 'Getrennt', 'accounts.state.paused': 'Pausiert', 'check.passed': 'ok', 'check.failed': 'fehlgeschlagen', 'check.unverified': 'ungeprüft', 'prefs.permission': 'Berechtigungsprofil', 'prefs.permission.default': 'Host-Standard', 'exec.dm': 'DM-Befehle', 'exec.group': 'Gruppenbefehle', 'exec.on': 'Erlauben', 'exec.off': 'Blockieren' },
+      it: { 'settings.title': 'IM Union', 'accounts.title': 'Account', 'accounts.add': 'Aggiungi', 'accounts.edit': 'Modifica', 'accounts.save': 'Salva', 'modal.cancel': 'Annulla', 'accounts.check': 'Controlla', 'accounts.pause': 'Pausa', 'accounts.resume': 'Riprendi', 'accounts.remove': 'Rimuovi', 'accounts.state.connected': 'Connesso', 'accounts.state.expired': 'Sessione scaduta — riscansionare', 'accounts.send.failed': 'Ultimo invio fallito', 'rail.title': 'Canali', 'rail.search': 'Cerca sessioni', 'rail.loading': 'Caricamento…', 'rail.empty': 'Nessuna sessione IM', 'rail.error': 'Caricamento non riuscito', 'rail.detached': 'slegata', 'time.now': 'adesso', 'time.minutes': '{n} min fa', 'time.hours': '{n} h fa', 'time.days': '{n} g fa', 'accounts.state.disconnected': 'Disconnesso', 'accounts.state.paused': 'In pausa', 'check.passed': 'ok', 'check.failed': 'fallito', 'check.unverified': 'non verificato', 'prefs.permission': 'Preset permessi', 'prefs.permission.default': 'Predefinito host', 'exec.dm': 'Comandi in DM', 'exec.group': 'Comandi in gruppo', 'exec.on': 'Consenti', 'exec.off': 'Blocca' },
+      ru: { 'settings.title': 'IM Union', 'accounts.title': 'Аккаунты', 'accounts.add': 'Добавить', 'accounts.edit': 'Изменить', 'accounts.save': 'Сохранить', 'modal.cancel': 'Отмена', 'accounts.check': 'Проверить', 'accounts.pause': 'Пауза', 'accounts.resume': 'Возобновить', 'accounts.remove': 'Удалить', 'accounts.state.connected': 'Подключено', 'accounts.state.expired': 'Сессия истекла — пересканируйте', 'accounts.send.failed': 'Последняя отправка не удалась', 'rail.title': 'Каналы', 'rail.search': 'Поиск сеансов', 'rail.loading': 'Загрузка…', 'rail.empty': 'Нет IM-сеансов', 'rail.error': 'Сбой — повтор', 'rail.detached': 'отвязан', 'time.now': 'только что', 'time.minutes': '{n} мин назад', 'time.hours': '{n} ч назад', 'time.days': '{n} дн назад', 'accounts.state.disconnected': 'Отключено', 'accounts.state.paused': 'Пауза', 'check.passed': 'успех', 'check.failed': 'ошибка', 'check.unverified': 'не проверено', 'prefs.permission': 'Пресет разрешений', 'prefs.permission.default': 'По умолчанию хоста', 'exec.dm': 'Команды в ЛС', 'exec.group': 'Команды в группе', 'exec.on': 'Разрешить', 'exec.off': 'Запретить' },
+      es: { 'settings.title': 'IM Union', 'accounts.title': 'Cuentas', 'accounts.add': 'Añadir', 'accounts.edit': 'Editar', 'accounts.save': 'Guardar', 'modal.cancel': 'Cancelar', 'accounts.check': 'Comprobar', 'accounts.pause': 'Pausar', 'accounts.resume': 'Reanudar', 'accounts.remove': 'Eliminar', 'accounts.state.connected': 'Conectado', 'accounts.state.expired': 'Sesión caducada — reescanear', 'accounts.send.failed': 'Último envío fallido', 'rail.title': 'Canales', 'rail.search': 'Buscar sesiones', 'rail.loading': 'Cargando…', 'rail.empty': 'Sin sesiones IM', 'rail.error': 'Error — reintentando', 'rail.detached': 'desvinculada', 'time.now': 'ahora mismo', 'time.minutes': 'hace {n} min', 'time.hours': 'hace {n} h', 'time.days': 'hace {n} d', 'accounts.state.disconnected': 'Desconectado', 'accounts.state.paused': 'Pausado', 'check.passed': 'correcto', 'check.failed': 'fallido', 'check.unverified': 'sin verificar', 'prefs.permission': 'Preajuste de permisos', 'prefs.permission.default': 'Predeterminado del host', 'exec.dm': 'Comandos por DM', 'exec.group': 'Comandos en grupo', 'exec.on': 'Permitir', 'exec.off': 'Bloquear' },
     };
 
     // UI 语言：**取词时懒解析**，不在 factory 顶层冻结。真机实证：宿主初始 HTML
@@ -706,9 +710,11 @@ select.diu-input { appearance: auto; }
         ? h(Tag, { tone: 'Muted' }, t('accounts.state.paused'))
         : row.sessionExpired === true
           ? h(Tag, { tone: 'Bad' }, t('accounts.state.expired'))
-          : row.connected
-            ? h(Tag, { tone: 'Ok' }, t('accounts.state.connected'))
-            : h(Tag, { tone: 'Warn' }, t('accounts.state.disconnected'));
+          : row.lastSendOk === false
+            ? h(Tag, { tone: 'Bad' }, t('accounts.send.failed'))
+            : row.connected
+              ? h(Tag, { tone: 'Ok' }, t('accounts.state.connected'))
+              : h(Tag, { tone: 'Warn' }, t('accounts.state.disconnected'));
       var allowValue = allowDraft !== null ? allowDraft : (row.dmAllowlist || []).join('\n');
       // 会话偏好摘要（可发现性）：有值才显示，避免「新设置藏在弹窗里」。
       var session0 = row.session || {};
@@ -1635,9 +1641,192 @@ select.diu-input { appearance: auto; }
       }
     }
 
-    var inject = ['slots', 'locale'];
+
+    // ── 渠道视角（0.4.0）：/channels 轮询 + 渠道 rail + 原生页签插入 ────────
+    // 参考 dsh-im-connect ChannelRail/sync 形态。挂载降级链：①原生 tab registry
+    // （宿主自带或 im-connect 壳的 __dshNativeTabs）插 channels 页签 → ②独立
+    // sidebar.channels 槽 → ③仅日志（会话管理仍有 /sessions 命令面）。老线不 crash。
+    function relativeTime(ts) {
+      if (typeof ts !== 'number' || !(ts > 0)) return '';
+      var delta = Date.now() - ts;
+      if (delta < 60 * 1000) return t('time.now');
+      if (delta < 60 * 60 * 1000) return t('time.minutes').replace('{n}', String(Math.floor(delta / 60000)));
+      if (delta < 24 * 60 * 60 * 1000) return t('time.hours').replace('{n}', String(Math.floor(delta / 3600000)));
+      return t('time.days').replace('{n}', String(Math.floor(delta / 86400000)));
+    }
+
+    var railState = { groups: [], loaded: false, error: false };
+    var railListeners = new Set();
+    var railFailures = 0;
+    var railTimer = null;
+    function railNotify() { railListeners.forEach(function (fn) { try { fn(); } catch (_) {} }); }
+    function railSetState(patch) {
+      var changed = false;
+      for (var key in patch) { if (railState[key] !== patch[key]) { railState[key] = patch[key]; changed = true; } }
+      if (changed) railNotify();
+    }
+    function railTick() {
+      if (document.hidden) return;
+      getJSON('/channels').then(function (result) {
+        railFailures = 0;
+        railSetState({ groups: (result.json && result.json.groups) || [], loaded: true, error: false });
+      }).catch(function () {
+        railFailures += 1;
+        if (railFailures >= 2) railSetState({ error: true });
+      });
+    }
+    function startRailPolling() {
+      if (railTimer !== null) return;
+      var delay = Math.min(4000 * Math.pow(2, railFailures), 60000);
+      railTimer = setTimeout(function () { railTimer = null; railTick(); startRailPolling(); }, delay);
+    }
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) { railFailures = 0; if (railTimer !== null) { clearTimeout(railTimer); railTimer = null; } railTick(); startRailPolling(); }
+    });
+
+    function openUnionSession(ctx, id) {
+      try {
+        if (typeof window.__dshSessionsOpen === 'function') { window.__dshSessionsOpen(id); return; }
+        if (ctx && ctx.uiWorkspace && typeof ctx.uiWorkspace.openSession === 'function') { ctx.uiWorkspace.openSession(id); return; }
+        if (ctx && ctx.sessions && typeof ctx.sessions.open === 'function') { ctx.sessions.open(id); return; }
+        location.hash = '#/session/' + encodeURIComponent(id);
+      } catch (error) { console.warn('[dsh-im-union] \u6253\u5f00\u4f1a\u8bdd\u5931\u8d25\uff1a', error); }
+    }
+
+    function ensureRailStyles() {
+      if (document.getElementById('diu-rail-style')) return;
+      var style = document.createElement('style');
+      style.id = 'diu-rail-style';
+      style.textContent =
+        '.diu-rail{display:flex;flex-direction:column;gap:6px;padding:8px;height:100%;overflow-y:auto;box-sizing:border-box}' +
+        '.diu-rail-search{width:100%;box-sizing:border-box;padding:6px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-primary,#222);outline:none;font-size:12px}' +
+        '.diu-rail-group-head{display:flex;justify-content:space-between;align-items:center;padding:4px 2px;font-size:11px;color:var(--dsw-alias-label-secondary,#888)}' +
+        '.diu-rail-row{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--dsw-alias-label-primary,#222)}' +
+        '.diu-rail-row:hover{background:var(--dsw-alias-interactive-bg-hover,#f2f2f2)}' +
+        '.diu-rail-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-border-l4,#ccc);flex:none}' +
+        '.diu-rail-dot.on{background:var(--dsw-alias-state-success,#22a06b)}' +
+        '.diu-rail-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+        '.diu-rail-time{font-size:11px;color:var(--dsw-alias-label-tertiary,#aaa);flex:none}' +
+        '.diu-rail-empty{padding:14px 8px;font-size:12px;color:var(--dsw-alias-label-secondary,#888);text-align:center}';
+      document.head.appendChild(style);
+    }
+
+    function ChannelRow(props) {
+      var s = props.session;
+      var chatId = String(s.sessionId).split(':').slice(4).join(':');
+      var label = s.title || chatId || s.sessionId;
+      return h('div', {
+        className: 'diu-rail-row',
+        onClick: function () { props.onOpen(s.sessionId); },
+      },
+        h('span', { className: 'diu-rail-dot' + (s.running ? ' on' : '') }),
+        h('span', { className: 'diu-rail-label' }, label),
+        h('span', { className: 'diu-rail-time' }, s.detached ? t('rail.detached') : relativeTime(s.lastOutAt)),
+      );
+    }
+
+    function ChannelRail(props) {
+      var searchHook = useState('');
+      var needle = searchHook[0].toLowerCase();
+      var setNeedle = searchHook[1];
+      var revHook = useState(0);
+      var bump = revHook[1];
+      var useEffect = React.useEffect;
+      useEffect(function () {
+        var fn = function () { bump(function (n) { return n + 1; }); };
+        railListeners.add(fn);
+        startRailPolling();
+        return function () { railListeners.delete(fn); };
+      }, []);
+      ensureRailStyles();
+      var groups = railState.groups;
+      var sections = [];
+      groups.forEach(function (group) {
+        var sessions = (group.sessions || []).filter(function (s) {
+          if (!needle) return true;
+          return ((s.title || '') + ' ' + String(s.sessionId)).toLowerCase().indexOf(needle) >= 0;
+        });
+        if (sessions.length === 0) return;
+        sessions = sessions.slice().sort(function (a, b) { return (b.lastOutAt || 0) - (a.lastOutAt || 0); });
+        sections.push(h('div', { className: 'diu-rail-group', key: group.channel },
+          h('div', { className: 'diu-rail-group-head' },
+            h('span', { className: 'diu-rail-group-name' }, group.channel),
+            h('span', { className: 'diu-rail-count' }, String(sessions.length))),
+          sessions.map(function (s) { return h(ChannelRow, { key: s.sessionId, session: s, onOpen: props.onOpen }); })
+        ));
+      });
+      var body;
+      if (!railState.loaded && sections.length === 0) body = h('div', { className: 'diu-rail-empty' }, t('rail.loading'));
+      else if (sections.length === 0) body = h('div', { className: 'diu-rail-empty' }, t('rail.empty'));
+      else body = sections;
+      return h('div', { className: 'diu-rail' },
+        h('input', {
+          className: 'diu-rail-search', placeholder: t('rail.search'), value: searchHook[0],
+          onInput: function (e) { setNeedle(e.target.value); },
+        }),
+        body,
+        railState.error ? h('div', { className: 'diu-rail-empty' }, t('rail.error')) : null,
+      );
+    }
+
+    function mountChannelRail(ctx) {
+      var renderRail = function (hostProps) {
+        return h(ChannelRail, {
+          onOpen: function (id) {
+            if (hostProps && typeof hostProps.openSession === 'function') hostProps.openSession(id);
+            else openUnionSession(ctx, id);
+          },
+        });
+      };
+      var inserted = false;
+      // ① 原生 tab registry（宿主自带，或 dsh-im-connect 壳挂在 occupant 上）：
+      //    直接插 channels 页签，与会话树同层出现（order 排后不抢位）。
+      try {
+        var read = ctx.slots.entriesOfSlot || ctx.slots.entries;
+        var entries = (read && read.call(ctx.slots, 'sidebar.workspaces')) || [];
+        for (var i = 0; i < entries.length; i++) {
+          var entry = entries[i];
+          var registry = (entry && entry.__dshNativeTabs) || (entry && entry.component && entry.component.__dshNativeTabs) || null;
+          if (registry && typeof registry.insert === 'function') {
+            registry.insert({
+              id: 'im-union-channels',
+              label: t('rail.title'),
+              order: 25,
+              matchSession: function (id) { return String(id).indexOf('im:union:') === 0; },
+              render: function (props) { return renderRail(props); },
+            });
+            inserted = true;
+            console.info('[dsh-im-union] \u6e20\u9053\u9875\u7b7e\u5df2\u63d2\u5165\u539f\u751f tab registry');
+            break;
+          }
+        }
+      } catch (error) { console.info('[dsh-im-union] \u539f\u751f\u9875\u7b7e\u63a2\u6d4b\u4e0d\u53ef\u7528\uff1a', error && error.message); }
+      // ② 独立 sidebar.channels 槽（宿主提供即用；SlotOwnershipError 等按不可用处理）。
+      if (!inserted) {
+        try {
+          if (typeof ctx.slots.inject === 'function' && typeof ctx.slots.register === 'function') {
+            ctx.slots.inject('sidebar.channels', function () {
+              return ctx.slots.register({
+                name: 'sidebar.channels',
+                id: 'im-union-channels',
+                inject: function () {
+                  return { openSession: function (id) { openUnionSession(ctx, id); } };
+                },
+              }, function () { return renderRail(null); });
+            });
+            inserted = true;
+            console.info('[dsh-im-union] \u6e20\u9053\u89c6\u89d2\u8d70 sidebar.channels \u72ec\u7acb\u69fd');
+          }
+        } catch (error) { console.info('[dsh-im-union] sidebar.channels \u69fd\u4e0d\u53ef\u7528\uff1a', error && error.message); }
+      }
+      if (!inserted) console.info('[dsh-im-union] \u6e20\u9053\u89c6\u89d2\u65e0\u53ef\u7528\u6302\u70b9\uff08\u672c\u7248\u5230\u6b64\u4e3a\u6b62\uff1b/sessions \u547d\u4ee4\u9762\u4ecd\u53ef\u7ba1\u7406\u4f1a\u8bdd\uff09');
+      startRailPolling();
+    }
+
+    var inject = ['slots', 'locale', 'sessions', 'workspaces'];
 
     function apply(ctx) {
+      try { mountChannelRail(ctx); } catch (error) { console.warn('[dsh-im-union] 渠道视角挂载失败：', error); }
       console.info('[dsh-im-union] apply invoked, slots:', typeof ctx && ctx.slots ? Object.keys(ctx.slots).join(',') : 'none')
       installStyles();
       // apply 期顶层注册——不许关进任何回调。

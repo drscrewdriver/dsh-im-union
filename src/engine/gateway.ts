@@ -168,6 +168,8 @@ export class ImUnionEngine {
   private rejectionNotices = new Set<string>()
   /** chatKey → 最近一次 createSession 失败原因（runTurn 报错时关联根因，成功即清）。 */
   private lastEnsureFailure = new Map<string, string>()
+  /** chatKey → /sessions 最近所见列表（/session <序号> 的 15 分钟取用缓存，≤256 条）。 */
+  private readonly sessionChoices = new Map<string, { ids: string[]; at: number }>()
   /** 相对 cwd 偏好已告警过的 account+cwd（只告警一次防刷屏）。 */
   private relativeCwdWarned = new Set<string>()
   /** 投递 seq → 原文全文（/delivery retry 补发用；重启即清，摘要在盘）。 */
@@ -350,7 +352,7 @@ export class ImUnionEngine {
       // 命令在静音判定之前：静音期必须还能 /mute 解除（否则永久静默）。
       // resolve 对未绑定聊天登记的隐式绑定与 runTurn 惰性解析同值，无额外副作用。
       const sessionId = this.deps.router.resolve(message.address).sessionId
-      const reply = await runCommand(this.commandDeps(), message.address, sessionId, command)
+      const reply = await runCommand(this.commandDeps(accountId), message.address, sessionId, command)
       if (reply !== '') await adapter.reply(message.address, reply)
       return
     }
@@ -386,7 +388,7 @@ export class ImUnionEngine {
     }
   }
 
-  private commandDeps(): CommandDeps {
+  private commandDeps(accountId: string): CommandDeps {
     return {
       sessionApi: this.deps.sessionApi,
       router: this.deps.router,
@@ -427,7 +429,30 @@ export class ImUnionEngine {
         }
         return '当前渠道不支持语音输出（或未开启语音档）。'
       },
+      // /new 轮换（0.4.0）：确定性 id 下解绑重建=同会话（desktop 实证 /new 无效），
+      // 轮换带 13 位毫秒纪元并转历史；busy 守卫用回合队列的 running 位。
+      rotateSession: (address) => this.rotateSessionFor(address, accountId),
+      isChatBusy: (address) => this.turns.get(`${address.channel}:${address.chatId}`)?.running === true,
+      sessionChoices: this.sessionChoices,
     }
+  }
+
+  /**
+   * /new 轮换执行面：先建新会话（与入站 ensure 同源偏好链），宿主可能改派 id，
+   * 以返回为准；创建失败（lastEnsureFailure 在位——ensure 成功即清）保持旧绑定并抛错。
+   */
+  private async rotateSessionFor(address: ChatAddress, accountId: string): Promise<string> {
+    const key = chatKey(address)
+    this.lastEnsureFailure.delete(key)
+    const oldSessionId = this.deps.router.resolve(address).sessionId
+    const hint = this.deps.router.makeRotatedSessionId(address)
+    const created = await this.ensureSessionId(address, { sessionId: hint, explicit: false }, accountId)
+    if (this.lastEnsureFailure.has(key)) {
+      throw new Error(this.lastEnsureFailure.get(key) ?? '会话创建失败')
+    }
+    this.deps.router.rotate(address, created, oldSessionId)
+    this.log.info(`会话轮换：${oldSessionId} → ${created}（旧会话转入历史）`)
+    return created
   }
 
   /**

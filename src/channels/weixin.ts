@@ -38,6 +38,8 @@
  * 运行时依赖零：Node≥22 全局 fetch + node:crypto；测试注入 fetchImpl。
  */
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, createHash } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { ChatAddress } from '../engine/router.js'
 import type {
   ChannelAdapter,
@@ -80,11 +82,17 @@ export class WeixinUncertainError extends Error {}
 
 export interface WeixinAdapterOptions {
   botToken: string
+  accountId?: string
   apiBase?: string
   cdnBase?: string
   channelVersion?: string
   fetchImpl?: FetchLike
   logger?: (msg: string) => void
+  /** 游标持久化文件（0.4.0）：getupdates 游标滚动即落盘、connect 恢复——重启不再
+   *  空游标重放旧消息窗（dsh-im setGetUpdatesBuf 同款；缺省=内存游标，仅测试用）。 */
+  cursorFile?: string
+  /** 账号状态目录：与 accountId 共同推导 cursorFile（工厂直传态）。 */
+  stateDir?: string
 }
 
 /** 业务响应判错：ret 或 errcode 非零即失败；-14 会话过期单独标记。 */
@@ -147,11 +155,14 @@ export class WeixinAdapter implements ChannelAdapter {
   private readonly channelVersion: string
   private readonly fetchImpl: FetchLike
   private readonly log: (msg: string) => void
+  /** 最近一次出站发送结果（设置卡「最近发送」诊断位；不含内容）。 */
+  lastSend?: { at: number; ok: boolean }
 
   private listeners: MessageListener[] = []
   private pollController: AbortController | undefined
-  /** 长轮询游标（非空才滚动，协议事实）。 */
+  /** 长轮询游标（非空才滚动，协议事实）；有 cursorFile 时滚动即落盘、构造恢复。 */
   private updatesBuf = ''
+  private readonly cursorFile?: string
   private longpollTimeoutMs = LONGPOLL_TIMEOUT_MS
   /** user → 最近入站 context_token（回复必回传；24h 服务端过期）。 */
   private readonly contextTokens = new Map<string, string>()
@@ -169,6 +180,30 @@ export class WeixinAdapter implements ChannelAdapter {
     this.channelVersion = options.channelVersion ?? '0.0.1'
     this.fetchImpl = options.fetchImpl ?? ((globalThis as { fetch?: FetchLike }).fetch as FetchLike)
     this.log = options.logger ?? (() => {})
+    this.cursorFile =
+      typeof options.cursorFile === 'string' && options.cursorFile !== ''
+        ? options.cursorFile
+        : options.stateDir !== undefined && options.stateDir !== '' && typeof options.accountId === 'string' && options.accountId !== ''
+          ? join(options.stateDir, `weixin-cursor-${options.accountId.replace(/[^A-Za-z0-9_.-]+/g, '_')}.json`)
+          : undefined
+    if (this.cursorFile !== undefined) {
+      try {
+        const parsed = JSON.parse(readFileSync(this.cursorFile, 'utf8')) as { updatesBuf?: unknown }
+        if (typeof parsed.updatesBuf === 'string') this.updatesBuf = parsed.updatesBuf
+      } catch {
+        // 首次运行无文件/损坏文件：从空游标开始（服务端重放窗口可接受一次）。
+      }
+    }
+  }
+
+  /** 游标落盘（滚动时调用；失败只记日志，游标本体仍在内存有效）。 */
+  private persistCursor(): void {
+    if (this.cursorFile === undefined) return
+    try {
+      writeFileSync(this.cursorFile, JSON.stringify({ updatesBuf: this.updatesBuf }), 'utf8')
+    } catch (error) {
+      this.log(`weixin: 游标落盘失败（内存游标继续有效）: ${(error as Error).message}`)
+    }
   }
 
   get connectionState(): boolean {
@@ -230,9 +265,10 @@ export class WeixinAdapter implements ChannelAdapter {
         if (typeof json.longpolling_timeout_ms === 'number' && json.longpolling_timeout_ms > 0) {
           this.longpollTimeoutMs = json.longpolling_timeout_ms
         }
-        // 游标非空才滚动（协议事实：空回传会重复收旧消息）。
+        // 游标非空才滚动（协议事实：空回传会重复收旧消息）；滚动即落盘（重启续读）。
         if (typeof json.get_updates_buf === 'string' && json.get_updates_buf !== '') {
           this.updatesBuf = json.get_updates_buf
+          this.persistCursor()
         }
         const msgs = Array.isArray(json.msgs) ? json.msgs : []
         for (const msg of msgs) {
@@ -342,6 +378,30 @@ export class WeixinAdapter implements ChannelAdapter {
 
   private async sendItems(address: ChatAddress, itemList: Array<Record<string, unknown>>, signal?: AbortSignal): Promise<Receipt> {
     const contextToken = this.contextTokens.get(address.chatId)
+    const json = await this.postSend(address, itemList, contextToken, signal)
+    let check = bizCheck(json)
+    if (!check.ok && check.error.code !== -14) {
+      // token/context 类确定性失败（非 -14 全会话过期）：若有更新的入站 token，
+      // 换新 token 单次重发——被拒发送不存在重复投递，不违反 D7（不确定不重发）。
+      const fresh = this.contextTokens.get(address.chatId)
+      if (fresh !== undefined && fresh !== contextToken) {
+        this.log(`weixin: sendmessage 被拒（code ${check.error.code}），换最近入站 token 重发一次`)
+        const retry = await this.postSend(address, itemList, fresh, signal)
+        check = bizCheck(retry)
+      }
+    }
+    this.lastSend = { at: Date.now(), ok: check.ok }
+    if (!check.ok) throw check.error
+    this.log(`weixin: sendmessage 受理（${address.chatId}，${itemList.length} 项，ret=0）`)
+    return { uncertain: false }
+  }
+
+  private async postSend(
+    address: ChatAddress,
+    itemList: Array<Record<string, unknown>>,
+    contextToken: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<Record<string, any>> {
     const body: Record<string, unknown> = {
       msg: {
         from_user_id: '',
@@ -354,10 +414,7 @@ export class WeixinAdapter implements ChannelAdapter {
       },
     }
     if (contextToken === undefined) this.log('weixin: 缺少 context_token，服务端可能拒投（不能主动发起会话）')
-    const json = await this.post('/ilink/bot/sendmessage', body, { auth: true, signal })
-    const check = bizCheck(json)
-    if (!check.ok) throw check.error
-    return { uncertain: false }
+    return this.post('/ilink/bot/sendmessage', body, { auth: true, signal })
   }
 
   /** CDN 上传链路（协议 7 步；成功=HTTP 200 且 x-encrypted-param 非空，≤3 次）。 */
@@ -539,10 +596,15 @@ export function createWeixinAdapter(options: {
   accountId: string
   config: Record<string, string>
   secrets: Record<string, string | undefined>
+  logger?: (msg: string) => void
+  stateDir?: string
 }): WeixinAdapter {
   return new WeixinAdapter({
     botToken: options.secrets.botToken ?? '',
+    accountId: options.accountId,
     ...(options.config.apiBase !== undefined ? { apiBase: options.config.apiBase } : {}),
     ...(options.config.cdnBase !== undefined ? { cdnBase: options.config.cdnBase } : {}),
+    ...(options.logger !== undefined ? { logger: options.logger } : {}),
+    ...(options.stateDir !== undefined && options.stateDir !== '' ? { stateDir: options.stateDir } : {}),
   })
 }

@@ -323,3 +323,67 @@ test('传输失败后退避重试不退轮（desktop 实证：静默 return 使�
   assert.ok(seen.length >= 1, '失败一轮后下一轮消息照常入站（不永久失聪）')
   await adapter.disconnect()
 })
+
+// —— 0.4.0 发送链路加固：游标持久化 + 应答可观测 + token 失效单次重发 ———
+
+test('游标持久化：connect 恢复盘上游标；滚动即落盘（重启不空游标重放）', async () => {
+  const { mkdtempSync, writeFileSync, readFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'wxcursor-'))
+  const cursorFile = join(dir, 'cursor.json')
+  writeFileSync(cursorFile, JSON.stringify({ updatesBuf: 'BUF-1' }), 'utf8')
+  const { adapter, fetch } = makeAdapter((url) => {
+    if (url.endsWith('/getupdates')) return okJson({ ret: 0, msgs: [], get_updates_buf: 'BUF-2' })
+    return okJson({ ret: 0 })
+  }, { cursorFile })
+  await adapter.connect()
+  await new Promise((r) => setTimeout(r, 60))
+  const firstPoll = fetch.calls.find((c) => c.url.endsWith('/getupdates'))
+  assert.equal(firstPoll.body.get_updates_buf, 'BUF-1', 'connect 首条轮询带盘上游标')
+  assert.equal(JSON.parse(readFileSync(cursorFile, 'utf8')).updatesBuf, 'BUF-2', '滚动即落盘')
+  await adapter.disconnect()
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('发送加固：被拒后换最近入站 token 单次重发（确定性失败非 D7）', async () => {
+  let sends = 0
+  const { adapter, fetch } = makeAdapter(async (url) => {
+    if (url.endsWith('/sendmessage')) {
+      sends += 1
+      if (sends === 1) {
+        await adapter.fillMedia({ message_type: 1, from_user_id: dm.chatId, context_token: 'CTX-2', item_list: [] })
+        return okJson({ ret: 4200, errmsg: 'context expired' })
+      }
+      return okJson({ ret: 0 })
+    }
+    return okJson({ ret: 0, msgs: [] })
+  })
+  await adapter.connect()
+  await adapter.fillMedia({ message_type: 1, from_user_id: dm.chatId, context_token: 'CTX-1', item_list: [] })
+  const receipt = await adapter.reply(dm, '内容')
+  assert.equal(receipt.uncertain, false)
+  const sendCalls = fetch.calls.filter((c) => c.url.endsWith('/sendmessage'))
+  assert.equal(sendCalls.length, 2, '被拒后恰好重发一次')
+  assert.equal(sendCalls[0].body.msg.context_token, 'CTX-1')
+  assert.equal(sendCalls[1].body.msg.context_token, 'CTX-2', '重发携带最近入站 token')
+  assert.equal(adapter.lastSend.ok, true, '成功诊断位')
+  await adapter.disconnect()
+})
+
+test('发送加固：token 无更新不重发，如实抛错并落失败位', async () => {
+  let sends = 0
+  const { adapter } = makeAdapter((url) => {
+    if (url.endsWith('/sendmessage')) {
+      sends += 1
+      return okJson({ ret: 4200, errmsg: 'context expired' })
+    }
+    return okJson({ ret: 0, msgs: [] })
+  })
+  await adapter.connect()
+  await adapter.fillMedia({ message_type: 1, from_user_id: dm.chatId, context_token: 'CTX-1', item_list: [] })
+  await assert.rejects(adapter.reply(dm, 'x'), WeixinApiError)
+  assert.equal(sends, 1, '无新 token 不重发（避免无意义重试）')
+  assert.equal(adapter.lastSend.ok, false, '失败诊断位')
+  await adapter.disconnect()
+})

@@ -41,6 +41,13 @@ export interface CommandDeps {
   goals: Map<string, string>
   /** /speak：语音回本聊天（T3.5 飞书语音档）；缺位=降级文案。 */
   speakText?: (address: ChatAddress, text: string) => Promise<string>
+  /** /new 轮换（gateway 注入）：创建新会话成功才换绑并转历史，返回新会话 id；失败抛错
+   *  且旧绑定保持可用。缺位=降级旧行为（仅解绑）。 */
+  rotateSession?: (address: ChatAddress) => Promise<string>
+  /** /new 空闲守卫：本聊天回合运行中返回 true（运行中禁止轮换）。 */
+  isChatBusy?: (address: ChatAddress) => boolean
+  /** /sessions → /session <序号> 的选择缓存（引擎态；chatKey → 最近列表 + 时间）。 */
+  sessionChoices?: Map<string, { ids: string[]; at: number }>
 }
 
 export interface ParsedCommand {
@@ -52,7 +59,7 @@ const COMMAND_TABLE: Array<{ name: string; usage: string; desc: string }> = [
   { name: 'help', usage: '/help', desc: '命令列表' },
   { name: 'menu', usage: '/menu', desc: '同 /help（按钮渠道会渲染菜单）' },
   { name: 'status', usage: '/status', desc: '连接与能力状态' },
-  { name: 'new', usage: '/new', desc: '重开会话（解除绑定）' },
+  { name: 'new', usage: '/new', desc: '轮换新会话（旧会话保留可找回）' },
   { name: 'stop', usage: '/stop', desc: '停止当前任务' },
   { name: 'steer', usage: '/steer <文本>', desc: '向运行中的任务插话' },
   { name: 'models', usage: '/models', desc: '列出可用模型' },
@@ -110,6 +117,34 @@ function renderCatalog(catalog: ModelCatalogLike): string {
   return lines.length > 0 ? lines.join('\n') : '模型目录为空（宿主通道未加载）。'
 }
 
+/** /sessions 分页与序号缓存参数（dsh-im-connect 同款量级：每页 10、缓存 256 条 15 分钟）。 */
+const SESSIONS_PAGE_SIZE = 10
+const CHOICES_TTL_MS = 15 * 60 * 1000
+const CHOICES_CAP = 256
+
+/** 缓存本聊天最近一次 /sessions 列表（/session <序号> 的取用口径与所见一致）。 */
+function cacheChoices(deps: CommandDeps, address: ChatAddress, ids: string[]): void {
+  const map = deps.sessionChoices
+  if (map === undefined) return
+  const now = Date.now()
+  for (const [key, entry] of map) {
+    if (now - entry.at > CHOICES_TTL_MS) map.delete(key)
+  }
+  while (map.size >= CHOICES_CAP) {
+    let oldestKey: string | undefined
+    let oldestAt = Number.POSITIVE_INFINITY
+    for (const [key, entry] of map) {
+      if (entry.at < oldestAt) {
+        oldestAt = entry.at
+        oldestKey = key
+      }
+    }
+    if (oldestKey === undefined) break
+    map.delete(oldestKey)
+  }
+  map.set(chatKey(address), { ids, at: now })
+}
+
 /** 执行命令并返回要回复的文本；返回空串表示无需回复。 */
 export async function runCommand(
   deps: CommandDeps,
@@ -130,9 +165,23 @@ export async function runCommand(
         `凭据: ${deps.vaultKind === 'service' ? '宿主凭据库' : '文件 vault'}`,
         `渠道: ${address.channel}（会话 ${shortId(sessionId)}）`,
       ].join('\n')
-    case 'new':
-      router.unbind(address)
-      return '已解除会话绑定，下一条消息将开启新会话。'
+    case 'new': {
+      if (deps.rotateSession === undefined) {
+        // 降级：无轮换面（engine 未注入）保持旧行为——但确定性 id 下「解绑重建」=同会话，
+        // 用户感知 /new 无效（desktop 实证），故优先保证注入面在位。
+        router.unbind(address)
+        return '已解除会话绑定，下一条消息将开启新会话。'
+      }
+      if (deps.isChatBusy?.(address) === true) {
+        return '当前任务还在运行，请先 /stop 再 /new。'
+      }
+      try {
+        const next = await deps.rotateSession(address)
+        return `已开启新会话（${shortId(next)}）。旧会话已保留，/sessions 可查看。`
+      } catch (error) {
+        return `新会话创建失败，原会话保持可用：${error instanceof Error ? error.message : String(error)}`
+      }
+    }
     case 'stop':
       try {
         await sessionApi.cancel(sessionId)
@@ -198,22 +247,49 @@ export async function runCommand(
       return result.ok ? `已切换预设：${command.arg}` : (result.message ?? '预设切换失败。')
     }
     case 'sessions': {
+      // 过滤口径（用户裁定）：默认只列本插件会话（im:union: 前缀）防未归档会话刷屏；
+      // `all` 才展开宿主全量。两口径都分页标注。
+      const all = command.arg === 'all' || /^all\s+\d+$/.test(command.arg)
+      const pageMatch = /(\d+)\s*$/.exec(command.arg)
+      const requestedPage = pageMatch !== null ? Math.max(1, Number(pageMatch[1])) : 1
       const sessions = await sessionApi.listSessions()
-      if (sessions.length === 0) return '未读到会话列表。'
-      const lines = sessions.slice(0, 10).map((s: SessionInfo, i: number) => {
-        const marks = [s.id === sessionId ? '←当前' : '', s.running === true ? '[运行中]' : ''].filter(Boolean).join('')
-        return `${i + 1}. ${shortId(s.id)}${s.title !== undefined ? ` ${s.title}` : ''}${marks !== '' ? ` ${marks}` : ''}`
+      const scoped = all ? sessions : sessions.filter((s) => s.id.startsWith('im:union:'))
+      if (scoped.length === 0) {
+        return all ? '宿主没有可列会话。' : '本插件名下暂无会话（/sessions all 查看宿主全部）。'
+      }
+      const pages = Math.ceil(scoped.length / SESSIONS_PAGE_SIZE)
+      const page = Math.min(requestedPage, pages)
+      const offset = (page - 1) * SESSIONS_PAGE_SIZE
+      const slice = scoped.slice(offset, offset + SESSIONS_PAGE_SIZE)
+      cacheChoices(deps, address, scoped.map((s) => s.id))
+      const lines = slice.map((s: SessionInfo, i: number) => {
+        const marks = [
+          s.id === sessionId ? '←当前' : '',
+          s.running === true ? '[运行中]' : '',
+          router.isHistorical(s.id) ? '[已解绑]' : '',
+        ].filter(Boolean).join('')
+        return `${offset + i + 1}. ${shortId(s.id)}${s.title !== undefined ? ` ${s.title}` : ''}${marks !== '' ? ` ${marks}` : ''}`
       })
-      return ['近期会话（/session <序号|id 片段> 绑定）：', ...lines].join('\n')
+      const head = all ? '宿主会话' : '本插件会话'
+      const foot = pages > 1 ? `（第 ${page}/${pages} 页，/sessions${all ? ' all' : ''} ${Math.min(page + 1, pages)} 翻页）` : ''
+      return [`${head}（/session <序号|id 片段> 绑定）：`, ...lines, foot].filter((l) => l !== '').join('\n')
     }
     case 'session': {
       if (command.arg === '') return '用法：/session <序号|id 片段>（/sessions 查看列表）'
-      const sessions = await sessionApi.listSessions()
       const numeric = /^(\d+)$/.exec(command.arg)
       let target: string | undefined
       if (numeric !== null) {
-        target = sessions[Number(numeric[1]) - 1]?.id
+        // 序号优先取 /sessions 所见列表的缓存（15 分钟内），保证「看到什么绑什么」。
+        const cached = deps.sessionChoices?.get(chatKey(address))
+        if (cached !== undefined && Date.now() - cached.at <= CHOICES_TTL_MS) {
+          target = cached.ids[Number(numeric[1]) - 1]
+        }
+        if (target === undefined) {
+          const sessions = await sessionApi.listSessions()
+          target = sessions.filter((s) => s.id.startsWith('im:union:'))[Number(numeric[1]) - 1]?.id
+        }
       } else {
+        const sessions = await sessionApi.listSessions()
         const hits = sessions.filter((s) => s.id.includes(command.arg))
         if (hits.length > 0) target = hits[0]?.id
       }

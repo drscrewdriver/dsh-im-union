@@ -2,6 +2,18 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.4.0（会话轮换 + 会话过滤 + 原生渠道侧栏 + 发送链路加固）
+
+### Added
+
+- **/new 真轮换**：会话 id 此前确定性派生（`im:union:<channel>:<kind>:<chatId>`，无纪元），/new 解绑后下一条消息重建同 id，宿主原样续旧会话——「/new 无效」根因。现轮换 id 追加 13 位毫秒纪元（同毫秒单调自增防撞，dsh-im-connect session-id 同款）；空闲守卫（运行中提示先 /stop）；先建新会话成功才换绑（失败保持旧绑定可用，D7 邻近纪律）；旧绑定转入历史（`/sessions` 标「已解绑」、`/session` 可再接续）
+- **/sessions 过滤口径**：默认只列 `im:union:` 前缀的本插件会话（防未归档会话刷屏，用户裁定），每页 10 条 + ←当前/[运行中]/[已解绑] 标注；`/sessions all` 展开宿主全量同分页；序号选择走 15 分钟 TTL 缓存（≤256 条，chatKey 隔离，dsh-im-connect 同款量级）——所见即所绑
+- **原生渠道侧栏（渠道视角）**：数据面 `GET /api/dsh-im-union/channels`（im:union: 会话按渠道分组，合并绑定/历史/最近出站态，行键白名单零 secret，扫描上限 500）；客户端 rail（渠道分组 + 搜索框 + 运行状态点 + 相对时间 + 点击打开会话），挂载降级链：原生 tab registry（宿主自带或 im-connect 壳）插 `im-union-channels` 页签 → 独立 `sidebar.channels` 槽 → 仅日志；`--dsw-alias-*` 令牌全带 fallback；9 语本地化
+
+### Fixed
+
+- **发送链路「受理≠送达」（desktop 实证：ret=0 受理但微信端不显示）**：getupdates 游标持久化（滚动即落盘、connect 恢复，dsh-im setGetUpdatesBuf 对齐）——重启不再空游标重放旧消息窗；sendmessage 应答落 info 日志（to/项数/ret，不落正文）；token/context 类确定性失败换最近入站 token 单次重发（被拒发送无重复投递，不违 D7），token 无更新不重发如实抛；账号行「最近发送」诊断位（lastSendOk/lastSendAt）
+
 ## 0.3.9（入站失聪根因 + 全链路排障可见性）
 
 ### Fixed

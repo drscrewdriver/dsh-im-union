@@ -44,8 +44,18 @@ export interface Binding {
   explicit: boolean
 }
 
+/** /new 轮换下来的旧绑定：不销毁，/sessions 标注、/session 可再接续。 */
+export interface HistoricalBinding {
+  sessionId: string
+  detachedAt: number
+}
+
+/** 轮换纪元戳的单调位（模块级：跨 ChatRouter 实例也不回拨，同毫秒自增防撞）。 */
+let lastRotationStamp = 0
+
 export class ChatRouter {
   private bindings = new Map<string, Binding>()
+  private readonly historical = new Map<string, HistoricalBinding>()
 
   /** 入站消息 → 会话 id；无绑定时按地址生成并登记隐式绑定。 */
   resolve(address: ChatAddress): Binding {
@@ -60,6 +70,42 @@ export class ChatRouter {
   /** /session <id> 显式绑定既有会话。 */
   bind(address: ChatAddress, sessionId: string): void {
     this.bindings.set(chatKey(address), { sessionId, explicit: true })
+  }
+
+  /**
+   * /new 轮换目标 id：确定性 base 追加 13 位毫秒纪元。base 无纪元会让「解绑后下一条
+   * 消息重建」得到同一个 id（desktop 实证：/new 等于没换）；纪元段缀在 chatId 之后，
+   * 前缀匹配（list）与频道分组（im: 前缀）不受影响。同毫秒连发（测试/连打 /new）
+   * 单调自增防撞（dsh-im-connect session-id 同款纪律）。
+   */
+  makeRotatedSessionId(address: ChatAddress): string {
+    let stamp = Date.now()
+    if (stamp <= lastRotationStamp) stamp = lastRotationStamp + 1
+    lastRotationStamp = stamp
+    return `${makeSessionId(address)}:${stamp}`
+  }
+
+  /**
+   * /new 轮换落位：绑定换到 newSessionId，oldSessionId 转入历史（不销毁）。
+   * old 由调用方在创建前捕获——ensure 的 bind 会先写新绑定，此处再读就读到新的了
+   * （dsh-im-connect rotate 同款纪律：新会话创建成功才换绑，失败时旧句柄仍可用）。
+   */
+  rotate(address: ChatAddress, newSessionId: string, oldSessionId?: string): void {
+    const key = chatKey(address)
+    if (oldSessionId !== undefined && oldSessionId !== newSessionId) {
+      this.historical.set(oldSessionId, { sessionId: oldSessionId, detachedAt: Date.now() })
+    }
+    this.bindings.set(key, { sessionId: newSessionId, explicit: false })
+  }
+
+  /** 会话 id 是否已被轮下（/sessions 标注「已解绑」）。 */
+  isHistorical(sessionId: string): boolean {
+    return this.historical.has(sessionId)
+  }
+
+  /** 当前绑定中的全部会话 id（admin /channels 运行态合并用）。 */
+  boundSessionIds(): string[] {
+    return [...new Set([...this.bindings.values()].map((b) => b.sessionId))]
   }
 
   /** /new：解除绑定，下一条消息重开新会话。 */

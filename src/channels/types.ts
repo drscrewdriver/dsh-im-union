@@ -120,4 +120,6 @@ export type ChannelFactory = (options: {
   signal?: AbortSignal
   /** 连接器生命周期日志出口（轮询退出/退避/-14 过期等），宿主接线到 plugin.log。 */
   logger?: (msg: string) => void
+  /** 账号状态目录（游标等可持久化协议态的落盘位；缺省=纯内存，仅测试）。 */
+  stateDir?: string
 }) => Promise<ChannelAdapter> | ChannelAdapter

@@ -17,6 +17,7 @@ import { initPluginFileLog, withFileLog } from './plugin-log.js'
 import { attachInteraction } from './host-compat/interaction.js'
 import { createVault } from './credentials/vault.js'
 import { registerAdminApi, type AdminRequest, type AdminHandler } from './admin/api.js'
+import { groupChannelSessions } from './admin/channels.js'
 import { ChatRouter } from './engine/router.js'
 import { ImUnionEngine } from './engine/gateway.js'
 import { AccountManager, AccountValidationError, type AccountRecord } from './engine/account-manager.js'
@@ -174,6 +175,7 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     engine,
     logWarn: (msg) => log.warn(msg),
     logInfo: (msg) => log.info(msg),
+    stateDir,
   })
   void accounts.startAll()
 
@@ -286,6 +288,26 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
         })
       } catch (error) {
         log.warn(`session-catalog 组装失败（回空目录）: ${error instanceof Error ? error.message : String(error)}`)
+        respond(200, empty)
+      }
+    },
+    /** 渠道视角数据面（0.4.0）：im:union: 会话按渠道分组（rail 数据源，零 secret，D4）。 */
+    '/channels': async ({ respond }: AdminRequest) => {
+      const empty = { ok: true, groups: [] as unknown[] }
+      if (sessionApi.backend !== 'native') {
+        respond(200, empty)
+        return
+      }
+      try {
+        const sessions = await sessionApi.listSessions()
+        const groups = groupChannelSessions(sessions, {
+          bound: new Set(router.boundSessionIds()),
+          historical: (id) => router.isHistorical(id),
+          lastOut: deliveryLog?.lastOutBySession() ?? new Map<string, number>(),
+        })
+        respond(200, { ok: true, groups })
+      } catch (error) {
+        log.warn(`channels 组装失败（回空组）: ${error instanceof Error ? error.message : String(error)}`)
         respond(200, empty)
       }
     },

@@ -553,3 +553,36 @@ test('排障基线日志：入站/会话解析（请求 id → 宿主 id）/回�
   assert.ok(infos.some((x) => /宿主实际 id host-real-1/.test(x)), '请求 id 与宿主 id 分叉可见')
   assert.ok(infos.some((x) => /回合完成：telegram\/dm turn=1 收轮=completed 投递 \d+ 字/.test(x)), '投递摘要行')
 })
+
+test('/new 端到端：运行中被守卫拒绝；空闲轮换后下一条消息落轮换 id', async () => {
+  const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
+  const session = liveSession()
+  const prompted = session.state.prompted
+  let releasePrompt
+  session.prompt = async (sessionId, input) => {
+    prompted.push({ sessionId, input })
+    if (prompted.length === 1) await new Promise((resolve) => { releasePrompt = resolve })
+  }
+  session.createSession = async (opts) => ({ id: opts.sessionIdHint })
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session })
+
+  const first = engine.handleInbound('acct-1', dmMessage('干活'))
+  await waitUntil(() => prompted.length === 1)
+  const busy = await engine.handleInbound('acct-1', dmMessage('/new'))
+  await busy
+  assert.match(adapter.replies.at(-1).text, /\/stop/, '回合运行中 /new 被拒')
+
+  releasePrompt()
+  session.emit(turnEnd())
+  await first
+
+  const rotate = await engine.handleInbound('acct-1', dmMessage('/new'))
+  await rotate
+  assert.match(adapter.replies.at(-1).text, /已开启新会话/, '空闲时轮换成功')
+
+  const second = engine.handleInbound('acct-1', dmMessage('新会话继续'))
+  await waitUntil(() => prompted.length === 2)
+  assert.match(prompted[1].sessionId, /^im:union:telegram:dm:c1:\d{13}$/, '下一条消息 prompt 轮换新会话')
+  session.emit(turnEnd('completed', 1))
+  await second
+})
