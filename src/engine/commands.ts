@@ -48,6 +48,14 @@ export interface CommandDeps {
   isChatBusy?: (address: ChatAddress) => boolean
   /** /sessions → /session <序号> 的选择缓存（引擎态；chatKey → 最近列表 + 时间）。 */
   sessionChoices?: Map<string, { ids: string[]; at: number }>
+  /** 模型白名单（插件级）；空数组=不限（现状兼容）。 */
+  modelWhitelist: string[]
+  /** relay 绑定面（gateway 注入）；缺位=降级文案。 */
+  relay?: {
+    list(sessionId: string): Promise<string>
+    bind(sessionId: string, notifyAccountId: string): Promise<string>
+    unbind(sessionId: string): Promise<string>
+  }
 }
 
 export interface ParsedCommand {
@@ -80,6 +88,7 @@ const COMMAND_TABLE: Array<{ name: string; usage: string; desc: string }> = [
   { name: 'delivery', usage: '/delivery [retry <序号>]', desc: '投递日志/补发失败项' },
   { name: 'export', usage: '/export', desc: '导出本聊天投递记录 ZIP' },
   { name: 'speak', usage: '/speak <文本>', desc: '语音回复（仅开启语音档的渠道）' },
+  { name: 'relay', usage: '/relay <通知账号|->', desc: '绑定/解绑抄送通知（无参列出）' },
 ]
 
 /** 行首 `/词` 才是命令；`/path` 之类文本不触发（群聊粘贴路径的误触面）。 */
@@ -198,10 +207,37 @@ export async function runCommand(
         : '当前宿主不支持插话注入；请等本轮结束后重新发送，或先 /stop。'
     case 'models': {
       const catalog = await sessionApi.modelCatalog()
-      return catalog === undefined ? '当前宿主未暴露模型目录面，无法列模型。' : renderCatalog(catalog)
+      if (catalog === undefined) return '当前宿主未暴露模型目录面，无法列模型。'
+      if (deps.modelWhitelist.length === 0) return renderCatalog(catalog)
+      // 白名单非空：只列白名单内模型
+      const wl = new Set(deps.modelWhitelist)
+      const filtered: typeof catalog = {
+        ...catalog,
+        groups: (catalog.groups ?? []).map((g) => ({
+          ...g,
+          models: (g.models ?? []).filter((m) => typeof m.id === 'string' && (wl.has(m.id) || wl.has(`${g.id}/${m.id}`))),
+        })).filter((g) => (g.models ?? []).length > 0),
+      }
+      const rendered = renderCatalog(filtered)
+      return rendered === '模型目录为空（宿主通道未加载）。' ? '白名单内无可用模型（/model <id> 仍可直接输入切换，需与白名单条目匹配）。' : rendered
     }
     case 'model': {
       if (command.arg === '') return '用法：/model <id> 或 /model <provider>/<id>（/models 查看列表）'
+      // 白名单强制点（Phase 7）：非空时拒绝越界
+      if (deps.modelWhitelist.length > 0) {
+        const wl = new Set(deps.modelWhitelist)
+        const match = wl.has(command.arg) ||
+          [...wl].some((entry) => {
+            const eSlash = entry.indexOf('/')
+            if (eSlash > 0) {
+              const eProvider = entry.slice(0, eSlash)
+              const eModel = entry.slice(eSlash + 1)
+              return eModel === command.arg || `${eProvider}/${eModel}` === command.arg
+            }
+            return entry === command.arg || command.arg.endsWith('/' + entry)
+          })
+        if (!match) return `模型 ${command.arg} 不在白名单内，可用项：${deps.modelWhitelist.join(', ')}`
+      }
       const slash = command.arg.indexOf('/')
       const selection = slash > 0
         ? { provider: command.arg.slice(0, slash), model: command.arg.slice(slash + 1) }
@@ -268,7 +304,10 @@ export async function runCommand(
           s.running === true ? '[运行中]' : '',
           router.isHistorical(s.id) ? '[已解绑]' : '',
         ].filter(Boolean).join('')
-        return `${offset + i + 1}. ${shortId(s.id)}${s.title !== undefined ? ` ${s.title}` : ''}${marks !== '' ? ` ${marks}` : ''}`
+        // 标题优先（两级已由 session-api 提取），无标题回退 chatId 段（非裸 epoch）
+        const label = s.title ?? s.id.split(':').filter(Boolean).slice(4).join(':') ?? shortId(s.id)
+        const head = `${offset + i + 1}. ${label}${marks !== '' ? ` ${marks}` : ''}`
+        return `${head}\n${s.id}`
       })
       const head = all ? '宿主会话' : '本插件会话'
       const foot = pages > 1 ? `（第 ${page}/${pages} 页，/sessions${all ? ' all' : ''} ${Math.min(page + 1, pages)} 翻页）` : ''
@@ -377,6 +416,12 @@ export async function runCommand(
     case 'export':
       if (deps.exportChat === undefined) return '导出面未启用。'
       return await deps.exportChat(address, sessionId)
+    case 'relay': {
+      if (deps.relay === undefined) return '抄送面未启用。'
+      if (command.arg === '') return await deps.relay.list(sessionId)
+      if (command.arg === '-') return await deps.relay.unbind(sessionId)
+      return await deps.relay.bind(sessionId, command.arg)
+    }
     case 'speak': {
       if (command.arg === '') return '用法：/speak <要念的文本>'
       if (deps.speakText === undefined) return '当前宿主无语音面。'

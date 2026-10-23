@@ -44,7 +44,17 @@ function makeEngine(adapter, policy, extra = {}) {
     async selectModel() {},
   }
   const router = new ChatRouter()
-  const engine = new ImUnionEngine({ ctx, caps, sessionApi, router, eventTap: extra.eventTap, turnTimeoutMs: extra.turnTimeoutMs })
+  const engine = new ImUnionEngine({
+    ctx,
+    caps,
+    sessionApi,
+    router,
+    eventTap: extra.eventTap,
+    turnTimeoutMs: extra.turnTimeoutMs,
+    // Phase 7/8：缺位不影响既有测试（undefined=现状行为）。
+    relayStore: extra.relayStore,
+    modelWhitelist: extra.modelWhitelist,
+  })
   engine.registerAccount(adapter, 'acct-1', policy)
   return { engine, router }
 }
@@ -585,4 +595,184 @@ test('/new 端到端：运行中被守卫拒绝；空闲轮换后下一条消息
   assert.match(prompted[1].sessionId, /^im:union:telegram:dm:c1:\d{13}$/, '下一条消息 prompt 轮换新会话')
   session.emit(turnEnd('completed', 1))
   await second
+})
+
+// —— Phase 8 relay 抄送钩子 ——————————————————————
+
+/** 最小 RelayStore stub：只消费 get（存储本体已由 relay.test.mjs 覆盖）。 */
+function relayStub(bindingBySession) {
+  return { get: (sid) => bindingBySession[sid] }
+}
+
+test('relay 抄送：回合投递完成后按绑定同步到通知账号适配器，标签带源渠道/会话', async () => {
+  const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
+  const notify = fakeAdapter({ id: 'dingtalk-notify', label: 'DingNotify' })
+  const session = liveSession()
+  // liveSession.createSession 回宿主真 id 'x'，绑定按真 id 键控。
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, {
+    sessionApi: session,
+    relayStore: relayStub({ x: { sessionId: 'x', notifyAccountId: 'acct-notify', boundAt: 1 } }),
+  })
+  engine.registerAccount(notify, 'acct-notify', { dmAllowlist: new Set() })
+  const inflight = engine.handleInbound('acct-1', dmMessage('干活'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(assistantEvent('结果文本'))
+  session.emit(turnEnd())
+  await inflight
+  assert.deepEqual(adapter.replies.map((r) => r.text), ['结果文本'], '主通道投递不受抄送影响')
+  assert.equal(notify.replies.length, 1, '通知账号收到抄送')
+  assert.equal(notify.replies[0].text, '[telegram/x] 结果文本')
+  assert.equal(notify.replies[0].address.kind, 'dm')
+  assert.equal(notify.replies[0].address.chatId, 'x', '无 targetId 时以会话 id 作目标')
+})
+
+test('relay 绑定带 targetId：推送目标走绑定值（qq-notify 形 openid）', async () => {
+  const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
+  const notify = fakeAdapter({ id: 'qq-notify', label: 'QQNotify' })
+  const session = liveSession()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, {
+    sessionApi: session,
+    relayStore: relayStub({ x: { sessionId: 'x', notifyAccountId: 'acct-notify', targetId: 'openid-9', boundAt: 1 } }),
+  })
+  engine.registerAccount(notify, 'acct-notify', { dmAllowlist: new Set() })
+  const inflight = engine.handleInbound('acct-1', dmMessage('干活'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(assistantEvent('完成'))
+  session.emit(turnEnd())
+  await inflight
+  assert.equal(notify.replies.length, 1)
+  assert.equal(notify.replies[0].address.chatId, 'openid-9')
+})
+
+test('relay 缺位安全：无绑定不抄送；通知账号不在位跳过且不阻断主投递', async () => {
+  const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
+  const notify = fakeAdapter({ id: 'dingtalk-notify' })
+  const session = liveSession()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, {
+    sessionApi: session,
+    relayStore: relayStub({ x: { sessionId: 'x', notifyAccountId: 'acct-gone', boundAt: 1 } }),
+  })
+  engine.registerAccount(notify, 'acct-notify', { dmAllowlist: new Set() })
+  const inflight = engine.handleInbound('acct-1', dmMessage('干活'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(assistantEvent('正文'))
+  session.emit(turnEnd())
+  await inflight
+  assert.equal(adapter.replies.length, 1, '主投递照常')
+  assert.equal(notify.replies.length, 0, '绑定指向不在位账号：静默跳过不抛错')
+})
+
+test('抄送适配器抛错不回泄主通道：主投递已完成且无错误文案', async () => {
+  const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
+  const notify = fakeAdapter({
+    id: 'dingtalk-notify',
+    async reply(address, text) {
+      notify.replies.push({ address, text })
+      throw new Error('token expired')
+    },
+  })
+  const session = liveSession()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, {
+    sessionApi: session,
+    relayStore: relayStub({ x: { sessionId: 'x', notifyAccountId: 'acct-notify', boundAt: 1 } }),
+  })
+  engine.registerAccount(notify, 'acct-notify', { dmAllowlist: new Set() })
+  const inflight = engine.handleInbound('acct-1', dmMessage('干活'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(assistantEvent('正文'))
+  session.emit(turnEnd())
+  await inflight
+  assert.deepEqual(adapter.replies.map((r) => r.text), ['正文'], '抄送失败不回滚主投递')
+  assert.doesNotMatch(adapter.replies.at(-1).text, /token expired|失败/, '内部异常不泄给用户')
+})
+
+// —— 0.4.7 /relay 别名解析（代理键不暴露给用户的使用摩擦）————
+
+/** 完整 RelayStore 行为桩（bind/unbind 可断言落位结果）。 */
+function relayMemStore() {
+  const rows = []
+  return {
+    rows,
+    list: () => rows.map((r) => ({ ...r })),
+    get: (sid) => rows.find((r) => r.sessionId === sid),
+    bind: (sid, nid, tid) => {
+      const hit = rows.find((r) => r.sessionId === sid)
+      if (hit !== undefined) {
+        hit.notifyAccountId = nid
+        hit.targetId = tid
+        hit.boundAt = Date.now()
+      } else {
+        rows.push({ sessionId: sid, notifyAccountId: nid, boundAt: Date.now(), ...(tid !== undefined ? { targetId: tid } : {}) })
+      }
+    },
+    unbind: (sid) => {
+      const i = rows.findIndex((r) => r.sessionId === sid)
+      if (i === -1) return false
+      rows.splice(i, 1)
+      return true
+    },
+    byNotifyAccount: (nid) => rows.filter((r) => r.notifyAccountId === nid).map((r) => ({ ...r })),
+  }
+}
+
+test('/relay 可用别名绑定：落位存的是代理键 accountId', async () => {
+  const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
+  const notify = fakeAdapter({ id: 'dingtalk-notify' })
+  const session = liveSession()
+  const store = relayMemStore()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session, relayStore: store })
+  engine.registerAccount(notify, 'acct-notify', { dmAllowlist: new Set(), alias: '值班群' })
+  // 先走一条普通消息使会话绑到宿主真 id 'x'。
+  const first = engine.handleInbound('acct-1', dmMessage('干活'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(assistantEvent('好'))
+  session.emit(turnEnd())
+  await first
+  const before = adapter.replies.length
+  await engine.handleInbound('acct-1', dmMessage('/relay 值班群'))
+  assert.match(adapter.replies.at(-1).text, /已绑定抄送通知：acct-notify/, '回执落代理键')
+  assert.equal(store.rows.length, 1)
+  assert.equal(store.rows[0].notifyAccountId, 'acct-notify')
+  assert.equal(store.rows[0].sessionId, 'x')
+  assert.equal(adapter.replies.length, before + 1, '仅一条命令回执')
+})
+
+test('/relay 别名歧义不猜账号；不存在的账号/别名给可操作文案', async () => {
+  const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
+  const n1 = fakeAdapter({ id: 'dingtalk-notify' })
+  const n2 = fakeAdapter({ id: 'qq-notify' })
+  const session = liveSession()
+  const store = relayMemStore()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session, relayStore: store })
+  engine.registerAccount(n1, 'acct-a', { dmAllowlist: new Set(), alias: '同名' })
+  engine.registerAccount(n2, 'acct-b', { dmAllowlist: new Set(), alias: '同名' })
+  const first = engine.handleInbound('acct-1', dmMessage('hi'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(turnEnd())
+  await first
+  await engine.handleInbound('acct-1', dmMessage('/relay 同名'))
+  assert.match(adapter.replies.at(-1).text, /匹配到多个账号/)
+  assert.equal(store.rows.length, 0, '歧义绝不落库')
+  await engine.handleInbound('acct-1', dmMessage('/relay nope'))
+  assert.match(adapter.replies.at(-1).text, /不存在或已注销/)
+})
+
+test('/relay 无参：未绑定时回可操作用法提示；已绑定时列账号', async () => {
+  const adapter = fakeAdapter({ caps: { editStream: false, nativeStream: false, maxMessageLength: 4096 } })
+  const notify = fakeAdapter({ id: 'dingtalk-notify' })
+  const session = liveSession()
+  const store = relayMemStore()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session, relayStore: store })
+  engine.registerAccount(notify, 'acct-notify', { dmAllowlist: new Set(), alias: '值班群' })
+  const first = engine.handleInbound('acct-1', dmMessage('hi'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(turnEnd())
+  await first
+  await engine.handleInbound('acct-1', dmMessage('/relay'))
+  assert.match(adapter.replies.at(-1).text, /未绑定抄送通知/)
+  assert.match(adapter.replies.at(-1).text, /账号 ID\|别名/)
+  await engine.handleInbound('acct-1', dmMessage('/relay acct-notify:target-1'))
+  await engine.handleInbound('acct-1', dmMessage('/relay'))
+  assert.match(adapter.replies.at(-1).text, /已绑通知账号：acct-notify/)
+  assert.equal(store.rows[0].targetId, 'target-1', 'accountId:targetId 形仍透传')
 })

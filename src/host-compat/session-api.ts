@@ -529,9 +529,13 @@ function createNativeSessionApi(
             const r = row as Record<string, unknown>
             const id = typeof r.sessionId === 'string' ? r.sessionId : typeof r.id === 'string' ? r.id : undefined
             if (id === undefined) return undefined
+            // 标题两级提取（Phase 6 task_19，参考 chat-commands.ts:17）：
+            // 宿主 list 行标题在 projections.values.title，r.title 可能为空。
+            const projTitle = (r.projections as Record<string, unknown> | undefined)?.values as Record<string, unknown> | undefined
+            const resolvedTitle = typeof projTitle?.title === 'string' && projTitle.title !== '' ? projTitle.title : typeof r.title === 'string' && r.title !== '' ? r.title : undefined
             return {
               id,
-              title: typeof r.title === 'string' ? r.title : undefined,
+              title: resolvedTitle,
               running: typeof r.running === 'boolean' ? r.running : undefined,
               cwd: typeof r.cwd === 'string' ? r.cwd : undefined,
               updatedAt: typeof r.updatedAt === 'number' ? r.updatedAt : undefined,

@@ -32,6 +32,9 @@ import { zipSync } from './zip.js'
 import { withFileLog } from '../plugin-log.js'
 import type { ApprovalOutcome, ApprovalRequest, QuestionAnswer, QuestionRequest } from '../host-compat/interaction.js'
 import type { ChannelAdapter, Receipt, ReplyStream, SemanticMessage } from '../channels/types.js'
+import type { RelayStore } from './relay.js'
+import { sanitizeImReply } from './reply-sanitize.js'
+import { renderSvgToPng } from './svg-render.js'
 
 export interface AccountSessionPrefs {
   /** 会话工作目录（宿主 session.create 的 cwd，直接决定 Agent 的项目目录）。 */
@@ -72,6 +75,8 @@ export interface AccountPolicy {
   commandExec: CommandExecPolicy
   /** 账号级会话偏好：仅在该账号**新建**会话时生效，已有会话不受影响。 */
   session?: AccountSessionPrefs
+  /** 人类可读别名（0.4.7）：`/relay` 等命令面可用别名代替代理键 accountId（唯一才解）。 */
+  alias?: string
 }
 
 export interface EngineDeps {
@@ -99,6 +104,13 @@ export interface EngineDeps {
   rejectNoticeCooldownMs?: number
   /** 会话事件总线（0.3.8）：session/event firehose 扇出面；缺位回退 sessionApi.follow。 */
   eventTap?: SessionEventTap
+  /** relay 绑定存储（Phase 8）；缺位=抄送链路静默跳过。 */
+  relayStore?: RelayStore
+  /** 模型白名单（Phase 7，插件级）；空数组=不限（现状兼容）。 */
+  modelWhitelist?: string[]
+  /** IM 回复纪律前缀（0.4.5，默认**关**）：预设层（im-concise）已从源头压制富结构；
+   *  本开关仅留给「预设不可用的老宿主」降级用（每回合拼接，会让用户消息累积成本）。 */
+  imReplyDiscipline?: boolean
 }
 
 interface TurnState {
@@ -127,6 +139,20 @@ const TURN_END_SUFFIX: Record<string, string> = {
   interrupted: '会话被中断',
 }
 
+/**
+ * IM 回复纪律前缀（0.4.5）：用户实敲——微信只能看纯文字，而 genui（```dsh-ui）
+ * 与 dsh-raw-html-v2（裸 HTML）会把富结构写进正文。用现场前缀做最高优先级覆盖，
+ * 并给 SVG 图表开一扇门（插件转图片发送）。
+ */
+const IM_REPLY_DISCIPLINE = [
+  '[IM 渠道纪律（最高优先级，覆盖其它技能/插件的渲染引导）]',
+  '你在 IM 渠道对话：',
+  '1) 简短纯文字优先，先给结论，尽量 ≤800 字；',
+  '2) 禁止富结构输出：不要用 ```dsh-ui / ```html 围栏、裸 HTML 标签（div/vcp-root/style 等）或组件 JSON——IM 端只会显示源码噪声；',
+  '3) 需要图表/示意图时，只输出一个 ```svg 围栏（完整内联 <svg>，白底深色前景，viewBox 自适应，宽度 ≤1000），系统会转成图片发送；',
+  '4) 不要重复解释；不贴大段代码，除非用户明确要求。',
+].join('\n')
+
 /** 分段：优先段落边界，无边界硬切；maxLen 非正数/非有限 = 不分段。 */
 export function splitText(text: string, maxLen: number): string[] {
   if (!Number.isFinite(maxLen) || maxLen <= 0 || text.length <= maxLen) return [text]
@@ -140,6 +166,12 @@ export function splitText(text: string, maxLen: number): string[] {
   }
   if (rest.trim() !== '') parts.push(rest)
   return parts.length > 0 ? parts : [text]
+}
+
+/** 会话 id 尾段缩写（日志/reply 标签用，与 commands.ts 同源语义）。 */
+function shortId(sessionId: string): string {
+  const tail = sessionId.split(':').filter(Boolean)
+  return (tail[tail.length - 1] ?? sessionId).slice(0, 12)
 }
 
 /** assistant/message 事件的可见文本（只取 text 块，reasoning/工具块不上 IM）。 */
@@ -180,6 +212,8 @@ export class ImUnionEngine {
   private lateFollows = new Map<string, { dispose: () => void }>()
   private readonly broker: InteractionBroker
   private readonly log: LoggerLike
+  /** 插件默认 agent 预设（0.4.6）：账号未指定时的会话缺省（由 index 按宿主可见性设置）。 */
+  private defaultAgentPreset?: string
 
   constructor(private readonly deps: EngineDeps) {
     this.log = withFileLog(deps.ctx.logger('dsh-im-union'))
@@ -191,6 +225,27 @@ export class ImUnionEngine {
     })
   }
 
+  // —— Phase 7/8 访问器（admin 端点用）———
+  getModelWhitelist(): string[] {
+    return this.deps.modelWhitelist ?? []
+  }
+  setModelWhitelist(wl: string[]): void {
+    if (this.deps.modelWhitelist !== undefined) this.deps.modelWhitelist.length = 0
+    else (this.deps as { modelWhitelist?: string[] }).modelWhitelist = []
+    this.deps.modelWhitelist!.push(...wl)
+  }
+  getRelayStore(): RelayStore | undefined {
+    return this.deps.relayStore
+  }
+
+  /** 设置插件默认预设（0.4.6）；传 undefined 撤销。 */
+  setDefaultAgentPreset(id: string | undefined): void {
+    this.defaultAgentPreset = id
+  }
+  getDefaultAgentPreset(): string | undefined {
+    return this.defaultAgentPreset
+  }
+
   registerAccount(adapter: ChannelAdapter, accountId: string, policy?: Partial<AccountPolicy>): void {
     this.accounts.set(accountId, {
       adapter,
@@ -200,9 +255,25 @@ export class ImUnionEngine {
         privateAccess: policy?.privateAccess === 'all' ? 'all' : 'approved',
         commandExec: normalizeCommandExec(policy?.commandExec),
         ...(policy?.session !== undefined ? { session: policy.session } : {}),
+        ...(policy?.alias !== undefined && policy.alias !== '' ? { alias: policy.alias } : {}),
       },
     })
     adapter.onMessage((message) => void this.handleInbound(accountId, message))
+  }
+
+  /**
+   * 通知账号解析（0.4.7）：代理键直查优先，缺位再按别名匹配。
+   * 别名不唯一时 ambiguous=true——绝不猜账号（与主动投递「歧义不猜」同纪）。
+   */
+  private resolveNotifyAccount(input: string): { id?: string; ambiguous?: boolean } {
+    if (this.accounts.has(input)) return { id: input }
+    const hits: string[] = []
+    for (const [accountId, entry] of this.accounts) {
+      if (entry.policy.alias !== undefined && entry.policy.alias === input) hits.push(accountId)
+    }
+    if (hits.length === 1) return { id: hits[0] }
+    if (hits.length > 1) return { ambiguous: true }
+    return {}
   }
 
   /** 凭据无关的编辑（别名/白名单/准入档位/会话偏好）原位同步策略，不重建适配器。 */
@@ -218,6 +289,14 @@ export class ImUnionEngine {
         : entry.policy.privateAccess,
       commandExec: normalizeCommandExec(policy.commandExec ?? entry.policy.commandExec),
       session: policy.session !== undefined ? policy.session : entry.policy.session,
+      // 别名原位同步：传空串=清空，不传（undefined）=保持原值。
+      ...(policy.alias !== undefined
+        ? policy.alias !== ''
+          ? { alias: policy.alias }
+          : {}
+        : entry.policy.alias !== undefined
+          ? { alias: entry.policy.alias }
+          : {}),
     }
     // 偏好改即生效：权限预设对该账号已回路的会话逐个补应用（新建会话由 create 面自落）。
     const nextPermission = entry.policy.session?.permission ?? ''
@@ -434,6 +513,32 @@ export class ImUnionEngine {
       rotateSession: (address) => this.rotateSessionFor(address, accountId),
       isChatBusy: (address) => this.turns.get(`${address.channel}:${address.chatId}`)?.running === true,
       sessionChoices: this.sessionChoices,
+      modelWhitelist: this.deps.modelWhitelist ?? [],
+      relay: this.deps.relayStore !== undefined ? {
+        list: async (sid) => {
+          const all = this.deps.relayStore!.list().filter((b) => b.sessionId === sid)
+          if (all.length === 0) return '本会话未绑定抄送通知。\n绑定：/relay <通知账号 ID|别名>（钉钉无需目标，QQ 用 账号:openid|group_openid）；解绑：/relay -'
+          return `已绑通知账号：${all.map((b) => b.notifyAccountId).join(', ')}`
+        },
+        bind: async (sid, notifyAccountId) => {
+          // 支持 "账号|别名[:targetId]" 形（qq-notify 等需显式推送目标）
+          const colon = notifyAccountId.indexOf(':')
+          const accInput = colon > 0 ? notifyAccountId.slice(0, colon) : notifyAccountId
+          const targetId = colon > 0 ? notifyAccountId.slice(colon + 1) : undefined
+          const resolved = this.resolveNotifyAccount(accInput)
+          if (resolved.ambiguous === true) {
+            return `别名 ${accInput} 匹配到多个账号，请改用账号 ID（设置页账号行可见）。`
+          }
+          if (resolved.id === undefined) return `通知账号 ${accInput} 不存在或已注销（可填账号 ID 或别名）。`
+          const accId = resolved.id
+          this.deps.relayStore!.bind(sid, accId, targetId)
+          return `已绑定抄送通知：${accId}${targetId !== undefined ? ` → ${targetId}` : ''}。本会话每回合 final 将自动推送至该渠道。`
+        },
+        unbind: async (sid) => {
+          const removed = this.deps.relayStore!.unbind(sid)
+          return removed ? '已解除抄送绑定。' : '本会话未绑定抄送通知。'
+        },
+      } : undefined,
     }
   }
 
@@ -469,6 +574,8 @@ export class ImUnionEngine {
     // cwd 只收绝对路径：宿主 create 把 cwd 原样透传 ensureSession（commands.ts:98-107），
     // 相对路径落在宿主进程 cwd 下不可控（真机实证：偏好填了裸目录名导致建会话失败）。
     const cwdPref = workspace === undefined ? (prefs?.cwd ?? '') : ''
+    const presetChoice =
+      prefs?.agentPreset !== undefined && prefs.agentPreset !== '' ? prefs.agentPreset : this.defaultAgentPreset
     const cwdUsable = cwdPref !== '' && isAbsolute(cwdPref)
     if (cwdPref !== '' && !cwdUsable && !this.relativeCwdWarned.has(`${accountId}:${cwdPref}`)) {
       this.relativeCwdWarned.add(`${accountId}:${cwdPref}`)
@@ -481,7 +588,8 @@ export class ImUnionEngine {
         sessionIdHint: binding.sessionId,
         ...(workspace !== undefined ? { workspace } : {}),
         ...(cwdUsable ? { cwd: cwdPref } : {}),
-        ...(prefs?.agentPreset !== undefined && prefs.agentPreset !== '' ? { preset: prefs.agentPreset } : {}),
+        // 预设链（0.4.6）：账号级 agentPreset > 插件默认（im-concise，预设层屏蔽富结构）。
+        ...(presetChoice !== undefined && presetChoice !== '' ? { preset: presetChoice } : {}),
         ...(prefs?.model !== undefined && prefs.model !== ''
           ? { model: prefs.model, ...(prefs.provider !== undefined && prefs.provider !== '' ? { provider: prefs.provider } : {}), ...(prefs.reasoningEffort !== undefined && prefs.reasoningEffort !== '' ? { reasoningEffort: prefs.reasoningEffort } : {}) }
           : {}),
@@ -547,7 +655,10 @@ export class ImUnionEngine {
     // 图片输入（T1.7）：宿主 capability 元数据判视觉（E4，不按模型名猜）；
     // notes 回给渠道用户，不混进模型 prompt。
     // 引用上下文（T3.6）：渠道已归一/回取的 quoteText 拼进正文尾部（无引用即原样）。
-    const promptText = withQuoteContext(message.text, message.quoteText)
+    // IM 回复纪律（0.4.5）：前缀拼在用户正文之前——压制 genui/html 富结构输出。
+    const basePrompt = withQuoteContext(message.text, message.quoteText)
+    const promptText =
+      this.deps.imReplyDiscipline === true ? `${IM_REPLY_DISCIPLINE}\n\n${basePrompt}` : basePrompt
     let promptInput: string | unknown[] = promptText
     const inboundImages = message.images ?? []
     if (inboundImages.length > 0) {
@@ -677,7 +788,14 @@ export class ImUnionEngine {
         endReason !== undefined && endReason !== 'completed'
           ? `\n（本轮${endReason === 'timeout' ? '等待超时' : `提前结束：${TURN_END_SUFFIX[endReason] ?? endReason}`}）`
           : ''
-      const finalText = (snapshot() + suffix).trim() === '' ? '本轮无可见输出。' : (snapshot() + suffix).trim()
+      // 出站净化（0.4.5）：剥 genui（```dsh-ui）/ raw-html（裸 HTML）结构体，抽 SVG 图表。
+      const sanitized = sanitizeImReply((snapshot() + suffix).trim())
+      const finalText =
+        sanitized.text !== ''
+          ? sanitized.text
+          : sanitized.svgBlocks.length > 0
+            ? '（图表见附图）'
+            : '本轮无可见输出。'
       const parts = splitText(finalText, adapter.caps.maxMessageLength ?? 0)
       const meta: DeliverMeta = { accountId, sessionId, turn: lastTurn }
 
@@ -704,6 +822,38 @@ export class ImUnionEngine {
       // 产物回传（T2.4）：正文投递完再送文件，缺面退文字清单。
       if (pendingDeliverables.length > 0) {
         await this.deliverablesToChannel(adapter, message, accountId, sessionId, pendingDeliverables)
+      }
+      // SVG 图表附图（0.4.5）：正文投递完再发图，渲染失败降级纯文字不阻断。
+      if (sanitized.svgBlocks.length > 0) {
+        await this.deliverSvgCharts(adapter, message, accountId, sessionId, sanitized.svgBlocks)
+      }
+      // Phase 8 relay：主通道投递完成后检查抄送绑定
+      if (this.deps.relayStore !== undefined) {
+        const relayBinding = this.deps.relayStore.get(sessionId)
+        if (relayBinding !== undefined) {
+          const notifyEntry = this.accounts.get(relayBinding.notifyAccountId)
+          if (notifyEntry !== undefined && typeof notifyEntry.adapter.reply === 'function') {
+            try {
+              const relayText = `[${message.address.channel}/${shortId(sessionId)}] ${finalText}`
+              // 通知渠道地址构造：dingtalk-notify 忽略 address；qq-notify 用 chatId 作 openid/group_openid
+              const notifyAddress: ChatAddress = {
+                channel: notifyEntry.adapter.id,
+                kind: 'dm',
+                chatId: relayBinding.targetId ?? sessionId,
+              }
+              const relayParts = splitText(relayText, notifyEntry.adapter.caps.maxMessageLength ?? 0)
+              for (const part of relayParts) {
+                const receipt = await notifyEntry.adapter.reply(notifyAddress, part)
+                this.noteUncertain(receipt, 'relay 抄送')
+              }
+              this.log.info(`relay 抄送完成 → ${relayBinding.notifyAccountId}（${finalText.length} 字）`)
+            } catch (error) {
+              this.log.warn(`relay 抄送失败（${relayBinding.notifyAccountId}）: ${(error as Error).message}`)
+            }
+          } else {
+            this.log.warn(`relay 通知账号 ${relayBinding.notifyAccountId} 适配器不在位，跳过抄送`)
+          }
+        }
       }
       // 超时迟到补投（T2.9）：本轮以 timeout 收轮——保留订阅直到真 turn/end，
       // 迟到结果一次性补投（dedupKey 防重复投递）。
@@ -815,6 +965,37 @@ export class ImUnionEngine {
       log.mark(seq, { attempts: rec.attempts + 1, error: 'send-error' })
       this.log.warn(`补发 #${seq} 失败: ${(error as Error).message}`)
       return `#${seq} 补发失败（已计数 ${rec.attempts + 1}/${MAX_RETRY}）。`
+    }
+  }
+
+  /** SVG 图表附图（0.4.5）：渲染 PNG → 渠道图片消息；缺面/失败降级纯文字。 */
+  private async deliverSvgCharts(
+    adapter: ChannelAdapter,
+    message: SemanticMessage,
+    accountId: string,
+    sessionId: string,
+    blocks: string[],
+  ): Promise<void> {
+    if (adapter.caps.fileOut !== true || typeof adapter.sendFile !== 'function') {
+      this.log.warn('本轮含 SVG 图表，但当前渠道不支持图片发送（已忽略附图）')
+      return
+    }
+    for (const svg of blocks) {
+      const image = await renderSvgToPng(svg)
+      if (image === undefined) {
+        this.log.warn('SVG 图表渲染失败（sharp 缺位或 SVG 语法错误），已跳过该附图')
+        continue
+      }
+      try {
+        const receipt = await adapter.sendFile(message.address, image)
+        this.noteUncertain(receipt, 'SVG 附图')
+        this.recordDelivery(message, `file:${image.name}`, receipt.uncertain ? 'uncertain' : 'delivered', {
+          accountId,
+          sessionId,
+        })
+      } catch (error) {
+        this.log.warn(`SVG 附图发送失败: ${(error as Error).message}`)
+      }
     }
   }
 

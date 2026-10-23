@@ -2,6 +2,53 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.4.7（/relay 别名解析）
+
+### Added
+
+- **通知账号可用别名绑定**：`/relay <账号>` 先按代理键 `accountId` 直查，缺位再按别名唯一匹配（`AccountPolicy.alias` 由 account-manager 在 registerAccount/updatePolicy 两处同步给引擎）；**别名歧义绝不猜账号**（与主动投递「歧义不猜」同纪），回执明确要用户改用账号 ID；`/relay` 无参未绑定时回可操作用法提示（钉钉无需目标 / QQ 用 `账号:openid`）
+
+## 0.4.6（IM 简洁预设 + SVG 图表 + 富结构净化）
+
+### Added
+
+- **IM 简洁预设 `im-concise`（预设层屏蔽，架构正解）**：插件把内置 agent 预设幂等供给到 `$DSH_HOME/.agent-presets/im-concise/`（`managed-by` 所有权头；用户自管不覆盖），IM 会话默认使用（账号级 agentPreset 优先）。`persona.complete: true` 完整系统提示模式——genui（dsh-ui 围栏教学）与 dsh-raw-html-v2（裸 HTML 引导）追加的 prompt 段一律进不来，从源头压掉结构体输出；persona 是系统提示，不随轮次累积（prompt cache 可命中），比每回合前缀省 token
+- **SVG 图表出图**：IM 会话输出 svg 围栏 → 出站提取 → sharp 渲染 PNG（宿主 profile 自带则用，缺位降级）→ 渠道图片消息发送（微信 iLink type:2 image_item）；失败不阻断正文
+- **出站净化（兜底，零 prompt 成本）**：dsh-ui / html 围栏替换为省略提示；裸 svg 抽为图表；raw-html 卡片（vcp-root/style 等）剥结构留文字；其它代码围栏占位保护不误伤；SVG 上限 3 张
+
+### Changed
+
+- **每回合 IM 纪律前缀默认关闭**（imReplyDiscipline 默认 false）：每轮拼接会进对话历史累积浪费；仅预设不可用的老宿主需置 true
+
+## 0.4.4（任务树过滤 + tab 随会话类型）
+
+### Fixed
+
+- **任务页不再出现「未分组 IM 会话」**：官方任务树吃 `props.useSessions`，改注入过滤版（ids 滤 `im:` 前缀 + byId 重建）
+- **tab 随会话类型而非硬切**：打开 `im:` 会话留在/切到「频道」，打开普通任务切回「任务」
+
+## 0.4.3（wrap 样式对齐参考 + 会话点击修复）
+
+### Fixed
+
+- **tab 样式去自造框**：任务/频道切换改为参考（dsh-im-connect `ima-tab`）同款——无框透明底、`gap:18px`、底部 1px 分隔线、选中态 `box-shadow:inset 0 -2px 0 currentColor` 下划线高亮；删除自造圆角边框按钮
+- **频道内会话点击无效**：`openUnionSession` 旧实现直读 `ctx.uiWorkspace`（未 inject 服务属性访问被 Cordis 代理抛错并吞掉，且 alpha.2+ 宿主 `sessions.retain` 存在时 `sessions.open` 不写 mainView）；改 `probeService` 软读（reflect.get → ctx.get）+ 参考同款打开链：`props.openSession/open` 优先 → `uiWorkspace.openSession` → `retain` 存在禁回退 → `sessions.open`；打开成功后自动切回任务页（参考 followSidebarTab 同语义）
+
+## 0.4.2（侧栏 wrap 真形态：任务/频道分离标签）
+
+### Fixed
+
+- **任务/频道分离标签（Phase 6 task_20 补正）**：0.4.1 仍在往宿主 `__dshNativeTabs` registry 插页签（宿主无该面时整块不显示）——按用户裁定重写为真 wrap：直接包裹 `sidebar.workspaces` 官方任务树组件，自建顶部「任务 / 频道」两页签（任务=渲染原官方组件，频道=本插件 rail），`slots.subscribe` + 250ms×40 重试环保同步；已包裹检测（`__imConnectWrapped`/`__dshNativeTabHost`/`__dshAutomationWrapped`）绝不插手；渲染失败 ErrorBoundary 回落官方树
+
+## 0.4.1（渠道视图自持 + 标题投影 + 模型白名单 + relay 抄送）
+
+### Added
+
+- **模型白名单（Phase 7）**：插件级 `model-whitelist.json` 存储，`/models` 只列白名单内模型，`/model` 越界拒绝并列可用项；空数组=不限（现状兼容）；admin `GET/POST /model-whitelist` 管理面 + 设置面板 textarea 编辑
+- **final 抄送 relay（Phase 8）**：会话级绑定到通知渠道账号（`relay-bindings.json`，持久化，多对一）；收轮后 `finalText` 自动推送到对应通知渠道（带 `[渠道/会话]` 前缀 + 同款收轮后缀）；`/relay <账号|->` 命令绑定/解绑/列表；admin `GET/POST /relay-bindings` 端点 + 设置面板通知账号行「绑定会话」UI；支持 `accountId:targetId` 形（qq-notify 等显式推送目标）
+- **/sessions 标题投影**：两级提取 `projections.values.title` → `r.title`（参考 dsh-im-connect chat-commands.ts:17），行格式「N. 标题〔标注〕+ 次行完整 id」，无标题回退 chatId 段
+- **渠道视图自持（Phase 6）**：不再插别人注册的切换标签，自持 wrap 形态包裹宿主官方会话树（检测 `__dshNativeTabHost`/`__imConnectWrapped` 即绝不插手、隔离优先）；rail 降级为设置面板「渠道」卡片可用
+
 ## 0.4.0（会话轮换 + 会话过滤 + 原生渠道侧栏 + 发送链路加固）
 
 ### Added

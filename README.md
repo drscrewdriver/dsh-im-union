@@ -8,12 +8,13 @@ DeepSeek Harness 的 IM 联合桥——净室重写，能力合集来自社区�
 
 ## 状态
 
-**0.3.1**：15 个渠道适配器（覆盖 12 个平台，含邮件；企微/钉钉/QQ 各含机器人与自建应用或推送两档）、跨版本窄腰、会话引擎、审批/提问 IM 闭环、多账号管理面均已交付（单测 658 项；宿主农场 0.1.2/0.1.5/0.1.7/0.2.1 四线冒烟全绿；0.2.1-rc.2 已按桌面 profile 装机双回读实证，农场专属格待补）。真机验收项逐项登记在 CHANGELOG；能力分期见开发仓计划台账。
+**0.4.7**：15 个渠道适配器（覆盖 12 个平台，含邮件；企微/钉钉/QQ 各含机器人与自建应用或推送两档）、跨版本窄腰、会话引擎、审批/提问 IM 闭环、多账号管理面、原生「任务/频道」侧栏分离、IM 简洁预设与出站净化、SVG 图表转图、final 抄送 relay 均已交付（单测 728 项；宿主农场 0.1.2/0.1.5/0.1.7/0.2.1 四线冒烟全绿；桌面 profile 真机装机与浏览器目视实证至 0.4.6）。真机验收项逐项登记在 CHANGELOG；能力分期见开发仓计划台账。
 
 能力总览：
 
 - **渠道**：微信（官方 iLink 扫码）、飞书（长连/流式卡片/语音档可选，语音需系统 ffmpeg）、Telegram、Discord、企微智能机器人（长连）、钉钉（stream+AI Card，另有自定义机器人推送档）、QQ 官方机器人（另有推送档）、Slack（Socket Mode）、WhatsApp（Baileys 扫码，依赖随包 optionalDependencies 分发）、Matrix、iMessage（仅 macOS）、企微自建应用（回调）、邮件（IMAP/SMTP 线程路由）等；未配置渠道零依赖零加载（懒 import）。
-- **IM 内闭环**：24 命令面板（/help /status /new /stop /steer /model(s) /reasoning /preset(s) /session(s) /workspace(s) /fork /rename /queue /mute /unbind /goal /delivery /export /speak /menu）；工具审批与交互提问原聊天回答（默认拒绝、5 分钟超时、发起者限定）。
+- **IM 内闭环**：25 命令面板（/help /status /new /stop /steer /model(s) /reasoning /preset(s) /session(s) /workspace(s) /fork /rename /queue /mute /unbind /goal /delivery /export /speak /relay /menu）；工具审批与交互提问原聊天回答（默认拒绝、5 分钟超时、发起者限定）。
+- **IM 友好呈现**：原生侧栏「任务/频道」两页签自持分离（包裹宿主官方任务树，过滤 IM 会话不入任务页；检测到他人已接管则绝不插手）；`im-concise` 智能体预设（persona 完整模式从源头阻断 GenUI 围栏/裸 HTML 等富结构注入）+ 出站净化兜底；```svg 围栏自动转 PNG 图片发送（需宿主侧渲染依赖在位，缺位降级纯文字）；模型白名单护栏（渠道外兜底集合）；`/relay` 回合结果镜像到通知渠道（钉钉群 webhook / QQ 主动推送，可用账号 ID 或别名绑定）。
 - **跨版本**：设置面 gen1/gen2/gen3 三态自适配；能力探测优先，禁版本号分支。
 
 ## 安装

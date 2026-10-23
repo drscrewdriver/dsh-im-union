@@ -40,6 +40,10 @@ function fakeDeps(overrides = {}) {
     workspaceOverrides: new Map(),
     vaultKind: o.vaultKind ?? 'file',
     logWarn: () => {},
+    // Phase 7/8：CommandDeps 新增必填面，缺位会 TypeError（旧测试不传=兼容空表）。
+    modelWhitelist: o.modelWhitelist ?? [],
+    goals: new Map(),
+    ...(o.relay !== undefined ? { relay: o.relay } : {}),
   }
   return { deps, calls }
 }
@@ -376,4 +380,65 @@ test('/session 序号：缓存过期回退现算（默认口径），id 片段�
   b.deps.sessionChoices = new Map([['im:union:telegram:dm:c1', { ids: ['im:union:telegram:dm:stale'], at: Date.now() }]])
   const frag = await runCommand(b.deps, dm, 'none', parseCommand('/session live'))
   assert.match(frag, /live/, 'id 片段路径不受缓存影响')
+})
+
+// —— Phase 7/8：标题优先、白名单、relay 抄送面 ——————————————
+
+test('/sessions 标题优先：有 title 行首列标题，无 title 回退 chatId 段而非裸 id', async () => {
+  const sessions = [
+    { id: 'im:union:telegram:dm:8823114477', title: '月度报表' },
+    { id: 'im:union:feishu:dm:oc_zh', running: true },
+  ]
+  const { deps } = fakeDeps({ sessions })
+  const text = await runCommand(deps, dm, 'im:union:telegram:dm:8823114477', parseCommand('/sessions'))
+  assert.match(text, /^1\. 月度报表 ←当前$/m, '标题取代 id 尾段')
+  assert.doesNotMatch(text, /^1\. 8823114477/m, '不再裸显数字 chatId 尾段')
+  assert.match(text, /^2\. oc_zh \[运行中\]$/m, '无标题回退 chatId 段')
+  assert.match(text, /^im:union:telegram:dm:8823114477$/m, '标题行下仍附全 id（便于 /session 片段绑定）')
+})
+
+test('/models 白名单非空：只列白名单内模型（裸 id 与 provider/id 条目都命中）', async () => {
+  const catalog = {
+    groups: [{ id: 'p1', name: 'Provider1', models: [{ id: 'm-main' }, { id: 'm-mini' }, { id: 'm-odd' }] }],
+  }
+  const a = fakeDeps({ catalog, modelWhitelist: ['p1/m-mini', 'm-main'] })
+  const text = await runCommand(a.deps, dm, 's', parseCommand('/models'))
+  assert.match(text, /Provider1: m-main, m-mini/, '列表按目录原序')
+  assert.doesNotMatch(text, /m-odd/, '白名单外模型不展示')
+  const b = fakeDeps({ catalog, modelWhitelist: ['nope'] })
+  assert.match(await runCommand(b.deps, dm, 's', parseCommand('/models')), /白名单内无可用模型/)
+  const c = fakeDeps({ catalog })
+  assert.match(await runCommand(c.deps, dm, 's', parseCommand('/models')), /m-odd/, '空白名单=不限（现状兼容）')
+})
+
+test('/model 白名单非空：越界拒绝（文案含「白名单」与可用项，不触宿主）；界内放行', async () => {
+  const a = fakeDeps({ modelWhitelist: ['m-mini', 'provX/m-main'] })
+  const rej = await runCommand(a.deps, dm, 'sess', parseCommand('/model gpt-5'))
+  assert.match(rej, /不在白名单内/)
+  assert.match(rej, /m-mini, provX\/m-main/, '拒绝文案给出可用项')
+  assert.equal(a.calls.length, 0, '拒绝路径不调 selectModel')
+  assert.match(await runCommand(a.deps, dm, 'sess', parseCommand('/model m-mini')), /已切换模型：m-mini/)
+  assert.match(await runCommand(a.deps, dm, 'sess', parseCommand('/model provX/m-main')), /已切换模型：provX\/m-main/)
+  // 白名单条目带 provider，用户只输裸 model id 也算命中
+  const b = fakeDeps({ modelWhitelist: ['provX/m-main'] })
+  assert.match(await runCommand(b.deps, dm, 'sess', parseCommand('/model m-main')), /已切换模型：m-main/)
+})
+
+test('/relay 三态：无参=list、有账号=bind、- 为 unbind；relay 面缺位=降级文案', async () => {
+  const seen = []
+  const relay = {
+    async list(sid) { seen.push(['list', sid]); return '本会话未绑定抄送通知。' },
+    async bind(sid, notifyAccountId) { seen.push(['bind', sid, notifyAccountId]); return `已绑定抄送通知：${notifyAccountId}。` },
+    async unbind(sid) { seen.push(['unbind', sid]); return '已解除抄送绑定。' },
+  }
+  const a = fakeDeps({ relay })
+  assert.match(await runCommand(a.deps, dm, 'sess-7', parseCommand('/relay')), /未绑定抄送/)
+  assert.match(await runCommand(a.deps, dm, 'sess-7', parseCommand('/relay qq-notify')), /已绑定抄送通知：qq-notify/)
+  assert.match(await runCommand(a.deps, dm, 'sess-7', parseCommand('/relay -')), /已解除/)
+  assert.deepEqual(seen, [['list', 'sess-7'], ['bind', 'sess-7', 'qq-notify'], ['unbind', 'sess-7']])
+  // targetId 形（账号:目标）透传不动，拆分在 gateway 接线侧
+  await runCommand(a.deps, dm, 'sess-7', parseCommand('/relay qq-notify:oX123'))
+  assert.deepEqual(seen.at(-1), ['bind', 'sess-7', 'qq-notify:oX123'])
+  const b = fakeDeps()
+  assert.match(await runCommand(b.deps, dm, 'sess-7', parseCommand('/relay x')), /抄送面未启用/)
 })

@@ -282,6 +282,8 @@ export class AccountManager {
       groupEnabled: record.groupEnabled ?? true,
       privateAccess: record.privateAccess === 'all' ? 'all' : 'approved',
       commandExec: normalizeCommandExec(record.commandExec),
+      // 别名同步给引擎（0.4.7）：/relay 等命令面可用别名代替代理键；空串=清空。
+      alias: record.alias ?? '',
       ...(record.session !== undefined ? { session: sanitizeSessionPrefs(record.session) } : {}),
     })
   }
@@ -445,6 +447,7 @@ export class AccountManager {
         groupEnabled: record.groupEnabled,
         privateAccess: record.privateAccess === 'all' ? 'all' : 'approved',
         commandExec: normalizeCommandExec(record.commandExec),
+        ...(record.alias !== undefined && record.alias !== '' ? { alias: record.alias } : {}),
         ...(record.session !== undefined ? { session: sanitizeSessionPrefs(record.session) } : {}),
       })
       await adapter.connect()

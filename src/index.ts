@@ -6,11 +6,11 @@
  * 这是"装不上"与"装上静默失效"的分界：硬 inject 缺失服务 = Cordis 载入即抛，
  * 硬 inject 已删服务（settingsScope 类）= client 半永不 apply 且无红字。
  */
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { CordisLike } from './types.js'
-import { detectCapabilities } from './host-compat/services.js'
+import { detectCapabilities, optionalService } from './host-compat/services.js'
 import { createSessionApi } from './host-compat/session-api.js'
 import { createSessionEventTap } from './host-compat/session-event-tap.js'
 import { initPluginFileLog, withFileLog } from './plugin-log.js'
@@ -26,6 +26,8 @@ import { DeliveryLog } from './engine/delivery-log.js'
 import { FragmentBuffer } from './engine/fragments.js'
 import { ProactiveDelivery, handleHttp as handleProactiveHttp } from './engine/proactive.js'
 import { ConnectorService, handleHttp as handleConnectorHttp } from './engine/connector.js'
+import { createRelayStore } from './engine/relay.js'
+import { registerImPreset, IM_PRESET_ID, type AgentPresetsLike } from './engine/preset-supply.js'
 import { createUploadsCompat } from './host-compat/uploads-compat.js'
 import { createDeliverablesCompat } from './host-compat/deliverables-compat.js'
 import { CHANNEL_META, channelIds } from './channels/meta.js'
@@ -53,6 +55,9 @@ export interface UnionPluginConfig {
   stateDir: string
   /** T2.7 AI Office Connector 远端 base URL；缺省/空=不启用（诚实降级）；非 https 拒启。 */
   connectorBaseUrl?: string
+  /** 0.4.5/0.4.6：每回合 IM 纪律前缀（默认 false——预设层 im-concise 已从源头压制；
+   *  仅预设不可用的老宿主需要置 true）。 */
+  imReplyDiscipline?: boolean
 }
 
 function accountRecordFromBody(body: unknown): { record: AccountRecord; secrets: Record<string, string> } {
@@ -95,6 +100,31 @@ function accountRecordFromBody(body: unknown): { record: AccountRecord; secrets:
     }
   }
   return { record, secrets }
+}
+
+// —— Phase 7 模型白名单文件态辅助（stateDir/model-whitelist.json）———
+function loadModelWhitelist(stateDir: string, log: { warn: (msg: string) => void }): string[] {
+  const file = join(stateDir, 'model-whitelist.json')
+  try {
+    if (!existsSync(file)) return []
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((v: unknown) => String(v).trim()).filter((s: string) => s !== '')
+  } catch (error) {
+    log.warn(`model-whitelist.json 加载失败（从空表继续）: ${(error as Error).message}`)
+    return []
+  }
+}
+
+function saveModelWhitelist(stateDir: string, whitelist: string[], log: { warn: (msg: string) => void }): void {
+  const file = join(stateDir, 'model-whitelist.json')
+  try {
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, JSON.stringify(whitelist, null, 2), 'utf8')
+    renameSync(tmp, file)
+  } catch (error) {
+    log.warn(`model-whitelist.json 保存失败: ${(error as Error).message}`)
+  }
 }
 
 export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): void {
@@ -148,6 +178,12 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     deliverables,
     fragments,
     exportDir: join(stateDir, 'exports'),
+    // Phase 8 relay：文件态绑定存储（构造期即加载，损坏不 brick）。
+    relayStore: createRelayStore(join(stateDir, 'relay-bindings.json'), (msg) => log.warn(msg)),
+    // Phase 7 模型白名单：从盘加载（缺省=空数组=不限，现状兼容）。
+    modelWhitelist: loadModelWhitelist(stateDir, log),
+    // 0.4.5：每回合纪律前缀默认关（预设层从源头压制；开关留给老宿主降级）。
+    imReplyDiscipline: config?.imReplyDiscipline === true,
     // 主动投递双向同步（T2.6）：syncBack 目标命中即自动入白名单——
     // 开关语义在此；botId 口径与 sendTo 缺省一致（accountId）。
     onInboundDm: (accountId, message) => {
@@ -167,6 +203,39 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
   })
 
   // 渠道工厂表在 registry.ts 模块加载时静态登记（懒加载不变）。
+
+  // 0.4.6 IM 简洁预设：向宿主 agentPresets 运行时注册 im-concise（`.agent-presets/` 目录
+  // 形态已被宿主废弃——SKILL 明写 no longer read；register 面缺位=老宿主，降级为不指定预设）。
+  // 服务可能晚于 apply 就绪（desktop 线实证）：10s × 12 重试环，成功/硬失败即停。
+  let presetDisposer: (() => Promise<void> | void) | undefined
+  let presetTries = 0
+  const presetTimer = setInterval(() => {
+    void (async () => {
+      try {
+        const result = await registerImPreset(optionalService<AgentPresetsLike>(ctx, 'agentPresets'))
+        if (result.ok) {
+          presetDisposer = result.dispose
+          engine.setDefaultAgentPreset(IM_PRESET_ID)
+          log.info(`IM 会话默认预设：${IM_PRESET_ID}（persona 完整模式，富结构引导从源头阻断）`)
+          clearInterval(presetTimer)
+          return
+        }
+        if (result.reason !== undefined && result.reason !== '宿主未提供 agentPresets.register 面（老版本线）') {
+          log.warn(`IM 预设注册失败（降级：不指定预设）: ${result.reason}`)
+          clearInterval(presetTimer)
+          return
+        }
+      } catch (error) {
+        log.warn(`IM 预设注册异常（降级）: ${(error as Error).message}`)
+        clearInterval(presetTimer)
+        return
+      }
+      if (++presetTries >= 12) {
+        log.info('agentPresets 面 2 分钟内未就绪，本周期不启用 IM 默认预设')
+        clearInterval(presetTimer)
+      }
+    })()
+  }, 10000)
 
   // T1.8 账号管理：文件态存储 + 生命周期（启动全连 + 管理面 CRUD）。
   const accounts = new AccountManager({
@@ -471,6 +540,46 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
     '/connector/jobs': connectorHandler('/connector/jobs'),
     '/connector/jobs/cancel': connectorHandler('/connector/jobs/cancel'),
     '/wecom-app/callback': wecomAppCallback,
+    // Phase 7 模型白名单管理面
+    '/model-whitelist': async ({ method, body, respond }) => {
+      if (method === 'GET') {
+        respond(200, { ok: true, whitelist: engine.getModelWhitelist() })
+        return
+      }
+      // POST/PUT：更新白名单
+      const b = (body ?? {}) as { whitelist?: unknown }
+      if (!Array.isArray(b.whitelist)) {
+        respond(400, { ok: false, error: 'whitelist 需为数组' })
+        return
+      }
+      const wl = b.whitelist.map((v) => String(v).trim()).filter((s) => s !== '')
+      engine.setModelWhitelist(wl)
+      saveModelWhitelist(stateDir, wl, log)
+      respond(200, { ok: true, whitelist: wl })
+    },
+    // Phase 8 relay 绑定管理面
+    '/relay-bindings': async ({ respond }) => {
+      respond(200, { ok: true, bindings: engine.getRelayStore()?.list() ?? [] })
+    },
+    '/relay-bindings/bind': async ({ body, respond }) => {
+      const store = engine.getRelayStore()
+      if (store === undefined) { respond(503, { ok: false, error: 'relay 存储未启用' }); return }
+      const b = (body ?? {}) as { sessionId?: unknown; notifyAccountId?: unknown; targetId?: unknown }
+      const sid = String(b.sessionId ?? '').trim()
+      const nid = String(b.notifyAccountId ?? '').trim()
+      if (sid === '' || nid === '') { respond(400, { ok: false, error: 'sessionId 与 notifyAccountId 必填' }); return }
+      const tid = typeof b.targetId === 'string' && b.targetId.trim() !== '' ? b.targetId.trim() : undefined
+      store.bind(sid, nid, tid)
+      respond(200, { ok: true })
+    },
+    '/relay-bindings/unbind': async ({ body, respond }) => {
+      const store = engine.getRelayStore()
+      if (store === undefined) { respond(503, { ok: false, error: 'relay 存储未启用' }); return }
+      const sid = String((body as { sessionId?: unknown })?.sessionId ?? '').trim()
+      if (sid === '') { respond(400, { ok: false, error: 'sessionId 必填' }); return }
+      const removed = store.unbind(sid)
+      respond(removed ? 200 : 404, { ok: removed, error: removed ? undefined : '未找到绑定' })
+    },
   }, {
     // 第三方回调白名单：跳登录态/JSON 闸（厂商无 Cookie，验签即认证）。
     rawRoutes: [{ path: '/wecom-app/callback', plainText: true }],
@@ -490,6 +599,12 @@ export function apply(ctx: CordisLike, config?: Partial<UnionPluginConfig>): voi
       connector?.dispose()
       admin.dispose()
       detachInteraction()
+      clearInterval(presetTimer)
+      try {
+        void presetDisposer?.()
+      } catch {
+        // 卸载失败留给宿主生命周期。
+      }
     }
   }, `${PLUGIN_NAME}: lifecycle`)
   if (dispose === undefined) {

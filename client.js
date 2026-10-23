@@ -99,7 +99,7 @@ window.__ModuleLoader__.load({
         'accounts.state.connected': '已连接',
         'accounts.state.expired': '会话过期，需重新扫码',
         'accounts.send.failed': '最近发送失败',
-        'rail.title': '频道', 'rail.search': '搜索会话', 'rail.loading': '加载中…', 'rail.empty': '暂无 IM 会话', 'rail.error': '加载失败，稍后重试', 'rail.detached': '已解绑', 'time.now': '刚刚', 'time.minutes': '{n} 分钟前', 'time.hours': '{n} 小时前', 'time.days': '{n} 天前',
+        'rail.title': '频道', 'rail.search': '搜索会话', 'rail.loading': '加载中…', 'rail.empty': '暂无 IM 会话', 'rail.error': '加载失败，稍后重试', 'rail.detached': '已解绑', 'rail.tabTasks': '任务', 'rail.tabChannels': '频道', 'time.now': '刚刚', 'time.minutes': '{n} 分钟前', 'time.hours': '{n} 小时前', 'time.days': '{n} 天前',
         'accounts.state.disconnected': '未连接',
         'accounts.state.paused': '已暂停',
         'accounts.secret.missing': '凭据缺失：{keys}',
@@ -161,6 +161,18 @@ window.__ModuleLoader__.load({
         'check.passed': '通过',
         'check.failed': '失败',
         'check.unverified': '未验证',
+        'whitelist.title': '模型白名单',
+        'whitelist.placeholder': '一行一个 provider/model（留空=不限）',
+        'whitelist.save': '保存白名单',
+        'whitelist.saved': '已保存',
+        'whitelist.hint': '设置后 /model 仅允许白名单内切换，/models 仅列出白名单内模型。',
+        'relay.title': '抄送绑定',
+        'relay.bind': '绑定会话',
+        'relay.unbind': '解绑',
+        'relay.doBind': '添加绑定',
+        'relay.empty': '暂无绑定的会话',
+        'relay.sessionId': '会话 ID',
+        'relay.targetId': '推送目标（可选）',
       },
       en: {
         'settings.title': 'IM Union Bridge',
@@ -278,14 +290,26 @@ window.__ModuleLoader__.load({
         'check.passed': 'passed',
         'check.failed': 'failed',
         'check.unverified': 'unverified',
+        'whitelist.title': 'Model Whitelist',
+        'whitelist.placeholder': 'One provider/model per line (empty = no restriction)',
+        'whitelist.save': 'Save Whitelist',
+        'whitelist.saved': 'Saved',
+        'whitelist.hint': 'When set, /model only allows switching within the whitelist; /models lists only whitelisted models.',
+        'relay.title': 'Relay Binding',
+        'relay.bind': 'Bind Session',
+        'relay.unbind': 'Unbind',
+        'relay.doBind': 'Add Binding',
+        'relay.empty': 'No bound sessions',
+        'relay.sessionId': 'Session ID',
+        'relay.targetId': 'Push target (optional)',
       },
-      ja: { 'settings.title': 'IM Union', 'accounts.title': 'アカウント', 'accounts.add': '追加', 'accounts.edit': '編集', 'accounts.save': '保存', 'modal.cancel': 'キャンセル', 'accounts.check': '接続確認', 'accounts.pause': '一時停止', 'accounts.resume': '再開', 'accounts.remove': '削除', 'accounts.state.connected': '接続済', 'accounts.state.expired': 'セッション失効・再スキャン', 'accounts.send.failed': '最終送信失敗', 'rail.title': 'チャンネル', 'rail.search': 'セッション検索', 'rail.loading': '読み込み中…', 'rail.empty': 'IMセッションなし', 'rail.error': '読込失敗・再試行', 'rail.detached': '解除済み', 'time.now': 'たった今', 'time.minutes': '{n}分前', 'time.hours': '{n}時間前', 'time.days': '{n}日前', 'accounts.state.disconnected': '未接続', 'accounts.state.paused': '停止中', 'check.passed': '成功', 'check.failed': '失敗', 'check.unverified': '未検証', 'prefs.permission': '権限プリセット', 'prefs.permission.default': 'ホスト既定', 'exec.dm': 'DMコマンド実行', 'exec.group': 'グループコマンド実行', 'exec.on': '許可', 'exec.off': '遮断' },
-      ko: { 'settings.title': 'IM Union', 'accounts.title': '계정', 'accounts.add': '추가', 'accounts.edit': '편집', 'accounts.save': '저장', 'modal.cancel': '취소', 'accounts.check': '연결 확인', 'accounts.pause': '일시정지', 'accounts.resume': '재개', 'accounts.remove': '삭제', 'accounts.state.connected': '연결됨', 'accounts.state.expired': '세션 만료(재스캔 필요)', 'accounts.send.failed': '마지막 전송 실패', 'rail.title': '채널', 'rail.search': '세션 검색', 'rail.loading': '불러오는 중…', 'rail.empty': 'IM 세션 없음', 'rail.error': '로드 실패·재시도', 'rail.detached': '해제됨', 'time.now': '방금', 'time.minutes': '{n}분 전', 'time.hours': '{n}시간 전', 'time.days': '{n}일 전', 'accounts.state.disconnected': '미연결', 'accounts.state.paused': '정지됨', 'check.passed': '통과', 'check.failed': '실패', 'check.unverified': '미검증', 'prefs.permission': '권한 프리셋', 'prefs.permission.default': '호스트 기본', 'exec.dm': 'DM 명령 실행', 'exec.group': '그룹 명령 실행', 'exec.on': '허용', 'exec.off': '차단' },
-      fr: { 'settings.title': 'IM Union', 'accounts.title': 'Comptes', 'accounts.add': 'Ajouter', 'accounts.edit': 'Modifier', 'accounts.save': 'Enregistrer', 'modal.cancel': 'Annuler', 'accounts.check': 'Vérifier', 'accounts.pause': 'Suspendre', 'accounts.resume': 'Reprendre', 'accounts.remove': 'Supprimer', 'accounts.state.connected': 'Connecté', 'accounts.state.expired': 'Session expirée — rescanner', 'accounts.send.failed': 'Dernier envoi échoué', 'rail.title': 'Canaux', 'rail.search': 'Rechercher', 'rail.loading': 'Chargement…', 'rail.empty': 'Aucune session IM', 'rail.error': 'Échec — nouvelle tentative', 'rail.detached': 'délié', 'time.now': "à l'instant", 'time.minutes': 'il y a {n} min', 'time.hours': 'il y a {n} h', 'time.days': 'il y a {n} j', 'accounts.state.disconnected': 'Déconnecté', 'accounts.state.paused': 'Suspendu', 'check.passed': 'réussi', 'check.failed': 'échoué', 'check.unverified': 'non vérifié', 'prefs.permission': 'Préréglage de permission', 'prefs.permission.default': 'Défaut hôte', 'exec.dm': 'Commandes en MP', 'exec.group': 'Commandes en groupe', 'exec.on': 'Autoriser', 'exec.off': 'Bloquer' },
-      de: { 'settings.title': 'IM Union', 'accounts.title': 'Konten', 'accounts.add': 'Hinzufügen', 'accounts.edit': 'Bearbeiten', 'accounts.save': 'Speichern', 'modal.cancel': 'Abbrechen', 'accounts.check': 'Verbindung prüfen', 'accounts.pause': 'Pausieren', 'accounts.resume': 'Fortsetzen', 'accounts.remove': 'Entfernen', 'accounts.state.connected': 'Verbunden', 'accounts.state.expired': 'Sitzung abgelaufen — neu scannen', 'accounts.send.failed': 'Letzter Versand fehlgeschlagen', 'rail.title': 'Kanäle', 'rail.search': 'Sitzungen suchen', 'rail.loading': 'Lädt…', 'rail.empty': 'Keine IM-Sitzungen', 'rail.error': 'Fehlgeschlagen — erneut', 'rail.detached': 'gelöst', 'time.now': 'gerade eben', 'time.minutes': 'vor {n} Min.', 'time.hours': 'vor {n} Std.', 'time.days': 'vor {n} T.', 'accounts.state.disconnected': 'Getrennt', 'accounts.state.paused': 'Pausiert', 'check.passed': 'ok', 'check.failed': 'fehlgeschlagen', 'check.unverified': 'ungeprüft', 'prefs.permission': 'Berechtigungsprofil', 'prefs.permission.default': 'Host-Standard', 'exec.dm': 'DM-Befehle', 'exec.group': 'Gruppenbefehle', 'exec.on': 'Erlauben', 'exec.off': 'Blockieren' },
-      it: { 'settings.title': 'IM Union', 'accounts.title': 'Account', 'accounts.add': 'Aggiungi', 'accounts.edit': 'Modifica', 'accounts.save': 'Salva', 'modal.cancel': 'Annulla', 'accounts.check': 'Controlla', 'accounts.pause': 'Pausa', 'accounts.resume': 'Riprendi', 'accounts.remove': 'Rimuovi', 'accounts.state.connected': 'Connesso', 'accounts.state.expired': 'Sessione scaduta — riscansionare', 'accounts.send.failed': 'Ultimo invio fallito', 'rail.title': 'Canali', 'rail.search': 'Cerca sessioni', 'rail.loading': 'Caricamento…', 'rail.empty': 'Nessuna sessione IM', 'rail.error': 'Caricamento non riuscito', 'rail.detached': 'slegata', 'time.now': 'adesso', 'time.minutes': '{n} min fa', 'time.hours': '{n} h fa', 'time.days': '{n} g fa', 'accounts.state.disconnected': 'Disconnesso', 'accounts.state.paused': 'In pausa', 'check.passed': 'ok', 'check.failed': 'fallito', 'check.unverified': 'non verificato', 'prefs.permission': 'Preset permessi', 'prefs.permission.default': 'Predefinito host', 'exec.dm': 'Comandi in DM', 'exec.group': 'Comandi in gruppo', 'exec.on': 'Consenti', 'exec.off': 'Blocca' },
-      ru: { 'settings.title': 'IM Union', 'accounts.title': 'Аккаунты', 'accounts.add': 'Добавить', 'accounts.edit': 'Изменить', 'accounts.save': 'Сохранить', 'modal.cancel': 'Отмена', 'accounts.check': 'Проверить', 'accounts.pause': 'Пауза', 'accounts.resume': 'Возобновить', 'accounts.remove': 'Удалить', 'accounts.state.connected': 'Подключено', 'accounts.state.expired': 'Сессия истекла — пересканируйте', 'accounts.send.failed': 'Последняя отправка не удалась', 'rail.title': 'Каналы', 'rail.search': 'Поиск сеансов', 'rail.loading': 'Загрузка…', 'rail.empty': 'Нет IM-сеансов', 'rail.error': 'Сбой — повтор', 'rail.detached': 'отвязан', 'time.now': 'только что', 'time.minutes': '{n} мин назад', 'time.hours': '{n} ч назад', 'time.days': '{n} дн назад', 'accounts.state.disconnected': 'Отключено', 'accounts.state.paused': 'Пауза', 'check.passed': 'успех', 'check.failed': 'ошибка', 'check.unverified': 'не проверено', 'prefs.permission': 'Пресет разрешений', 'prefs.permission.default': 'По умолчанию хоста', 'exec.dm': 'Команды в ЛС', 'exec.group': 'Команды в группе', 'exec.on': 'Разрешить', 'exec.off': 'Запретить' },
-      es: { 'settings.title': 'IM Union', 'accounts.title': 'Cuentas', 'accounts.add': 'Añadir', 'accounts.edit': 'Editar', 'accounts.save': 'Guardar', 'modal.cancel': 'Cancelar', 'accounts.check': 'Comprobar', 'accounts.pause': 'Pausar', 'accounts.resume': 'Reanudar', 'accounts.remove': 'Eliminar', 'accounts.state.connected': 'Conectado', 'accounts.state.expired': 'Sesión caducada — reescanear', 'accounts.send.failed': 'Último envío fallido', 'rail.title': 'Canales', 'rail.search': 'Buscar sesiones', 'rail.loading': 'Cargando…', 'rail.empty': 'Sin sesiones IM', 'rail.error': 'Error — reintentando', 'rail.detached': 'desvinculada', 'time.now': 'ahora mismo', 'time.minutes': 'hace {n} min', 'time.hours': 'hace {n} h', 'time.days': 'hace {n} d', 'accounts.state.disconnected': 'Desconectado', 'accounts.state.paused': 'Pausado', 'check.passed': 'correcto', 'check.failed': 'fallido', 'check.unverified': 'sin verificar', 'prefs.permission': 'Preajuste de permisos', 'prefs.permission.default': 'Predeterminado del host', 'exec.dm': 'Comandos por DM', 'exec.group': 'Comandos en grupo', 'exec.on': 'Permitir', 'exec.off': 'Bloquear' },
+      ja: { 'settings.title': 'IM Union', 'accounts.title': 'アカウント', 'accounts.add': '追加', 'accounts.edit': '編集', 'accounts.save': '保存', 'modal.cancel': 'キャンセル', 'accounts.check': '接続確認', 'accounts.pause': '一時停止', 'accounts.resume': '再開', 'accounts.remove': '削除', 'accounts.state.connected': '接続済', 'accounts.state.expired': 'セッション失効・再スキャン', 'accounts.send.failed': '最終送信失敗', 'rail.title': 'チャンネル', 'rail.search': 'セッション検索', 'rail.loading': '読み込み中…', 'rail.empty': 'IMセッションなし', 'rail.error': '読込失敗・再試行', 'rail.detached': '解除済み', 'time.now': 'たった今', 'time.minutes': '{n}分前', 'time.hours': '{n}時間前', 'time.days': '{n}日前', 'accounts.state.disconnected': '未接続', 'accounts.state.paused': '停止中', 'check.passed': '成功', 'check.failed': '失敗', 'check.unverified': '未検証', 'prefs.permission': '権限プリセット', 'prefs.permission.default': 'ホスト既定', 'exec.dm': 'DMコマンド実行', 'exec.group': 'グループコマンド実行', 'exec.on': '許可', 'exec.off': '遮断', 'whitelist.title': 'Model Whitelist', 'whitelist.placeholder': 'One provider/model per line (empty = no restriction)', 'whitelist.save': 'Save Whitelist', 'whitelist.saved': 'Saved', 'whitelist.hint': 'When set, /model only allows switching within the whitelist; /models lists only whitelisted models.', 'relay.title': 'Relay Binding', 'relay.bind': 'Bind Session', 'relay.unbind': 'Unbind', 'relay.doBind': 'Add Binding', 'relay.empty': 'No bound sessions', 'relay.sessionId': 'Session ID', 'relay.targetId': 'Push target (optional)' },
+      ko: { 'settings.title': 'IM Union', 'accounts.title': '계정', 'accounts.add': '추가', 'accounts.edit': '편집', 'accounts.save': '저장', 'modal.cancel': '취소', 'accounts.check': '연결 확인', 'accounts.pause': '일시정지', 'accounts.resume': '재개', 'accounts.remove': '삭제', 'accounts.state.connected': '연결됨', 'accounts.state.expired': '세션 만료(재스캔 필요)', 'accounts.send.failed': '마지막 전송 실패', 'rail.title': '채널', 'rail.search': '세션 검색', 'rail.loading': '불러오는 중…', 'rail.empty': 'IM 세션 없음', 'rail.error': '로드 실패·재시도', 'rail.detached': '해제됨', 'time.now': '방금', 'time.minutes': '{n}분 전', 'time.hours': '{n}시간 전', 'time.days': '{n}일 전', 'accounts.state.disconnected': '미연결', 'accounts.state.paused': '정지됨', 'check.passed': '통과', 'check.failed': '실패', 'check.unverified': '미검증', 'prefs.permission': '권한 프리셋', 'prefs.permission.default': '호스트 기본', 'exec.dm': 'DM 명령 실행', 'exec.group': '그룹 명령 실행', 'exec.on': '허용', 'exec.off': '차단', 'whitelist.title': 'Model Whitelist', 'whitelist.placeholder': 'One provider/model per line (empty = no restriction)', 'whitelist.save': 'Save Whitelist', 'whitelist.saved': 'Saved', 'whitelist.hint': 'When set, /model only allows switching within the whitelist; /models lists only whitelisted models.', 'relay.title': 'Relay Binding', 'relay.bind': 'Bind Session', 'relay.unbind': 'Unbind', 'relay.doBind': 'Add Binding', 'relay.empty': 'No bound sessions', 'relay.sessionId': 'Session ID', 'relay.targetId': 'Push target (optional)' },
+      fr: { 'settings.title': 'IM Union', 'accounts.title': 'Comptes', 'accounts.add': 'Ajouter', 'accounts.edit': 'Modifier', 'accounts.save': 'Enregistrer', 'modal.cancel': 'Annuler', 'accounts.check': 'Vérifier', 'accounts.pause': 'Suspendre', 'accounts.resume': 'Reprendre', 'accounts.remove': 'Supprimer', 'accounts.state.connected': 'Connecté', 'accounts.state.expired': 'Session expirée — rescanner', 'accounts.send.failed': 'Dernier envoi échoué', 'rail.title': 'Canaux', 'rail.search': 'Rechercher', 'rail.loading': 'Chargement…', 'rail.empty': 'Aucune session IM', 'rail.error': 'Échec — nouvelle tentative', 'rail.detached': 'délié', 'time.now': "à l'instant", 'time.minutes': 'il y a {n} min', 'time.hours': 'il y a {n} h', 'time.days': 'il y a {n} j', 'accounts.state.disconnected': 'Déconnecté', 'accounts.state.paused': 'Suspendu', 'check.passed': 'réussi', 'check.failed': 'échoué', 'check.unverified': 'non vérifié', 'prefs.permission': 'Préréglage de permission', 'prefs.permission.default': 'Défaut hôte', 'exec.dm': 'Commandes en MP', 'exec.group': 'Commandes en groupe', 'exec.on': 'Autoriser', 'exec.off': 'Bloquer', 'whitelist.title': 'Model Whitelist', 'whitelist.placeholder': 'One provider/model per line (empty = no restriction)', 'whitelist.save': 'Save Whitelist', 'whitelist.saved': 'Saved', 'whitelist.hint': 'When set, /model only allows switching within the whitelist; /models lists only whitelisted models.', 'relay.title': 'Relay Binding', 'relay.bind': 'Bind Session', 'relay.unbind': 'Unbind', 'relay.doBind': 'Add Binding', 'relay.empty': 'No bound sessions', 'relay.sessionId': 'Session ID', 'relay.targetId': 'Push target (optional)' },
+      de: { 'settings.title': 'IM Union', 'accounts.title': 'Konten', 'accounts.add': 'Hinzufügen', 'accounts.edit': 'Bearbeiten', 'accounts.save': 'Speichern', 'modal.cancel': 'Abbrechen', 'accounts.check': 'Verbindung prüfen', 'accounts.pause': 'Pausieren', 'accounts.resume': 'Fortsetzen', 'accounts.remove': 'Entfernen', 'accounts.state.connected': 'Verbunden', 'accounts.state.expired': 'Sitzung abgelaufen — neu scannen', 'accounts.send.failed': 'Letzter Versand fehlgeschlagen', 'rail.title': 'Kanäle', 'rail.search': 'Sitzungen suchen', 'rail.loading': 'Lädt…', 'rail.empty': 'Keine IM-Sitzungen', 'rail.error': 'Fehlgeschlagen — erneut', 'rail.detached': 'gelöst', 'time.now': 'gerade eben', 'time.minutes': 'vor {n} Min.', 'time.hours': 'vor {n} Std.', 'time.days': 'vor {n} T.', 'accounts.state.disconnected': 'Getrennt', 'accounts.state.paused': 'Pausiert', 'check.passed': 'ok', 'check.failed': 'fehlgeschlagen', 'check.unverified': 'ungeprüft', 'prefs.permission': 'Berechtigungsprofil', 'prefs.permission.default': 'Host-Standard', 'exec.dm': 'DM-Befehle', 'exec.group': 'Gruppenbefehle', 'exec.on': 'Erlauben', 'exec.off': 'Blockieren', 'whitelist.title': 'Model Whitelist', 'whitelist.placeholder': 'One provider/model per line (empty = no restriction)', 'whitelist.save': 'Save Whitelist', 'whitelist.saved': 'Saved', 'whitelist.hint': 'When set, /model only allows switching within the whitelist; /models lists only whitelisted models.', 'relay.title': 'Relay Binding', 'relay.bind': 'Bind Session', 'relay.unbind': 'Unbind', 'relay.doBind': 'Add Binding', 'relay.empty': 'No bound sessions', 'relay.sessionId': 'Session ID', 'relay.targetId': 'Push target (optional)' },
+      it: { 'settings.title': 'IM Union', 'accounts.title': 'Account', 'accounts.add': 'Aggiungi', 'accounts.edit': 'Modifica', 'accounts.save': 'Salva', 'modal.cancel': 'Annulla', 'accounts.check': 'Controlla', 'accounts.pause': 'Pausa', 'accounts.resume': 'Riprendi', 'accounts.remove': 'Rimuovi', 'accounts.state.connected': 'Connesso', 'accounts.state.expired': 'Sessione scaduta — riscansionare', 'accounts.send.failed': 'Ultimo invio fallito', 'rail.title': 'Canali', 'rail.search': 'Cerca sessioni', 'rail.loading': 'Caricamento…', 'rail.empty': 'Nessuna sessione IM', 'rail.error': 'Caricamento non riuscito', 'rail.detached': 'slegata', 'time.now': 'adesso', 'time.minutes': '{n} min fa', 'time.hours': '{n} h fa', 'time.days': '{n} g fa', 'accounts.state.disconnected': 'Disconnesso', 'accounts.state.paused': 'In pausa', 'check.passed': 'ok', 'check.failed': 'fallito', 'check.unverified': 'non verificato', 'prefs.permission': 'Preset permessi', 'prefs.permission.default': 'Predefinito host', 'exec.dm': 'Comandi in DM', 'exec.group': 'Comandi in gruppo', 'exec.on': 'Consenti', 'exec.off': 'Blocca', 'whitelist.title': 'Model Whitelist', 'whitelist.placeholder': 'One provider/model per line (empty = no restriction)', 'whitelist.save': 'Save Whitelist', 'whitelist.saved': 'Saved', 'whitelist.hint': 'When set, /model only allows switching within the whitelist; /models lists only whitelisted models.', 'relay.title': 'Relay Binding', 'relay.bind': 'Bind Session', 'relay.unbind': 'Unbind', 'relay.doBind': 'Add Binding', 'relay.empty': 'No bound sessions', 'relay.sessionId': 'Session ID', 'relay.targetId': 'Push target (optional)' },
+      ru: { 'settings.title': 'IM Union', 'accounts.title': 'Аккаунты', 'accounts.add': 'Добавить', 'accounts.edit': 'Изменить', 'accounts.save': 'Сохранить', 'modal.cancel': 'Отмена', 'accounts.check': 'Проверить', 'accounts.pause': 'Пауза', 'accounts.resume': 'Возобновить', 'accounts.remove': 'Удалить', 'accounts.state.connected': 'Подключено', 'accounts.state.expired': 'Сессия истекла — пересканируйте', 'accounts.send.failed': 'Последняя отправка не удалась', 'rail.title': 'Каналы', 'rail.search': 'Поиск сеансов', 'rail.loading': 'Загрузка…', 'rail.empty': 'Нет IM-сеансов', 'rail.error': 'Сбой — повтор', 'rail.detached': 'отвязан', 'time.now': 'только что', 'time.minutes': '{n} мин назад', 'time.hours': '{n} ч назад', 'time.days': '{n} дн назад', 'accounts.state.disconnected': 'Отключено', 'accounts.state.paused': 'Пауза', 'check.passed': 'успех', 'check.failed': 'ошибка', 'check.unverified': 'не проверено', 'prefs.permission': 'Пресет разрешений', 'prefs.permission.default': 'По умолчанию хоста', 'exec.dm': 'Команды в ЛС', 'exec.group': 'Команды в группе', 'exec.on': 'Разрешить', 'exec.off': 'Запретить', 'whitelist.title': 'Model Whitelist', 'whitelist.placeholder': 'One provider/model per line (empty = no restriction)', 'whitelist.save': 'Save Whitelist', 'whitelist.saved': 'Saved', 'whitelist.hint': 'When set, /model only allows switching within the whitelist; /models lists only whitelisted models.', 'relay.title': 'Relay Binding', 'relay.bind': 'Bind Session', 'relay.unbind': 'Unbind', 'relay.doBind': 'Add Binding', 'relay.empty': 'No bound sessions', 'relay.sessionId': 'Session ID', 'relay.targetId': 'Push target (optional)' },
+      es: { 'settings.title': 'IM Union', 'accounts.title': 'Cuentas', 'accounts.add': 'Añadir', 'accounts.edit': 'Editar', 'accounts.save': 'Guardar', 'modal.cancel': 'Cancelar', 'accounts.check': 'Comprobar', 'accounts.pause': 'Pausar', 'accounts.resume': 'Reanudar', 'accounts.remove': 'Eliminar', 'accounts.state.connected': 'Conectado', 'accounts.state.expired': 'Sesión caducada — reescanear', 'accounts.send.failed': 'Último envío fallido', 'rail.title': 'Canales', 'rail.search': 'Buscar sesiones', 'rail.loading': 'Cargando…', 'rail.empty': 'Sin sesiones IM', 'rail.error': 'Error — reintentando', 'rail.detached': 'desvinculada', 'time.now': 'ahora mismo', 'time.minutes': 'hace {n} min', 'time.hours': 'hace {n} h', 'time.days': 'hace {n} d', 'accounts.state.disconnected': 'Desconectado', 'accounts.state.paused': 'Pausado', 'check.passed': 'correcto', 'check.failed': 'fallido', 'check.unverified': 'sin verificar', 'prefs.permission': 'Preajuste de permisos', 'prefs.permission.default': 'Predeterminado del host', 'exec.dm': 'Comandos por DM', 'exec.group': 'Comandos en grupo', 'exec.on': 'Permitir', 'exec.off': 'Bloquear', 'whitelist.title': 'Model Whitelist', 'whitelist.placeholder': 'One provider/model per line (empty = no restriction)', 'whitelist.save': 'Save Whitelist', 'whitelist.saved': 'Saved', 'whitelist.hint': 'When set, /model only allows switching within the whitelist; /models lists only whitelisted models.', 'relay.title': 'Relay Binding', 'relay.bind': 'Bind Session', 'relay.unbind': 'Unbind', 'relay.doBind': 'Add Binding', 'relay.empty': 'No bound sessions', 'relay.sessionId': 'Session ID', 'relay.targetId': 'Push target (optional)' },
     };
 
     // UI 语言：**取词时懒解析**，不在 factory 顶层冻结。真机实证：宿主初始 HTML
@@ -495,6 +519,14 @@ select.diu-input { appearance: auto; }
 .diu-footMsg { flex: 1; min-width: 0; font-size: 12px; color: var(--diu-bad); line-height: 18px; overflow-wrap: anywhere; }
 .diu-footSpacer { flex: 1; }
 .diu-overlayFallback { position: fixed; right: 16px; bottom: 16px; z-index: 9999; width: 380px; max-height: 62vh; overflow: auto; border: 1px solid var(--diu-line); border-radius: 12px; background: var(--dsw-alias-bg-layer-1, #232324); box-shadow: var(--diu-shadow); padding: 12px; }
+.diu-whitelist-textarea{width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-primary,#222);font-size:12px;font-family:monospace;resize:vertical}
+.diu-relay-dialog{padding:8px 12px;border-top:1px solid var(--dsw-alias-border-l2,#eee)}
+.diu-relay-list{margin-bottom:8px}
+.diu-relay-row{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px}
+.diu-relay-sid{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,#666)}
+.diu-relay-form{display:flex;gap:6px;flex-wrap:wrap}
+.diu-relay-form input{flex:1;min-width:120px;padding:5px 8px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-primary,#222);font-size:12px}
+.diu-btn-danger{background:var(--dsw-alias-state-error,#d32)}
 @container (max-width: 640px) {
   .diu-fields { grid-template-columns: 1fr; }
   .diu-platformHead { grid-template-columns: auto minmax(0, 1fr) auto; }
@@ -687,6 +719,52 @@ select.diu-input { appearance: auto; }
       return h('div', { style: { position: 'fixed', inset: 0, zIndex: 5000 } }, props.children);
     }
 
+    // ── relay 抄送绑定区（Phase 8）：notifyOnly 渠道账号把会话绑定到推送目标 ──
+    function RelayDialog(props) {
+      var sidHook = useState('');
+      var sid = sidHook[0];
+      var setSid = sidHook[1];
+      var tidHook = useState('');
+      var tid = tidHook[0];
+      var setTid = tidHook[1];
+      var listHook = useState([]);
+      var bindings = listHook[0];
+      var setBindings = listHook[1];
+      useEffect(function () {
+        getJSON('/relay-bindings').then(function (r) {
+          if (r.json && Array.isArray(r.json.bindings)) setBindings(r.json.bindings.filter(function (b) { return b.notifyAccountId === props.accountId; }));
+        }).catch(function () {});
+      }, [props.accountId]);
+      function doBind() {
+        if (!sid.trim()) return;
+        postJSON('/relay-bindings/bind', { sessionId: sid.trim(), notifyAccountId: props.accountId, targetId: tid.trim() || undefined }).then(function () {
+          setBindings(function (prev) { return prev.concat([{ sessionId: sid.trim(), notifyAccountId: props.accountId, boundAt: Date.now() }]); });
+          setSid('');
+        }).catch(function () {});
+      }
+      function doUnbind(sessionId) {
+        postJSON('/relay-bindings/unbind', { sessionId: sessionId }).then(function () {
+          setBindings(function (prev) { return prev.filter(function (b) { return b.sessionId !== sessionId; }); });
+        }).catch(function () {});
+      }
+      return h('div', { className: 'diu-relay-dialog' },
+        h('h4', null, t('relay.title') + ' \u2014 ' + props.accountId),
+        bindings.length > 0 ? h('div', { className: 'diu-relay-list' },
+          bindings.map(function (b) {
+            return h('div', { className: 'diu-relay-row', key: b.sessionId },
+              h('span', { className: 'diu-relay-sid' }, b.sessionId.length > 30 ? b.sessionId.slice(0, 30) + '…' : b.sessionId),
+              h('button', { className: 'diu-btn diu-btn-sm diu-btn-danger', onClick: function () { doUnbind(b.sessionId); } }, t('relay.unbind')),
+            );
+          })
+        ) : h('p', { className: 'diu-hint' }, t('relay.empty')),
+        h('div', { className: 'diu-relay-form' },
+          h('input', { placeholder: t('relay.sessionId'), value: sid, onInput: function (e) { setSid(e.target.value); } }),
+          h('input', { placeholder: t('relay.targetId'), value: tid, onInput: function (e) { setTid(e.target.value); } }),
+          h('button', { className: 'diu-btn diu-btn-primary', onClick: doBind }, t('relay.doBind')),
+        ),
+      );
+    }
+
     // ── 账号行：名称/内部键 + 状态徽章 + 操作（检查/编辑/暂停/两步删除）──────
     function AccountRow(props) {
       var row = props.row;
@@ -701,6 +779,9 @@ select.diu-input { appearance: auto; }
       var allowHook = useState(null);
       var allowDraft = allowHook[0];
       var setAllowDraft = allowHook[1];
+      var relayHook = useState(false);
+      var relayOpen = relayHook[0];
+      var setRelayOpen = relayHook[1];
 
       var missingSecrets = [];
       (row.secretFields || []).forEach(function (sf) {
@@ -810,6 +891,12 @@ select.diu-input { appearance: auto; }
             )
           : null,
         allowBlock,
+        channel.notifyOnly === true
+          ? h('div', { className: 'diu-relay' },
+              h('button', { className: 'diu-btn diu-btn-sm', onClick: function () { setRelayOpen(!relayOpen); } }, t('relay.bind')),
+              relayOpen ? h(RelayDialog, { accountId: row.accountId }) : null,
+            )
+          : null,
       );
     }
 
@@ -1334,6 +1421,25 @@ select.diu-input { appearance: auto; }
       // 已实现渠道在前（保持 meta 顺序），未实现垫底灰显。
       var sorted = implemented.concat(channels.filter(function (c) { return c.implemented !== true; }));
 
+      // ── 模型白名单（Phase 7）──
+      var wlHook = useState('');
+      var wlText = wlHook[0];
+      var setWlText = wlHook[1];
+      var wlSaved = useState(false);
+      var setWlSaved = wlSaved[1];
+      useEffect(function () {
+        getJSON('/model-whitelist').then(function (r) {
+          if (r.json && Array.isArray(r.json.whitelist)) setWlText(r.json.whitelist.join('\n'));
+        }).catch(function () {});
+      }, []);
+      function saveWhitelist() {
+        var lines = wlText.split('\n').map(function (s) { return s.trim(); }).filter(function (s) { return s !== ''; });
+        postJSON('/model-whitelist', { whitelist: lines }).then(function () {
+          setWlSaved(true);
+          setTimeout(function () { setWlSaved(false); }, 2000);
+        }).catch(function () {});
+      }
+
       var noticeNode = null;
       if (props.notice !== null && props.notice !== undefined) {
         noticeNode = h('div', { className: 'diu-banner diu-banner-' + (props.notice.kind || 'info') },
@@ -1376,6 +1482,19 @@ select.diu-input { appearance: auto; }
               }),
             ),
           ),
+        ),
+        h('div', { className: 'diu-section' },
+          h('h3', { className: 'diu-section-title' }, t('whitelist.title')),
+          h('textarea', {
+            className: 'diu-whitelist-textarea',
+            rows: 5,
+            placeholder: t('whitelist.placeholder'),
+            value: wlText,
+            onInput: function (e) { setWlText(e.target.value); },
+          }),
+          h('button', { className: 'diu-btn diu-btn-primary', onClick: saveWhitelist },
+            wlSaved ? t('whitelist.saved') : t('whitelist.save')),
+          h('p', { className: 'diu-hint' }, t('whitelist.hint')),
         ),
         h('div', { className: 'diu-platforms' },
           sorted.map(function (channel) {
@@ -1684,13 +1803,53 @@ select.diu-input { appearance: auto; }
       if (!document.hidden) { railFailures = 0; if (railTimer !== null) { clearTimeout(railTimer); railTimer = null; } railTick(); startRailPolling(); }
     });
 
+    // Cordis 服务软读（dsh-im-connect 同款纪律）：未 inject 的服务不能硬读 ctx[name]，
+    // 否则代理层直接抛且被 catch 吞掉——表现为「点击无反应」。
+    function probeService(ctx, name) {
+      if (!ctx) return undefined;
+      var reflect = ctx.reflect;
+      if (reflect && typeof reflect.get === 'function') {
+        try {
+          var found = reflect.get(name);
+          if (found !== undefined) return found;
+        } catch (_) { /* 未注入时不硬读 ctx[name]，改走 get */ }
+      }
+      if (typeof ctx.get === 'function') {
+        try {
+          var viaGet = ctx.get(name);
+          if (viaGet !== undefined) return viaGet;
+        } catch (_) { return undefined; }
+      }
+      if (reflect && typeof reflect.get === 'function') return undefined;
+      try { return ctx[name]; } catch (_) { return undefined; }
+    }
+
+    // 打开会话（参考 openHostSession 链）：uiWorkspace.openSession 优先；alpha.2+ 宿主
+    // 有 sessions.retain 时 sessions.open 不再写 mainView，**禁止回退**（否则点了等于没开）。
     function openUnionSession(ctx, id) {
+      if (!id) return false;
       try {
-        if (typeof window.__dshSessionsOpen === 'function') { window.__dshSessionsOpen(id); return; }
-        if (ctx && ctx.uiWorkspace && typeof ctx.uiWorkspace.openSession === 'function') { ctx.uiWorkspace.openSession(id); return; }
-        if (ctx && ctx.sessions && typeof ctx.sessions.open === 'function') { ctx.sessions.open(id); return; }
+        var uiWorkspace = probeService(ctx, 'uiWorkspace');
+        if (uiWorkspace && typeof uiWorkspace.openSession === 'function') {
+          uiWorkspace.openSession(id);
+          return true;
+        }
+        var sessionsSvc = probeService(ctx, 'sessions');
+        if (sessionsSvc && typeof sessionsSvc.retain === 'function') return false;
+        if (sessionsSvc && typeof sessionsSvc.open === 'function') {
+          sessionsSvc.open(id);
+          return true;
+        }
+        if (typeof window.__dshSessionsOpen === 'function') {
+          window.__dshSessionsOpen(id);
+          return true;
+        }
         location.hash = '#/session/' + encodeURIComponent(id);
-      } catch (error) { console.warn('[dsh-im-union] \u6253\u5f00\u4f1a\u8bdd\u5931\u8d25\uff1a', error); }
+        return true;
+      } catch (error) {
+        console.warn('[dsh-im-union] 打开会话失败：', error);
+        return false;
+      }
     }
 
     function ensureRailStyles() {
@@ -1698,16 +1857,26 @@ select.diu-input { appearance: auto; }
       var style = document.createElement('style');
       style.id = 'diu-rail-style';
       style.textContent =
-        '.diu-rail{display:flex;flex-direction:column;gap:6px;padding:8px;height:100%;overflow-y:auto;box-sizing:border-box}' +
+        '.diu-rail{display:flex;flex-direction:column;gap:6px;padding:10px 12px;height:100%;overflow-y:auto;box-sizing:border-box}' +
         '.diu-rail-search{width:100%;box-sizing:border-box;padding:6px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-primary,#222);outline:none;font-size:12px}' +
         '.diu-rail-group-head{display:flex;justify-content:space-between;align-items:center;padding:4px 2px;font-size:11px;color:var(--dsw-alias-label-secondary,#888)}' +
-        '.diu-rail-row{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--dsw-alias-label-primary,#222)}' +
+        '.diu-rail-row{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--dsw-alias-label-primary,#222)}' +
         '.diu-rail-row:hover{background:var(--dsw-alias-interactive-bg-hover,#f2f2f2)}' +
         '.diu-rail-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-border-l4,#ccc);flex:none}' +
         '.diu-rail-dot.on{background:var(--dsw-alias-state-success,#22a06b)}' +
         '.diu-rail-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-        '.diu-rail-time{font-size:11px;color:var(--dsw-alias-label-tertiary,#aaa);flex:none}' +
-        '.diu-rail-empty{padding:14px 8px;font-size:12px;color:var(--dsw-alias-label-secondary,#888);text-align:center}';
+        '.diu-rail-time{font-size:11px;color:var(--dsw-alias-label-tertiary,#aaa);flex:none;margin-right:2px;text-align:right}' +
+        '.diu-rail-empty{padding:14px 8px;font-size:12px;color:var(--dsw-alias-label-secondary,#888);text-align:center}' +
+        // 侧栏 wrap：完全沿用 dsh-im-connect 既有 tab 样式（无框、下划线高亮），
+        // 不自造带边框按钮（用户裁定：有现成样式参考，不要加框）。
+        '.diu-wrap{display:flex;flex-direction:column;min-height:0;flex:1;height:100%;overflow:hidden}' +
+        '.diu-official-tree{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}' +
+        '.diu-tabs{display:flex;gap:18px;padding:4px 12px 0;border-bottom:1px solid var(--dsw-alias-border-l2,#e5e5e5);flex:none}' +
+        '.diu-tab{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-secondary,#888);padding:8px 4px;font-size:13px;cursor:pointer}' +
+        // 点过的 tab 不留默认黑框（截图里「频道」被方框围住）；键盘聚焦仍给焦点环。
+        '.diu-tab:focus{outline:none}' +
+        '.diu-tab:focus-visible{outline:2px solid var(--dsw-alias-border-brand,#888);outline-offset:2px;border-radius:4px}' +
+        '.diu-tab.on{color:var(--dsw-alias-label-primary,#222);box-shadow:inset 0 -2px 0 currentColor}';
       document.head.appendChild(style);
     }
 
@@ -1769,85 +1938,213 @@ select.diu-input { appearance: auto; }
       );
     }
 
-    function mountChannelRail(ctx) {
-      var renderRail = function (hostProps) {
-        return h(ChannelRail, {
-          onOpen: function (id) {
-            if (hostProps && typeof hostProps.openSession === 'function') hostProps.openSession(id);
-            else openUnionSession(ctx, id);
-          },
-        });
-      };
-      var inserted = false;
-      // ① 原生 tab registry（宿主自带，或 dsh-im-connect 壳挂在 occupant 上）。
-      //    插件加载有先后：im-connect 的壳在 apply 时点尤其常还没就位（真机实证）——
-      //    照参考 sync 形态轮询重试 250ms×32，插入成功即停。
-      var tryRegistry = function () {
-        try {
-          var read = ctx.slots.entriesOfSlot || ctx.slots.entries;
-          var entries = (read && read.call(ctx.slots, 'sidebar.workspaces')) || [];
-          for (var i = 0; i < entries.length; i++) {
-            var entry = entries[i];
-            var registry = (entry && entry.__dshNativeTabs) || (entry && entry.component && entry.component.__dshNativeTabs) || null;
-            if (registry && typeof registry.insert === 'function') {
-              var hasImConnect = false;
-              try { hasImConnect = typeof registry.getTabs === 'function' && registry.getTabs().some(function (tb) { return tb && tb.id === 'channels'; }); } catch (_) {}
-              registry.insert({
-                id: 'im-union-channels',
-                label: hasImConnect ? 'Union' : t('rail.title'),
-                order: 25,
-                matchSession: function (id) { return String(id).indexOf('im:union:') === 0; },
-                render: function (props) { return renderRail(props); },
-              });
-              return true;
-            }
+    // ── 侧栏 wrap（Phase 6）：包裹宿主官方任务树，自建「任务/频道」两页签 ──
+    // 形态照 dsh-im-connect 实战先例：直接替换 sidebar.workspaces 槽位的 component
+    // 为自己的 Shell（任务页 = 渲染原官方组件，频道页 = 本插件 rail），并用
+    // slots.subscribe + 重试环保持同步；检测到已被其它插件包裹则绝不插手（隔离优先）。
+    class UnionSidebarBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { failed: false };
+      }
+      static getDerivedStateFromError() {
+        return { failed: true };
+      }
+      componentDidCatch(error) {
+        console.warn('[dsh-im-union] 侧栏 wrap 渲染失败，已回落宿主原生会话列表：', error);
+      }
+      render() {
+        if (this.state.failed) {
+          var Official = this.props.officialTree;
+          return Official ? h(Official, this.props.hostProps) : null;
+        }
+        return this.props.children;
+      }
+    }
+
+    function readSidebarTab() {
+      try {
+        var v = localStorage.getItem('diu-sidebar-tab');
+        return v === 'channels' ? 'channels' : 'tasks';
+      } catch (_) { return 'tasks'; }
+    }
+
+    // IM 会话判据（参考 isChannelSession）：宿主 IM 约定全用 `im:` 前缀。
+    function isChannelSession(id) {
+      return String(id || '').indexOf('im:') === 0;
+    }
+
+    // 任务树快照过滤（参考 filterTaskSessions）：去掉 im: 会话，否则左栏「任务」页
+    // 会把 IM 会话当普通会话显示成「未分组」。
+    function filterTaskState(state) {
+      var src = state || { ids: [], byId: {}, current: null };
+      var srcIds = src.ids || [];
+      var ids = [];
+      for (var i = 0; i < srcIds.length; i++) {
+        if (!isChannelSession(srcIds[i])) ids.push(srcIds[i]);
+      }
+      if (ids.length === srcIds.length) return src;
+      var byId = {};
+      for (var j = 0; j < ids.length; j++) {
+        if (src.byId && src.byId[ids[j]]) byId[ids[j]] = src.byId[ids[j]];
+      }
+      return Object.assign({}, src, { ids: ids, byId: byId });
+    }
+
+    function UnionSessionSwitcher(props) {
+      var tabHook = useState(readSidebarTab);
+      var tab = tabHook[0];
+      var setTab = tabHook[1];
+      var useEffect = React.useEffect;
+      useEffect(function () {
+        try { localStorage.setItem('diu-sidebar-tab', tab); } catch (_) {}
+      }, [tab]);
+      var Official = props.officialTree;
+      // 打开会话（参考 openHostSession 链）：props.openSession/open 优先，缺位退
+      // probeService 软读；并跟随会话类型切页（im: → 频道、普通 → 任务）。
+      function openSession(id) {
+        if (!id) return;
+        var hostOpen = (props && (props.openSession || props.open)) || null;
+        var ok = false;
+        if (typeof hostOpen === 'function') {
+          try { hostOpen(id); ok = true; } catch (error) {
+            console.warn('[dsh-im-union] props.openSession 失败，回退软读链：', error);
           }
-        } catch (error) { console.info('[dsh-im-union] native tab probe unavailable: ', error && error.message); return true; }
-        return false;
-      };
-      // ② 独立 sidebar.channels 槽（宿主提供即用）；都不成则仅日志（③）。
-      var tryStandaloneSlot = function () {
-        try {
-          if (typeof ctx.slots.inject === 'function' && typeof ctx.slots.register === 'function') {
-            ctx.slots.inject('sidebar.channels', function () {
-              return ctx.slots.register({
-                name: 'sidebar.channels',
-                id: 'im-union-channels',
-                inject: function () {
-                  return { openSession: function (id) { openUnionSession(ctx, id); } };
-                },
-              }, function () { return renderRail(null); });
-            });
-            return true;
-          }
-        } catch (error) { console.info('[dsh-im-union] sidebar.channels slot unavailable: ', error && error.message); }
-        return false;
-      };
-      var tries = 0;
-      var mountTimer = window.setInterval(function () {
-        tries += 1;
-        if (!inserted && tryRegistry()) {
-          inserted = true;
-          window.clearInterval(mountTimer);
-          console.info('[dsh-im-union] channels tab inserted into native registry (try ' + tries + ')');
+        }
+        if (!ok) ok = openUnionSession(props.__unionCtx || {}, id);
+        if (ok) setTab(isChannelSession(id) ? 'channels' : 'tasks');
+        else console.warn('[dsh-im-union] 会话打开面不可用（props.openSession / uiWorkspace / sessions.open 均缺位）：', id);
+      }
+      // 任务树数据面替换（参考 useTaskSessions）：官方树吃 props.useSessions，
+      // 我们注入过滤版（排除 im: 会话）——否则「未分组」里会冒出 IM 会话。
+      var rawUseSessions = props.useSessions;
+      function useTaskSessions(selector, eq) {
+        if (typeof rawUseSessions === 'function') {
+          return rawUseSessions(function (state) {
+            var filtered = filterTaskState(state);
+            return typeof selector === 'function' ? selector(filtered) : filtered;
+          }, eq);
+        }
+        var empty = { ids: [], byId: {}, current: null };
+        return typeof selector === 'function' ? selector(empty) : empty;
+      }
+      var officialProps = Object.assign({}, props, { useSessions: useTaskSessions });
+      var tabs = h('div', { className: 'diu-tabs', role: 'tablist', 'aria-label': t('rail.tabTasks') + '/' + t('rail.tabChannels') },
+        h('button', {
+          type: 'button', role: 'tab', 'aria-selected': tab === 'tasks',
+          className: 'diu-tab' + (tab === 'tasks' ? ' on' : ''),
+          onClick: function () { setTab('tasks'); },
+        }, t('rail.tabTasks')),
+        h('button', {
+          type: 'button', role: 'tab', 'aria-selected': tab === 'channels',
+          className: 'diu-tab' + (tab === 'channels' ? ' on' : ''),
+          onClick: function () { setTab('channels'); },
+        }, t('rail.tabChannels')),
+      );
+      var body;
+      if (tab === 'tasks') {
+        body = Official ? h('div', { className: 'diu-official-tree' }, h(Official, officialProps)) : null;
+      } else {
+        body = h(ChannelRail, { onOpen: openSession });
+      }
+      return h('div', { className: 'diu-wrap' }, tabs, body);
+    }
+
+    function mountChannelRailSelf(ctx) {
+      ensureRailStyles();
+      startRailPolling();
+      try {
+        if (typeof ctx.slots.inject !== 'function') {
+          console.info('[dsh-im-union] slots.inject 缺位，侧栏 wrap 不可用（设置面板仍可用）');
           return;
         }
-        if (tries >= 32) {
-          window.clearInterval(mountTimer);
-          if (!inserted && tryStandaloneSlot()) {
-            inserted = true;
-            console.info('[dsh-im-union] channels rail on standalone sidebar.channels slot');
-          }
-          if (!inserted) console.info('[dsh-im-union] channels rail: no mount point (sessions still manageable via /sessions)');
-        }
-      }, 250);
-      startRailPolling();
+        ctx.slots.inject('sidebar.workspaces', function () {
+          var wrappedEntry = null;
+          var originalComp = null;
+          var ownedWrapper = null;
+          var syncing = false;
+          var unwrap = function () {
+            try {
+              if (wrappedEntry !== null && originalComp !== null && wrappedEntry.component === ownedWrapper) {
+                wrappedEntry.component = originalComp;
+              }
+            } catch (_) {}
+            wrappedEntry = null;
+            originalComp = null;
+            ownedWrapper = null;
+          };
+          var sync = function () {
+            if (syncing) return;
+            syncing = true;
+            try {
+              var read = ctx.slots.entriesOfSlot || ctx.slots.entries;
+              var entries = (read && read.call(ctx.slots, 'sidebar.workspaces')) || [];
+              var occupant = null;
+              for (var i = 0; i < entries.length; i++) {
+                if (entries[i] && entries[i].component) { occupant = entries[i]; break; }
+              }
+              if (wrappedEntry !== null && (occupant !== wrappedEntry || occupant.component !== ownedWrapper)) unwrap();
+              if (!occupant) { unwrap(); return; }
+              // 隔离优先：已被其它插件包裹/占用（im-connect、codex-ui、automation 等）→ 绝不插手
+              var comp = occupant.component;
+              if (comp.__unionWrapped) return;
+              if (comp.__imConnectWrapped || comp.__dshNativeTabHost || comp.__dshAutomationWrapped) {
+                if (wrappedEntry === null) {
+                  console.info('[dsh-im-union] sidebar.workspaces 已被其它插件接管，不插手（rail 在设置面板可用）');
+                }
+                return;
+              }
+              if (wrappedEntry !== null) return;
+              originalComp = comp;
+              var Official = originalComp;
+              function UnionSidebarShell(innerProps) {
+                return h(UnionSidebarBoundary, { officialTree: Official, hostProps: innerProps },
+                  h(UnionSessionSwitcher, Object.assign({}, innerProps, { officialTree: Official, __unionCtx: ctx })));
+              }
+              UnionSidebarShell.displayName = 'UnionSidebarShell';
+              UnionSidebarShell.__unionWrapped = true;
+              UnionSidebarShell.__dshNativeTabHost = true;
+              UnionSidebarShell.__unionOriginal = Official;
+              occupant.component = UnionSidebarShell;
+              ownedWrapper = UnionSidebarShell;
+              wrappedEntry = occupant;
+              console.info('[dsh-im-union] sidebar.workspaces 已自持 wrap（任务/频道两页签）');
+            } catch (error) {
+              console.warn('[dsh-im-union] 侧栏 wrap 失败：', error);
+            } finally {
+              syncing = false;
+            }
+          };
+          sync();
+          var unsubWorkspaces = typeof ctx.slots.subscribe === 'function'
+            ? ctx.slots.subscribe('sidebar.workspaces', sync)
+            : function () {};
+          var unsubSidebar = typeof ctx.slots.subscribe === 'function'
+            ? ctx.slots.subscribe('sidebar', sync)
+            : function () {};
+          window.addEventListener('dsh-native-sidebar-change', sync);
+          // 插件加载顺序不定：250ms × 40（10s 封顶）重试，包裹成功即停。
+          var retries = 0;
+          var timer = window.setInterval(function () {
+            sync();
+            if (wrappedEntry !== null || ++retries >= 40) window.clearInterval(timer);
+          }, 250);
+          return function () {
+            window.clearInterval(timer);
+            try { unsubWorkspaces(); unsubSidebar(); } catch (_) {}
+            window.removeEventListener('dsh-native-sidebar-change', sync);
+            unwrap();
+          };
+        });
+      } catch (error) {
+        console.warn('[dsh-im-union] sidebar.workspaces 注入失败：', error);
+      }
     }
 
     var inject = ['slots', 'locale', 'sessions', 'workspaces'];
 
     function apply(ctx) {
-      try { mountChannelRail(ctx); } catch (error) { console.warn('[dsh-im-union] 渠道视角挂载失败：', error); }
+      try { mountChannelRailSelf(ctx); } catch (error) { console.warn('[dsh-im-union] 渠道视角挂载失败：', error); }
       console.info('[dsh-im-union] apply invoked, slots:', typeof ctx && ctx.slots ? Object.keys(ctx.slots).join(',') : 'none')
       installStyles();
       // apply 期顶层注册——不许关进任何回调。
