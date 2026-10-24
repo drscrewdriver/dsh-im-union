@@ -2,6 +2,12 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.4.8（宿主枚举补票：0.2.1-rc.3）
+
+### Changed
+
+- hosts.mjs 单源追加 `0.2.1-rc.3`（12→13 tag），sync-hosts 下发 package.json engines/6 个 dsh-* peers、dsh.plugin.json、README 双语管理块与 locale/plugin 描述同串。
+- 补票依据：rc.2→rc.3 契约面零断裂（host-matrix 14 列配对探针复核 + source-analysis v0.2.1-rc.3 四件套）；本插件不触 `ctx.web` provider 钉选、模型标签槽与 `startSession` 系调用面。
 ## 0.4.7（/relay 别名解析）
 
 ### Added
