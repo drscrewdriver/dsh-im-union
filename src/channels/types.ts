@@ -91,13 +91,15 @@ export interface ChannelAdapter {
   sendFile?(address: ChatAddress, file: OutboundFile, signal?: AbortSignal): Promise<Receipt>
   /** 语音出站（T3.5）：文本→TTS→渠道语音消息；仅飞书语音档实装，其余渠道无此方法。 */
   speak?(address: ChatAddress, text: string): Promise<Receipt>
-  /** 交互式提问/审批按钮；返回用户回包（文本或选项）。 */
+  /** 交互式提问/审批按钮；返回用户回包（文本或选项）。
+   * opts.ownerUserId：只接受该发起者的点按（飞书卡片回传需它做 D5 校验）。 */
   askChoices?(
     address: ChatAddress,
     question: string,
     options: readonly string[],
     multi: boolean,
     signal?: AbortSignal,
+    opts?: { ownerUserId?: string },
   ): Promise<{ answer: string; uncertain: boolean }>
   setTyping?(address: ChatAddress): Promise<void>
   /** 渠道内准入三态：true 放行 / false 拒绝 / undefined 交给全局白名单。 */

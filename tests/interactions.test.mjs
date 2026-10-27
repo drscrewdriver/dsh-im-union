@@ -177,6 +177,24 @@ test('按钮面（nativeChoices+askChoices）：答案映射；uncertain 映射 
   assert.equal(await inflightC, 'rejected')
 })
 
+test('按钮面期间文本回复同样定夺（竞速）：打字不会被当成新任务', async () => {
+  let asked = 0
+  const adapter = fakeAdapter({
+    caps: { nativeChoices: true },
+    // 永不回包：模拟用户只打字不点按钮
+    askChoices: async () => {
+      asked += 1
+      return new Promise(() => undefined)
+    },
+  })
+  const a = makeBroker({ adapter, timeoutMs: 5000 })
+  const inflight = a.broker.handleApproval({ agent: { session: { id: 'sess-1' } }, toolName: 'bash' }, a.next)
+  await waitUntil(() => asked === 1)
+  assert.equal(adapter.replies.length, 0, '按钮面不另发文本菜单')
+  assert.equal(a.broker.consumeInbound('acct-1', dm, 'u1', '2'), true, '文本回复被审批消费')
+  assert.equal(await inflight, 'rejected')
+})
+
 test('提问闭环：单选序号 / custom 文本 / 多选逗号', async () => {
   const q = {
     id: 'q1',

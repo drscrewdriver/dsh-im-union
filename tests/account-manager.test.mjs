@@ -139,7 +139,18 @@ test('listPublic：零 secret 值只报 configured；alias/paused 透传', async
   assert.equal(rows[0].alias, '主号')
   assert.equal(rows[0].secretFields[0].key, 'botToken')
   assert.equal(rows[0].secretFields[0].configured, true)
+  assert.equal(rows[0].secretFields[0].required, true, '必填位随字段下发（设置页据此判缺失）')
   assert.ok(!JSON.stringify(rows).includes('SECRET-VALUE'), '任何视图不得携带 secret 值')
+})
+
+test('listPublic：可选密钥（飞书 dashScopeKey）未入库不下发为必填缺失', async () => {
+  const { manager } = makeManager()
+  await manager.upsert(rec({ accountId: 'fs1', channel: 'feishu' }), { appId: 'cli_1', appSecret: 'sec' })
+  const row = (await manager.listPublic()).find((r) => r.accountId === 'fs1')
+  const dash = row.secretFields.find((f) => f.key === 'dashScopeKey')
+  assert.equal(dash.configured, false, '未入库（可选，不阻断连接）')
+  assert.equal(dash.required, false, 'meta required:false → 不得计入「凭据缺失」红徽标')
+  assert.equal(row.secretFields.find((f) => f.key === 'appId').required, true)
 })
 
 test('listPublic：config 回显按 meta plain 字段白名单过滤（设置页编辑预填）', async () => {

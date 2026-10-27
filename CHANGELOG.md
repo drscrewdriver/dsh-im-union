@@ -2,6 +2,57 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.4.12（飞书审批卡片：权限 ask 走按钮确认）
+
+### Added
+
+- **飞书 `askChoices` 实装（本插件第一个真按钮面渠道）**：宿主审批（T1.9）不只能回「1/2/c」文本，而是直接收到一张带「允许一次 / 拒绝」按钮的卡片，点按钮即定夺。`caps.nativeChoices` 由 false 改 true（此前所有渠道都是 false 或缺面，飞书是第一个把这条分支跑通的）
+- **协议事实（真机实测，写进代码注释）**：飞书 2.0 schema 的 `body.elements` **已不支持 `action` 标签**（`230099 / 200861 unsupported tag action`），按钮卡片必须走 1.0 形态（顶层 `elements` + `action`/`button`）；而内联 `interactive` 消息不碰 cardkit 实体面，**不需要 `cardkit:card:write`**（与流式卡片不同一条权限链）
+- **回传走同一条长连接**：`EventDispatcher` 注册 `card.action.trigger`（官方 SDK 1.76 自带该分发 + 按 chatId 去重/加锁/排队），无需另开 webhook；回包给 `toast` 让用户看到「已记录：拒绝」
+
+### Fixed
+
+- **按钮期间用户打字会被当成新任务丢给模型**：原 `handleApproval` 的按钮分支是直接 `await adapter.askChoices(...)`，期间**不登记 pending**，所以用户习以为常地回一句「可以」会落进会话队列。现改为**按钮 + 文本双路竞速**（`approvalViaButtons`）：卡片在位时「1/2/c」同样定夺，先到为准
+- **按钮面无渠道侧超时**：适配器 `askChoices` 自带 5 分钟上限（与 D5 对齐）+ `signal` abort 即收；`disconnect()` 释放所有在位卡片（空答=取消，fail-closed）
+
+### Changed
+
+- `askChoices` 契约加第 6 个可选参 `opts.ownerUserId`：卡片回传带的是点击者身份，需比对发起者才能守 D5（**只有发起者能定夺**，他人点击不改判，只回 toast 说明）
+- 飞书 `multi=true` 明确拒接（卡片无多选原语）：抛错后 broker 回落文本菜单，不造假成单选
+- 迟到的重复点按（卡还在、pending 已清）一律忽略；审批卡按 `message_id` 键控，同聊天先后两张卡不会串台
+
+## 0.4.11（回合内「处理中」信号 — 引擎接线 + 飞书表情落地）
+
+### Added
+
+- **引擎侧第一次真正调 `setTyping`**：`runTurn` 在 prompt 前发回合开始信号（`caps.typing` 位 + `setTyping` 方法双门控）。此前 Discord/Telegram/Matrix/QQ/微信 六个适配器都实现了 `setTyping`，但引擎侧**零调用点**——它们全是死代码；这次一并激活
+- **飞书「处理中」落地为表情回应**：飞书无 typing API（客户端不暴露），实测 `POST/DELETE /open-apis/im/v1/messages/{id}/reactions` 全链 `code 0`，因此在用户本条入站消息上贴 `OnIt`（官方「需处理/进行中」语义）：回合开始贴、回复/卡片落定即删、没删成 2 分钟 TTL 自清；同一聊天只留一个；表情接口缺权/限频/消息被撕一律静默，不阻断回合
+- 飞书 `caps.typing` / `caps.statusReaction` 由 false 改 true（声明=真实现：两个位同一个落地物）
+
+### Changed
+
+- 入站接收时记住 `chatId → message_id`（状态位锚点）；状态位仅沾在用户那条消息上，不额外发一条「思考中…」占位消息，不污染会话历史
+
+## 0.4.10（多回合接续：同一聊天不得被劈成两条轨迹）
+
+### Fixed
+
+- **飞书第二回合另起会话，轨迹分叉（真机 desktop 实证）**：`apply` 期会话后端是 `none`，首回合入站时 `ensureSessionId` 直接返回隐式 id（`im:union:feishu:dm:oc_…`）——宿主按该 id 落了盘（目录 `im~003Aunion…`）；惰性后端随后升级 `native`，第二回合就调 `createSession(hint)`，而 desktop 线 `sessionController.create` 面缺位 → 回退 `agents.create`（不收 sessionId）→ 宿主生成 `session-uuid`，`router.bind` 改绑到 UUID。结果同一聊天被劈成两段：首段在 `im:union:` 目录（进「频道」分组），第二段在 `session-uuid` 目录（落「未分组」），jsonl 各写各的
+- **修法（先查后建）**：`ensureSessionId` 在 `createSession` 之前先查宿主会话列表，已有该 `im:union:` id 则直接接续（不 create、不重复应用账号偏好——存量会话不动）；命中后进进程内缓存，后续回合不重复查。查询面异常/缺位按「未存在」处理，仍走 create 兜底
+- **可操作的排障日志**：宿主改派成非 `im:` 前缀 id（会落「未分组」）时，除既有「请求 id → 宿主实际 id」info，另打一条 warn 给出 `/session <原隐式 id>` 的接回手段；不再只留一条 id 差异让人猜
+
+## 0.4.9（飞书诊断假红收口 + 可选密钥不再算缺失）
+
+### Fixed
+
+- **飞书「凭据无效」假红（真机 desktop 实证）**：`diagnose` 凭据位探的是 `GET /open-apis/bot/v2/info`——该路径不存在（服务端回 `404 page not found` 纯文本，SDK 对非 2xx 直接抛），于是任何正确凭据都落 catch 分支报「凭据或网络无效」。现改探 `POST /open-apis/auth/v3/tenant_access_token/internal`（唯一对 appSecret 做真裁决的面：错 secret → 10014），并把「机器人能力」拆成独立位 `bot-ability`（`GET /open-apis/bot/v3/info`：有 bot → code 0；无 bot → 11205）——bot 面本身不校验 secret（错 secret 同样回 11205），探它只能验能力不能验凭据
+- **「长连接通过」不再被误读为可收发**：`ws-long-connection` 置 passed 时附提示「长连接已建立（不能据此推定机器人能力/消息权限已开通）」——无机器人能力时事件不投递、消息发不出，与长连接握手是两件事
+- **可选密钥被算成「凭据缺失」**：`listPublic` 对 meta 里所有 `secret:true` 字段一律下发 `configured`，设置页据此把未入库的**可选**键（飞书 `dashScopeKey` 语音、微信 `botToken` 扫码自动写）标成红徽标「凭据缺失：…」，观感上等同连接被阻断。现 `secretFields` 随字段下发 `required`，客户端只对 `required!==false` 的缺失出红徽标
+
+### Changed
+
+- 诊断 hint 不再一律「凭据或网络无效」：网络类错误回「网络不可达：<message>」，其余回「凭据探测失败：<message>」（只取 error.message，不透传 axios config——那里带着 Authorization 与请求体）
+
 ## 0.4.8（宿主枚举补票：0.2.1-rc.3）
 
 ### Changed

@@ -41,7 +41,9 @@ export interface PublicAccount {
   /** 最近一次出站发送（设置卡诊断位：「发送失败」vs「受理未送达」一眼可辨）。 */
   lastSendAt?: number
   lastSendOk?: boolean
-  secretFields: Array<{ key: string; configured: boolean }>
+  /** 凭据键的入库状态；required=false 的可选键（语音 DashScope Key、扫码 botToken）
+   * 缺失不得算入「凭据缺失」——只是未开通可选项，不影响连接。 */
+  secretFields: Array<{ key: string; configured: boolean; required: boolean }>
   /** 白名单是管理员自录配置（非平台回流的原始用户标识），设置页需回显编辑。 */
   dmAllowlist: string[]
   groupEnabled?: boolean
@@ -369,11 +371,11 @@ export class AccountManager {
   async listPublic(): Promise<PublicAccount[]> {
     const rows: PublicAccount[] = []
     for (const record of this.records) {
-      const fields: Array<{ key: string; configured: boolean }> = []
+      const fields: Array<{ key: string; configured: boolean; required: boolean }> = []
       for (const field of CHANNEL_META[record.channel]?.fields ?? []) {
         if (!field.secret) continue
         const value = await this.resolveSecret(record, field.key)
-        fields.push({ key: field.key, configured: value !== undefined })
+        fields.push({ key: field.key, configured: value !== undefined, required: field.required !== false })
       }
       // 明文配置按 meta plain 字段白名单过滤后回显（设置页编辑预填）；
       // meta 之外的杂键与 secret 键一律不出现（D4 同源纪律）。

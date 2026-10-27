@@ -106,8 +106,13 @@ function fakeLark(opts = {}) {
       }
       this.request = async (o) => {
         created.requestCalls.push(o)
+        if (typeof opts.requestRoute === 'function') {
+          const out = opts.requestRoute(o)
+          if (out instanceof Error) throw out
+          return out
+        }
         if (opts.requestThrows !== undefined) throw opts.requestThrows
-        return opts.requestResult ?? { code: 0, data: { bot: { open_id: 'ou_bot' } } }
+        return opts.requestResult ?? { code: 0, tenant_access_token: 't-fake', data: { bot: { open_id: 'ou_bot' } } }
       }
     },
   }
@@ -172,14 +177,19 @@ test('未 connect 就发消息 → 明确抛（不静默）', async () => {
   await assert.rejects(adapter.reply({ channel: 'feishu', kind: 'dm', chatId: 'c' }, 'x'), /未初始化/)
 })
 
-test('diagnose 三态：凭据 passed/failed + ws 位 + 权限位 unverified 明示', async () => {
+test('diagnose 三态：凭据 passed/failed + ws 位 + 机器人能力位 + 权限位 unverified 明示', async () => {
   const ok = makeAdapter()
   await ok.adapter.connect()
   const checks = await ok.adapter.diagnose()
-  assert.equal(checks[0].status, 'passed')
-  assert.equal(checks[1].status, 'passed', 'ws 已连')
-  assert.equal(checks[2].status, 'unverified')
-  assert.ok(checks[2].hint.includes('权限'), '权限位给引导不谎报')
+  const byName = (n) => checks.find((c) => c.name === n)
+  assert.equal(byName('credentials-valid').status, 'passed')
+  assert.equal(byName('ws-long-connection').status, 'passed', 'ws 已连')
+  assert.equal(byName('bot-ability').status, 'passed', '默认 fake 回 code 0')
+  assert.equal(byName('permission-im-message').status, 'unverified')
+  assert.ok(byName('permission-im-message').hint.includes('权限'), '权限位给引导不谎报')
+  // 凭据探测走 token 端点（bot/v2/info 不存在，探它必假失败）
+  assert.equal(ok.created.requestCalls[0].url, '/open-apis/auth/v3/tenant_access_token/internal', '凭据位探 token 端点')
+  assert.equal(ok.created.requestCalls[0].data.app_id, 'cli_x', '带 appId 但 diagnose 不回显 secret')
 
   const bad = makeAdapter({ requestThrows: new Error('401') })
   await bad.adapter.connect()
@@ -190,6 +200,24 @@ test('diagnose 三态：凭据 passed/failed + ws 位 + 权限位 unverified 明
   const checksC = await never.adapter.diagnose()
   assert.equal(checksC[0].status, 'failed')
   assert.equal(checksC[1].status, 'unverified')
+})
+
+test('diagnose：appSecret 错（10014）→ 凭据位 failed；机器人能力未开通（11205）→ bot 位 failed 且两者不混谈', async () => {
+  const wrongSecret = makeAdapter({ requestRoute: (o) => (o.url.includes('tenant_access_token') ? { code: 10014, msg: 'app secret invalid' } : { code: 0 }) })
+  await wrongSecret.adapter.connect()
+  const checksA = await wrongSecret.adapter.diagnose()
+  assert.equal(checksA.find((c) => c.name === 'credentials-valid').status, 'failed')
+  assert.match(checksA.find((c) => c.name === 'credentials-valid').hint, /appId\/appSecret 无效/)
+  assert.equal(checksA.find((c) => c.name === 'bot-ability').status, 'passed', '错 secret 不改 bot 位结论（bot 面不校验凭据）')
+
+  const noBot = makeAdapter({ requestRoute: (o) => (o.url.includes('bot/v3/info') ? { code: 11205, msg: 'app do not have bot' } : { code: 0, tenant_access_token: 't-fake' }) })
+  await noBot.adapter.connect()
+  const checksB = await noBot.adapter.diagnose()
+  assert.equal(checksB.find((c) => c.name === 'credentials-valid').status, 'passed', '凭据有效：不再假报失败')
+  const bot = checksB.find((c) => c.name === 'bot-ability')
+  assert.equal(bot.status, 'failed')
+  assert.match(bot.hint, /机器人/)
+  assert.match(checksB.find((c) => c.name === 'ws-long-connection').hint, /不能据此推定/, '长连接通过不等于能收发')
 })
 
 test('caps 首版档位：逐步消息模式（editStream false），maxMessageLength 4000', () => {
@@ -428,6 +456,107 @@ test('text 档：caps 全 false 且不消费 card REST（引擎分段 reply 退�
   await assert.rejects(adapter.beginStream({ channel: 'feishu', kind: 'dm', chatId: 'oc_1' }), /逐步消息档/)
   await adapter.reply({ channel: 'feishu', kind: 'dm', chatId: 'oc_1' }, '文本')
   assert.ok(!fetch.calls.some((c) => c.url.includes('/cardkit/')))
+})
+
+test('typing 档（飞书无 typing API）：入站消息贴 OnIt 表情，reply 落地即回收', async () => {
+  const fetch = cardFetch((url) => {
+    if (url.includes('/auth/v3/tenant_access_token')) return feishuResp({ tenant_access_token: 't-abc', expire: 3600 })
+    if (url.includes('/reactions')) return feishuResp({ data: { reaction_id: 'r-1' } })
+    return feishuResp({})
+  })
+  const { lark } = fakeLark()
+  const adapter = new FeishuAdapter({ appId: 'cli', appSecret: 'sec', lark, fetchImpl: fetch.impl })
+  await adapter.connect()
+  assert.equal(adapter.caps.typing, true, 'typing 位声明')
+  assert.equal(adapter.caps.statusReaction, true, '状态表情同源声明')
+
+  await adapter.injectEvent('im.message.receive_v1', textEvent()) // 记住入站 message_id=om_1
+  const address = { channel: 'feishu', kind: 'dm', chatId: 'oc_chat' }
+  await adapter.setTyping(address)
+  const added = fetch.calls.find((c) => c.method === 'POST' && c.url.includes('/im/v1/messages/om_1/reactions'))
+  assert.ok(added, '挂在用户本条消息上')
+  assert.equal(added.body.reaction_type.emoji_type, 'OnIt')
+
+  await adapter.reply(address, '答复')
+  const removed = fetch.calls.find((c) => c.method === 'DELETE' && c.url.includes('/im/v1/messages/om_1/reactions/r-1'))
+  assert.ok(removed, '回复落地即回收状态位')
+})
+
+test('typing 档：无入站 message_id / 表情接口失败：静默不抛（不阻断回合）', async () => {
+  const fetch = cardFetch((url) => {
+    if (url.includes('/auth/v3/tenant_access_token')) return feishuResp({ tenant_access_token: 't-abc', expire: 3600 })
+    if (url.includes('/reactions')) return { ok: true, status: 200, json: async () => ({ code: 230002, msg: 'bot is not in chat' }) }
+    return feishuResp({})
+  })
+  const { lark } = fakeLark()
+  const adapter = new FeishuAdapter({ appId: 'cli', appSecret: 'sec', lark, fetchImpl: fetch.impl })
+  await adapter.connect()
+  // 没有入站记录 → 直接返回，不发请求
+  await adapter.setTyping({ channel: 'feishu', kind: 'dm', chatId: 'oc_none' })
+  assert.equal(fetch.calls.filter((c) => c.url.includes('/reactions')).length, 0)
+  // 有入站记录但平台拒（无权限/限频）→ 静默
+  await adapter.injectEvent('im.message.receive_v1', textEvent())
+  await adapter.setTyping({ channel: 'feishu', kind: 'dm', chatId: 'oc_chat' })
+  assert.ok(fetch.calls.some((c) => c.url.includes('/reactions')))
+})
+
+test('审批卡片：1.0 形态出卡（action/button）→ card.action.trigger 回传定夺；非发起者不改判', async () => {
+  const { lark, created } = fakeLark({ createResult: { message_id: 'om_card' } })
+  const adapter = new FeishuAdapter({ appId: 'cli', appSecret: 'sec', lark })
+  await adapter.connect()
+  assert.equal(adapter.caps.nativeChoices, true, '按钮位声明')
+
+  const address = { channel: 'feishu', kind: 'dm', chatId: 'oc_1' }
+  let settled = null
+  const pending = adapter
+    .askChoices(address, '需要审批：工具 Bash', ['允许一次', '拒绝'], false, undefined, { ownerUserId: 'ou_owner' })
+    .then((r) => { settled = r })
+  const sent = created.messageCalls.at(-1)
+  assert.equal(sent.data.msg_type, 'interactive')
+  const card = JSON.parse(sent.data.content)
+  assert.equal(card.schema, undefined, '1.0 形态：不带 schema（2.0 的 body.elements 不支持 action 标签）')
+  assert.equal(card.elements[1].tag, 'action')
+  assert.deepEqual(card.elements[1].actions.map((b) => b.text.content), ['允许一次', '拒绝'])
+  assert.deepEqual(card.elements[1].actions[0].value, { imu: 'choice', label: '允许一次' })
+
+  const rawAction = (openId, label) => ({
+    schema: '2.0',
+    header: { event_type: 'card.action.trigger' },
+    event: {
+      context: { open_message_id: 'om_card', open_chat_id: 'oc_1' },
+      operator: { open_id: openId },
+      action: { tag: 'button', value: { imu: 'choice', label } },
+    },
+  })
+
+  // 出卡是异步的（create 回包后才登记 pending）：先让一个微任务落定
+  await new Promise((r) => setTimeout(r, 0))
+
+  // 他人点按：不改判（D5），回 toast 说明，promise 仍未决
+  const other = await adapter.injectEvent('card.action.trigger', rawAction('ou_other', '允许一次'))
+  assert.ok(other !== undefined, 'pending 已登记：他人点按应回 toast')
+  assert.match(JSON.stringify(other), /只接受发起者/)
+  assert.equal(settled, null, '他人点按不得定夺')
+
+  // 发起者点按：定夺 + toast 回执
+  const mine = await adapter.injectEvent('card.action.trigger', rawAction('ou_owner', '拒绝'))
+  await pending
+  assert.deepEqual(settled, { answer: '拒绝', uncertain: false })
+  assert.match(JSON.stringify(mine), /已记录/)
+
+  // 卡还在但 pending 已清：迟到的重复点按不再影响任何事
+  const late = await adapter.injectEvent('card.action.trigger', rawAction('ou_owner', '允许一次'))
+  assert.equal(late, undefined)
+})
+
+test('审批卡片：multi=true 拒接（无卡片多选原语，交回 broker 走文本）', async () => {
+  const { lark } = fakeLark()
+  const adapter = new FeishuAdapter({ appId: 'cli', appSecret: 'sec', lark })
+  await adapter.connect()
+  await assert.rejects(
+    adapter.askChoices({ channel: 'feishu', kind: 'dm', chatId: 'oc_1' }, '选哪些', ['a', 'b'], true),
+    /多选无卡片原语/,
+  )
 })
 
 test('diagnose 附送权限模板与 cardkit 档位提示；工厂 config.cardMode', async () => {

@@ -143,24 +143,10 @@ export class InteractionBroker {
     const key = this.keyOf(chat.address)
     if (this.pendings.has(key)) return next()
 
-    // 按钮面（caps.nativeChoices + askChoices）优先；失败语义统一 fail-closed。
+    // 按钮面（caps.nativeChoices + askChoices）：与文本回复竞速；出卡失败才回落文本菜单。
     if (typeof adapter.askChoices === 'function' && adapter.caps.nativeChoices === true) {
-      try {
-        const { answer, uncertain } = await adapter.askChoices(
-          chat.address,
-          `需要审批：工具 ${request.toolName ?? '未知'}${request.reason ? `（${request.reason}）` : ''}`,
-          ['允许一次', '拒绝'],
-          false,
-          request.signal,
-        )
-        if (uncertain) return 'cancelled'
-        if (answer === '允许一次') return 'allowed-once'
-        if (answer === '拒绝') return 'rejected'
-        return 'cancelled'
-      } catch (error) {
-        this.deps.logWarn(`askChoices 失败，回落文本审批: ${(error as Error).message}`)
-        // 按钮面炸了不吞请求：继续走文本菜单（下方）。
-      }
+      const raced = await this.approvalViaButtons(adapter, chat, key, request)
+      if (raced !== undefined) return raced
     }
 
     const text = [
@@ -188,6 +174,51 @@ export class InteractionBroker {
       if (!wait.armed) return
       wait.armTimeout()
       this.pendings.set(key, { kind: 'approval', chat, settle: wait.settle })
+    })
+  }
+
+  /**
+   * 按钮 + 文本双路竞速：卡片点按与「1/2/c」文本回复任一路先到为准。
+   * 用户在按钮期间打字很常见，不能把那条回复当成新任务丢给模型。
+   * 返回 undefined = 出卡失败（未连接/无权限/多选不支持）：调用方回落纯文本，
+   * 此时用户还没看到任何东西，不算重复投递。
+   */
+  private approvalViaButtons(
+    adapter: ChannelAdapter,
+    chat: ChatSessionRef,
+    key: string,
+    request: ApprovalRequest,
+  ): Promise<ApprovalOutcome | undefined> {
+    const promptText = `需要审批：工具 ${request.toolName ?? '未知'}${request.reason ? `（${request.reason}）` : ''}`
+    return new Promise<ApprovalOutcome | undefined>((resolveOuter) => {
+      let finished = false
+      const settleAll = (value: ApprovalOutcome | undefined): void => {
+        if (finished) return
+        finished = true
+        this.pendings.delete(key)
+        resolveOuter(value)
+      }
+      const wait = this.beginWait(key, (v) => settleAll(v as ApprovalOutcome), {
+        abortValue: 'cancelled',
+        timeoutValue: 'cancelled',
+        ...(request.signal !== undefined ? { signal: request.signal } : {}),
+      })
+      if (!wait.armed) return
+      wait.armTimeout()
+      this.pendings.set(key, { kind: 'approval', chat, settle: wait.settle })
+      adapter
+        .askChoices!(chat.address, promptText, ['允许一次', '拒绝'], false, request.signal, { ownerUserId: chat.userId })
+        .then(({ answer, uncertain }) => {
+          if (uncertain) return settleAll('cancelled')
+          if (answer === '允许一次') return settleAll('allowed-once')
+          if (answer === '拒绝') return settleAll('rejected')
+          // 空答/未知回包（渠道侧超时、不支持的选项）：按取消收，不伪装批准（D5）。
+          return settleAll('cancelled')
+        })
+        .catch((error: Error) => {
+          this.deps.logWarn(`askChoices 失败，回落文本审批: ${error.message}`)
+          settleAll(undefined)
+        })
     })
   }
 

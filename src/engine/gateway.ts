@@ -204,6 +204,10 @@ export class ImUnionEngine {
   private readonly sessionChoices = new Map<string, { ids: string[]; at: number }>()
   /** 相对 cwd 偏好已告警过的 account+cwd（只告警一次防刷屏）。 */
   private relativeCwdWarned = new Set<string>()
+  /** 宿主已确认存在的会话 id（惰性升级接续判据的进程内缓存，重启后重查一次）。 */
+  private readonly hostSessionIds = new Set<string>()
+  /** 已提示过「本回合用隐式 id」的 chatKey（后端未就绪期间只提示一次，防刷屏）。 */
+  private readonly implicitFallbackNoticed = new Set<string>()
   /** 投递 seq → 原文全文（/delivery retry 补发用；重启即清，摘要在盘）。 */
   private outbox = new Map<number, string>()
   /** 碎片合并的上一次私聊消息上下文（submit 回调重建 SemanticMessage）。 */
@@ -560,6 +564,17 @@ export class ImUnionEngine {
     return created
   }
 
+  /** 宿主会话列表里是否已有该 id（查询面缺位/异常一律当「没有」，由 create 兜底）。 */
+  private async hostSessionExists(sessionId: string): Promise<boolean> {
+    try {
+      const list = await this.deps.sessionApi.listSessions()
+      return list.some((info) => info.id === sessionId)
+    } catch (error) {
+      this.log.warn(`会话列表查询失败（按未存在处理）: ${(error as Error).message}`)
+      return false
+    }
+  }
+
   /**
    * 隐式 im:union: 形 id → 宿主真会话 id：首次使用时 createSession 并绑定；
    * 失败则继续用隐式 id（老线/降级面下 follow/prompt 自有报错路径，不阻断命令面）。
@@ -567,7 +582,23 @@ export class ImUnionEngine {
    */
   private async ensureSessionId(address: ChatAddress, binding: Binding, accountId: string, title?: string): Promise<string> {
     const { sessionApi, router } = this.deps
-    if (sessionApi.backend !== 'native' || !binding.sessionId.startsWith('im:')) return binding.sessionId
+    if (sessionApi.backend !== 'native' || !binding.sessionId.startsWith('im:')) {
+      // 后端未就绪的首回合只能用隐式 id（宿主会按它落盘）；升级后靠下面的先查后建接续。
+      const key = chatKey(address)
+      if (sessionApi.backend !== 'native' && binding.sessionId.startsWith('im:') && !this.implicitFallbackNoticed.has(key)) {
+        this.implicitFallbackNoticed.add(key)
+        this.log.info(`会话后端未就绪（none）：本回合沿用隐式 id ${binding.sessionId}；升级为 native 后按宿主已有会话接续`)
+      }
+      return binding.sessionId
+    }
+    // 惰性升级接续（0.4.10，真机实证）：apply 期 backend=none 时首回合已用隐式 id 跑过，
+    // 宿主按该 id 落了盘；升级到 native 后再 create，宿主回退路径会改派新 id（session-uuid），
+    // 同一聊天被劈成两条轨迹（第一段在 im:union:… 目录、第二段在 session-uuid 目录）。
+    // 先查宿主是否已有该 id：有则直接接续，不再 create（也不重复应用偏好——存量会话不动）。
+    if (this.hostSessionIds.has(binding.sessionId) || (await this.hostSessionExists(binding.sessionId))) {
+      this.hostSessionIds.add(binding.sessionId)
+      return binding.sessionId
+    }
     const prefs = this.accounts.get(accountId)?.policy.session
     const addressKey = chatKey(address)
     const workspace = this.workspaceOverrides.get(chatOverrideKey(address))
@@ -597,9 +628,15 @@ export class ImUnionEngine {
         ...(title !== undefined && title !== '' ? { title } : {}),
       })
       router.bind(address, info.id)
+      this.hostSessionIds.add(info.id)
       // 请求 id 与宿主实际 id 可能不同（宿主可改派）：排障时对 UI 会话列表的关键证据。
       if (info.id !== binding.sessionId) {
         this.log.info(`会话已创建：请求 id ${binding.sessionId} → 宿主实际 id ${info.id}`)
+        // 改派后的 id 不带 im: 前缀（形如 session-uuid）会落「未分组」且在 /new 后与旧段落分叉；
+        // 给出可操作的接回手段，而不是只留一条 id 差异日志。
+        if (!info.id.startsWith('im:')) {
+          this.log.warn(`宿主未采纳隐式会话 id（新会话进「未分组」）；接回旧会话：/session ${binding.sessionId}`)
+        }
       }
       this.lastEnsureFailure.delete(addressKey)
       // 账号级模型偏好同步喂给视觉判定（selections 以 chatKey 键控）。
@@ -634,6 +671,12 @@ export class ImUnionEngine {
     if (sessionApi.backend === 'none') {
       await adapter.reply(message.address, new UnsupportedError('会话后端').message)
       return
+    }
+    // 回合开始信号（0.4.11）：typing 位在位的渠道先给「处理中」——飞书落地为入站消息
+    // 的 OnIt 表情（无平台 typing API），微信/Telegram/Matrix 用原生 typing。失败静默：
+    // 这是增强项，不得阻断回合（适配器内部已吞错，这里再上一道）。
+    if (adapter.caps.typing === true && typeof adapter.setTyping === 'function') {
+      void adapter.setTyping(message.address).catch(() => undefined)
     }
 
     // 状态机：follow 先行收集 step 落定文本；turn/end（或看门狗）收轮后统一投递。

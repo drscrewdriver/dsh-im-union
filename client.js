@@ -785,7 +785,8 @@ select.diu-input { appearance: auto; }
 
       var missingSecrets = [];
       (row.secretFields || []).forEach(function (sf) {
-        if (!sf.configured) missingSecrets.push(sf.key);
+        // 可选密钥（语音 DashScope Key / 扫码 botToken）未入库不算缺失：不进红徽标。
+        if (!sf.configured && sf.required !== false) missingSecrets.push(sf.key);
       });
       var badge = row.paused
         ? h(Tag, { tone: 'Muted' }, t('accounts.state.paused'))

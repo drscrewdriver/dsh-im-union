@@ -60,6 +60,21 @@ const OPEN_BASE = 'https://open.feishu.cn'
 const STREAM_ELEMENT_ID = 'imu_stream'
 const CARD_UPDATE_THROTTLE_MS = 1_500
 
+/**
+ * 回合内「处理中」信号：飞书无 typing API（客户端不暴露），用**入站消息的表情回应**
+ * 当状态位——实测 POST/DELETE /im/v1/messages/{id}/reactions 全链 code 0。
+ * OnIt = 官方「需处理/进行中」语义；回复落地或超时即删，不污染历史。
+ */
+const TYPING_EMOJI = 'OnIt'
+const TYPING_TTL_MS = 120_000
+
+/**
+ * 卡片按钮回传（审批确认）等待上限：与宿主审批红线 D5 的 5 分钟对齐。
+ * 适配器自己必须定时：broker 的按钮分支是直接 `await askChoices(...)`，
+ * 不挂它自己的超时——没人点又不能永久悬挂。
+ */
+const CHOICE_TIMEOUT_MS = 5 * 60 * 1000
+
 /** 开发者后台「批量导入权限」模板（权限补全引导， diagnose 附送）。 */
 export const FEISHU_PERMISSION_TEMPLATE = JSON.stringify({
   scopes: ['im:message', 'im:message:send_as_bot', 'im:chat', 'im:resource', 'cardkit:card:write'],
@@ -67,6 +82,12 @@ export const FEISHU_PERMISSION_TEMPLATE = JSON.stringify({
 
 /** 无权限类平台错误码（发消息/读事件常见）。 */
 const PERMISSION_ERROR_CODES = new Set([99991672, 2300024, 230027, 99991668])
+
+/** 凭据类错误码：auth/v3/tenant_access_token 对 appId/appSecret 的直接裁决。 */
+const CREDENTIAL_ERROR_CODES = new Set([10003, 10013, 10014])
+
+/** 机器人能力未开通（bot/v3/info 回 11205，im 面回 232025）。 */
+const BOT_ABILITY_MISSING_CODES = new Set([11205, 232025])
 
 interface FeishuEventMessage {
   message_id?: string
@@ -92,6 +113,49 @@ interface FeishuResourceResult {
   getReadableStream?: () => AsyncIterable<Uint8Array>
 }
 
+/** 卡片回传事件（card.action.trigger）归一后的形——SDK 长连接与 webhook 两形态共用。 */
+export interface FeishuCardAction {
+  messageId: string
+  chatId: string
+  operator: { openId?: string; userId?: string }
+  action: { value?: Record<string, unknown> }
+}
+
+/**
+ * 从 card.action.trigger 负载取关键字段。两种形态都要接：
+ * - 长连接/webhook 原始体：`{schema:'2.0', header:{event_type}, event:{context, operator, action}}`；
+ * - SDK 安全管道 normalize 后的形：`{messageId, chatId, operator:{openId}, action:{value}}`。
+ * 缺关键字段回 undefined（调用方丢弃，不猜）。
+ */
+export function extractCardAction(payload: any): FeishuCardAction | undefined {
+  if (payload === null || typeof payload !== 'object') return undefined
+  const nested = payload.event !== null && typeof payload.event === 'object' ? payload.event : payload
+  const ctx = nested.context !== null && typeof nested.context === 'object' ? nested.context : {}
+  const messageId =
+    typeof nested.messageId === 'string' ? nested.messageId
+      : typeof ctx.open_message_id === 'string' ? ctx.open_message_id
+        : typeof nested.open_message_id === 'string' ? nested.open_message_id : undefined
+  const chatId =
+    typeof nested.chatId === 'string' ? nested.chatId
+      : typeof ctx.open_chat_id === 'string' ? ctx.open_chat_id
+        : typeof nested.open_chat_id === 'string' ? nested.open_chat_id : undefined
+  if (messageId === undefined || chatId === undefined) return undefined
+  const operator = (nested.operator ?? {}) as Record<string, unknown>
+  const action = (nested.action ?? {}) as Record<string, unknown>
+  const value = action.value !== null && typeof action.value === 'object' ? (action.value as Record<string, unknown>) : undefined
+  return {
+    messageId,
+    chatId,
+    operator: {
+      ...(typeof operator.openId === 'string' ? { openId: operator.openId } : {}),
+      ...(typeof operator.open_id === 'string' ? { openId: operator.open_id } : {}),
+      ...(typeof operator.userId === 'string' ? { userId: operator.userId } : {}),
+      ...(typeof operator.user_id === 'string' ? { userId: operator.user_id } : {}),
+    },
+    action: { ...(value === undefined ? {} : { value }) },
+  }
+}
+
 /** 网络类错误判定（结果不明）——与确定性平台拒收分档。 */
 function isNetworkLike(error: unknown): boolean {
   return error instanceof Error && /网络|timeout|timed out|unreachable|socket|ECONN|fetch/i.test(error.message)
@@ -102,7 +166,7 @@ export interface LarkLike {
     start: (opts: { eventDispatcher: unknown }) => Promise<void> | void
   }
   EventDispatcher: new (options: Record<string, unknown>) => {
-    register: (handlers: Record<string, (data: FeishuEventPayload) => Promise<void> | void>) => unknown
+    register: (handlers: Record<string, (data: any) => unknown>) => unknown
   }
   Client: new (options: { appId: string; appSecret: string }) => {
     im: {
@@ -248,13 +312,27 @@ export class FeishuAdapter implements ChannelAdapter {
   /** 语音档位（未开启=undefined：入站只留占位，零外部调用）。 */
   private readonly voice: FeishuVoiceOptions | undefined
   private tenantToken: { value: string; expireAtMs: number } | undefined
+  /** chatId → 最近一条入站消息 id（typing 状态位挂在用户那条消息上）。 */
+  private readonly lastInboundMessageId = new Map<string, string>()
+  /** chatId → 在位「处理中」表情（回复落地/超时回收）。 */
+  private readonly typingReactions = new Map<string, { messageId: string; reactionId: string }>()
   private listeners: MessageListener[] = []
   private client: InstanceType<LarkLike['Client']> | undefined
   private wsClient: { start: (opts: { eventDispatcher: unknown }) => Promise<void> | void } | undefined
   private lark: LarkLike | undefined
   private readonly log: (msg: string) => void
   /** 事件处理器表（测试注入口：直接驱动 receive handler）。 */
-  handlers: Record<string, (data: FeishuEventPayload) => Promise<void> | void> | undefined
+  handlers: Record<string, (data: any) => unknown> | undefined
+  /**
+   * 在位的选项卡：message_id → 待答。
+   * 键用 message_id 而非 chatId：一个聊天可能先后出多张卡，旧卡迟到点击不得误判新卡。
+   */
+  private readonly pendingChoices = new Map<string, {
+    labels: string[]
+    ownerUserId: string | undefined
+    resolve: (answer: string) => void
+    timer: ReturnType<typeof setTimeout>
+  }>()
 
   constructor(private readonly options: FeishuAdapterOptions) {
     if (typeof options.appId !== 'string' || options.appId === '' || typeof options.appSecret !== 'string' || options.appSecret === '') {
@@ -287,9 +365,10 @@ export class FeishuAdapter implements ChannelAdapter {
     this.caps = {
       editStream: false,
       nativeStream: this.cardMode === 'card',
-      nativeChoices: false,
-      statusReaction: false,
-      typing: false,
+      nativeChoices: true,
+      // typing 落地=表情回应（无平台 typing API）；两者同源，故一起声明。
+      statusReaction: true,
+      typing: true,
       imageIn: false,
       fileIn: true,
       fileOut: true,
@@ -321,12 +400,17 @@ export class FeishuAdapter implements ChannelAdapter {
       'im.message.receive_v1': async (data) => {
         const message = normalizeFeishuMessage(data)
         if (message === undefined) return
+        // 「处理中」状态位锚点：后面 setTyping 用它给用户这条消息贴 OnIt。
+        const inboundId = data?.message?.message_id
+        if (typeof inboundId === 'string' && inboundId !== '') this.lastInboundMessageId.set(message.address.chatId, inboundId)
         // 入站文件下载（T2.4）：失败降级为无附件，不丢整条。
         await this.fillFiles(message, data?.message)
         // 入站语音转写（T3.5）：失败回占位文案，同样不丢整条。
         await this.fillAudio(message, data?.message)
         for (const listener of this.listeners) listener(message)
       },
+      // 卡片按钮回传（审批确认）：长连接下飞书把 card.action.trigger 推同一条连接。
+      'card.action.trigger': async (data) => this.handleCardAction(data),
     }
     const dispatcher = new lark.EventDispatcher({}).register(this.handlers)
     await this.wsClient.start({ eventDispatcher: dispatcher })
@@ -336,6 +420,12 @@ export class FeishuAdapter implements ChannelAdapter {
   async disconnect(): Promise<void> {
     this.connected = false
     this.wsClient = undefined
+    // 拆除即释放所有在位选项卡（空答=取消，fail-closed，不伪装批准）。
+    for (const [, pending] of [...this.pendingChoices]) {
+      clearTimeout(pending.timer)
+      pending.resolve('')
+    }
+    this.pendingChoices.clear()
   }
 
   private async sendMessagePayload(address: ChatAddress, msgType: string, content: string): Promise<Receipt> {
@@ -380,7 +470,144 @@ export class FeishuAdapter implements ChannelAdapter {
   }
 
   async reply(address: ChatAddress, text: string): Promise<Receipt> {
+    // 回复即收轮：先回收「处理中」状态位（失败不影响投递）。
+    void this.clearTyping(address)
     return this.createMessage(address, text)
+  }
+
+  /**
+   * 回合开始「处理中」信号（引擎在 prompt 前调用）。飞书无 typing API，落地为
+   * 给用户本条入站消息加 OnIt 表情；同一聊天只留一个，回复落地/2 分钟超时自清。
+   * 任一环节失败一律静默——这是增强项，不得阻断回合。
+   */
+  async setTyping(address: ChatAddress): Promise<void> {
+    const messageId = this.lastInboundMessageId.get(address.chatId)
+    if (messageId === undefined) return
+    await this.clearTyping(address)
+    try {
+      const data = await this.rest<{ reaction_id?: string }>('POST', `/open-apis/im/v1/messages/${messageId}/reactions`, {
+        reaction_type: { emoji_type: TYPING_EMOJI },
+      })
+      const reactionId = data.reaction_id
+      if (typeof reactionId !== 'string' || reactionId === '') return
+      this.typingReactions.set(address.chatId, { messageId, reactionId })
+      const timer = setTimeout(() => void this.clearTyping(address), TYPING_TTL_MS)
+      timer.unref?.()
+    } catch {
+      // 表情权限缺位/限频：静默，不影响回合。
+    }
+  }
+
+  /** 回收「处理中」表情（重复调用幂等）。 */
+  private async clearTyping(address: ChatAddress): Promise<void> {
+    const pending = this.typingReactions.get(address.chatId)
+    if (pending === undefined) return
+    this.typingReactions.delete(address.chatId)
+    try {
+      await this.rest('DELETE', `/open-apis/im/v1/messages/${pending.messageId}/reactions/${pending.reactionId}`)
+    } catch {
+      // 消息被撤回/表情已被手动移除：无需处理。
+    }
+  }
+
+  /**
+   * 审批/选项确认卡片（T1.9 按钮面）。
+   * 协议事实（真机实测）：2.0 schema 的 `body.elements` 已不支持 `action` 标签
+   * （230099 / 200861 unsupported tag action），按钮只能走 1.0 形态（顶层 elements）；
+   * 内联 interactive 消息不碰 cardkit 实体面，因此不需要卡片实体权限。
+   * multi=true 不接（卡片无多选原语）：抛错由 broker 回落文本菜单，不造假。
+   */
+  async askChoices(
+    address: ChatAddress,
+    question: string,
+    options: readonly string[],
+    multi: boolean,
+    signal?: AbortSignal,
+    opts?: { ownerUserId?: string },
+  ): Promise<{ answer: string; uncertain: boolean }> {
+    const client = this.client
+    if (client === undefined) throw new Error('feishu: 客户端未初始化（先 connect）')
+    if (multi) throw new Error('feishu: 多选无卡片原语（回落文本菜单）')
+    const labels = options.map((option) => String(option)).filter((label) => label !== '')
+    if (labels.length === 0) throw new Error('feishu: 选项为空')
+    const card = {
+      config: { wide_screen_mode: true },
+      header: { title: { tag: 'plain_text', content: '需要确认' } },
+      elements: [
+        { tag: 'div', text: { tag: 'lark_md', content: question } },
+        {
+          tag: 'action',
+          actions: labels.map((label, index) => ({
+            tag: 'button',
+            text: { tag: 'plain_text', content: label },
+            type: index === 0 ? 'primary' : 'default',
+            value: { imu: 'choice', label },
+          })),
+        },
+      ],
+    }
+    const response = await client.im.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: { receive_id: address.chatId, msg_type: 'interactive', content: JSON.stringify(card) },
+    })
+    if (typeof response?.code === 'number' && response.code !== 0) throw this.translateApiError(response.code, response.msg)
+    const messageId = typeof response?.message_id === 'string' ? response.message_id : undefined
+    if (messageId === undefined) throw new Error('feishu: 交互卡片未返回 message_id')
+
+    return new Promise<{ answer: string; uncertain: boolean }>((resolveOuter) => {
+      let done = false
+      const onAbort = (): void => settle('')
+      const settle = (answer: string): void => {
+        if (done) return
+        done = true
+        const held = this.pendingChoices.get(messageId)
+        if (held !== undefined) {
+          clearTimeout(held.timer)
+          this.pendingChoices.delete(messageId)
+        }
+        if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+        // 卡片已确定发出，后续任何结果（点/超时/取消/撤回）都是确定性的。
+        resolveOuter({ answer, uncertain: false })
+      }
+      if (signal !== undefined) {
+        if (signal.aborted) {
+          settle('')
+          return
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
+      const timer = setTimeout(() => settle(''), CHOICE_TIMEOUT_MS)
+      timer.unref?.()
+      this.pendingChoices.set(messageId, {
+        labels,
+        ownerUserId: opts?.ownerUserId,
+        resolve: settle,
+        timer,
+      })
+    })
+  }
+
+  /**
+   * 卡片按钮点击回传（card.action.trigger，长连接同一条通道）。
+   * D5 纪律：只有发起者能定夺，他人点击不改判；超时/pending 已清则忽略。
+   * 回包给 toast（飞书卡片回调响应），让用户看到「已记录」。
+   */
+  private async handleCardAction(payload: unknown): Promise<Record<string, unknown> | undefined> {
+    const evt = extractCardAction(payload)
+    if (evt === undefined) return undefined
+    const pending = this.pendingChoices.get(evt.messageId)
+    if (pending === undefined) return undefined
+    const owner = pending.ownerUserId
+    if (owner !== undefined && evt.operator.openId !== owner && evt.operator.userId !== owner) {
+      return { toast: { type: 'info', content: '该请求只接受发起者的答复' } }
+    }
+    const raw = evt.action.value?.label
+    const label = typeof raw === 'string' ? raw : ''
+    if (!pending.labels.includes(label)) {
+      return { toast: { type: 'error', content: '未能识别该按钮，请用文本回复' } }
+    }
+    pending.resolve(label)
+    return { toast: { type: 'success', content: `已记录：${label}` } }
   }
 
   /**
@@ -609,6 +836,22 @@ export class FeishuAdapter implements ChannelAdapter {
     return this.tenantToken.value
   }
 
+  /** 通用 REST（带 tenant token）：「处理中」表情等非卡片面共用。 */
+  private async rest<T = Record<string, any>>(method: string, path: string, body?: unknown): Promise<T> {
+    const token = await this.token()
+    const response = await this.fetchImpl(`${OPEN_BASE}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    const json = await response.json()
+    if (!response.ok || (typeof json.code === 'number' && json.code !== 0)) {
+      const code = Number(json.code ?? response.status)
+      throw new Error(`feishu: 请求失败（code ${code}：${String(json.msg ?? '')}）`)
+    }
+    return (json.data ?? {}) as T
+  }
+
   private async cardApi<T = Record<string, any>>(method: string, path: string, body?: unknown): Promise<T> {
     const token = await this.token()
     const response = await this.fetchImpl(`${OPEN_BASE}${path}`, {
@@ -670,6 +913,8 @@ export class FeishuAdapter implements ChannelAdapter {
         await self.cardApi('PATCH', `/open-apis/cardkit/v1/cards/${cardId}/settings`, {
           config: { streaming_mode: false },
         }).catch((error: Error) => self.log(`feishu: 关闭流式模式失败：${error.message}`))
+        // 卡片已落定 = 回合可见结果到位，「处理中」表情该收了。
+        await self.clearTyping(address)
         return { platformMessageId: sent, uncertain: false }
       },
       abort(): void {
@@ -695,19 +940,14 @@ export class FeishuAdapter implements ChannelAdapter {
 
   async diagnose(): Promise<ChannelDiagnosisCheck[]> {
     const checks: ChannelDiagnosisCheck[] = []
-    try {
-      if (this.client === undefined) throw new Error('未连接')
-      const response = await this.client.request({ method: 'GET', url: '/open-apis/bot/v2/info' })
-      const ok = response?.code === undefined || response.code === 0
-      checks.push({ name: 'credentials-valid', status: ok ? 'passed' : 'failed', hint: ok ? undefined : `code ${response?.code}` })
-    } catch (error) {
-      checks.push({ name: 'credentials-valid', status: 'failed', hint: '凭据或网络无效，请检查 appId/appSecret' })
-    }
+    checks.push(await this.credentialsCheck())
     checks.push({
       name: 'ws-long-connection',
       status: this.connected ? 'passed' : 'unverified',
-      hint: this.connected ? undefined : '未连接',
+      // 长连接只证明握手成功：事件真投递还需机器人能力 + receive_v1 订阅。
+      hint: this.connected ? '长连接已建立（不能据此推定机器人能力/消息权限已开通）' : '未连接',
     })
+    checks.push(await this.botAbilityCheck())
     checks.push({
       name: 'permission-im-message',
       status: 'unverified',
@@ -727,6 +967,72 @@ export class FeishuAdapter implements ChannelAdapter {
     })
     checks.push(await this.voiceCheck())
     return checks
+  }
+
+  /**
+   * 凭据探测：auth/v3/tenant_access_token 换 token（唯一对 appSecret 做真裁决的面）。
+   * 曾探 `/open-apis/bot/v2/info`——该路径不存在（服务端 404 纯文本、SDK 直接抛），
+   * 任何凭据都落「凭据或网络无效」；且 bot 面本身不校验 secret（错 secret 同样回
+   * 11205），探它只能验能力不能验凭据——故拆成凭据位与机器人能力位两条。
+   */
+  private async credentialsCheck(): Promise<ChannelDiagnosisCheck> {
+    const client = this.client
+    if (client === undefined) return { name: 'credentials-valid', status: 'failed', hint: '未连接：先连接后再检查' }
+    try {
+      const response = await client.request({
+        method: 'POST',
+        url: '/open-apis/auth/v3/tenant_access_token/internal',
+        data: { app_id: this.options.appId, app_secret: this.options.appSecret },
+      })
+      const code = response?.code
+      if (code === undefined || code === 0) {
+        return typeof response?.tenant_access_token === 'string'
+          ? { name: 'credentials-valid', status: 'passed' }
+          : { name: 'credentials-valid', status: 'unverified', hint: 'code 0 但未回 tenant_access_token' }
+      }
+      return {
+        name: 'credentials-valid',
+        status: 'failed',
+        hint: CREDENTIAL_ERROR_CODES.has(code)
+          ? `appId/appSecret 无效（code ${code}）：核对凭据库条目`
+          : `凭据探测被拒（code ${code}）`,
+      }
+    } catch (error) {
+      // 只取 message（不透传 error 体：axios config 里带着 Authorization/body）。
+      const message = (error as Error)?.message ?? String(error)
+      return {
+        name: 'credentials-valid',
+        status: 'failed',
+        hint: isNetworkLike(error) ? `网络不可达：${message}` : `凭据探测失败：${message}`,
+      }
+    }
+  }
+
+  /**
+   * 机器人能力探测：GET /open-apis/bot/v3/info（有 bot → code 0；无 bot → 11205）。
+   * 这是「长连接通了却收不到消息」的判定位：无机器人能力时事件不投递、消息发不出。
+   */
+  private async botAbilityCheck(): Promise<ChannelDiagnosisCheck> {
+    const client = this.client
+    if (client === undefined) return { name: 'bot-ability', status: 'unverified', hint: '未连接：先连接后再检查' }
+    try {
+      const response = await client.request({ method: 'GET', url: '/open-apis/bot/v3/info' })
+      const code = response?.code
+      if (code === undefined || code === 0) {
+        return { name: 'bot-ability', status: 'passed', hint: '机器人能力已开通；收发消息仍受 im:message 权限约束' }
+      }
+      if (BOT_ABILITY_MISSING_CODES.has(code)) {
+        return {
+          name: 'bot-ability',
+          status: 'failed',
+          hint: '应用未开通「机器人」能力（code 11205）：开发者后台「添加应用能力 → 机器人」并发布版本，否则长连接通也收不到消息事件、发不出消息',
+        }
+      }
+      return { name: 'bot-ability', status: 'failed', hint: `机器人能力探测被拒（code ${code}）` }
+    } catch (error) {
+      const message = (error as Error)?.message ?? String(error)
+      return { name: 'bot-ability', status: 'unverified', hint: `机器人能力探测未完成：${message}` }
+    }
   }
 
   /**
@@ -757,11 +1063,11 @@ export class FeishuAdapter implements ChannelAdapter {
       : { name: 'voice-pipeline', status: 'failed', hint: `语音探测失败：${voiceFailureText(probe.failure)}（内部：${String(probe.failure?.message ?? '')}）` }
   }
 
-  /** 测试/诊断驱动：模拟一条 receive 事件（与 SDK handler 同一入口）。 */
-  async injectEvent(eventName: string, payload: FeishuEventPayload): Promise<void> {
+  /** 测试/诊断驱动：模拟一条事件（与 SDK handler 同一入口）；回传 handler 的响应体。 */
+  async injectEvent(eventName: string, payload: unknown): Promise<unknown> {
     const handler = this.handlers?.[eventName]
     if (handler === undefined) throw new Error(`feishu: 未注册事件 ${eventName}`)
-    await handler(payload)
+    return await handler(payload)
   }
 }
 

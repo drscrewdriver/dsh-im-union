@@ -1,7 +1,7 @@
 {
   "id": "dsh-im-union",
   "name": "dsh-im-union",
-  "version": "0.4.8",
+  "version": "0.4.12",
   "description": {
     "en": "Union IM bridge for DeepSeek Harness: multi-account bots across messaging platforms, each chat bound to its own session, with cross-host-version compatibility (0.1.2-rc.1 .. 0.2.1-rc.3).",
     "zh": "DeepSeek Harness 的 IM 联合桥：多平台多账号机器人、每个聊天绑定独立会话，跨宿主版本兼容（0.1.2-rc.1 至 0.2.1-rc.3）。"

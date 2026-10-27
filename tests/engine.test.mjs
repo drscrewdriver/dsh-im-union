@@ -519,6 +519,71 @@ test('createSession 失败 → prompt 失败时回包带参考号 + 根因链', 
   assert.match(last, /会话创建此前已失败：workspace 目录不存在/, '根因链对用户可见')
 })
 
+test('惰性升级接续：宿主已有隐式会话 id → 不新建 UUID，直接接续同一会话', async () => {
+  const session = liveSession()
+  const created = []
+  session.createSession = async (opts) => {
+    created.push(opts)
+    return { id: 'session-uuid-1' }
+  }
+  // 首回合 backend=none 时宿主按隐式 id 落盘的形态（真机：im~003Aunion… 会话目录）
+  session.listSessions = async () => [{ id: 'im:union:telegram:dm:c1', title: '你是谁' }]
+  const adapter = fakeAdapter()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session })
+  const inflight = engine.handleInbound('acct-1', dmMessage('第二回合'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(turnEnd())
+  await inflight
+  assert.equal(created.length, 0, '宿主已有该 id 的会话：不得再 createSession')
+  assert.equal(session.state.prompted[0].sessionId, 'im:union:telegram:dm:c1', '接续到原会话，不分叉成 session-uuid')
+})
+
+test('首次建会话：宿主无该 id 时 create 一次；后续回合沿用绑定不再 create', async () => {
+  const session = liveSession()
+  const created = []
+  session.createSession = async (opts) => {
+    created.push(opts)
+    return { id: 'session-uuid-1' }
+  }
+  const adapter = fakeAdapter()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session })
+  const first = engine.handleInbound('acct-1', dmMessage('第一回合'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(turnEnd())
+  await first
+  assert.equal(created.length, 1)
+  assert.equal(session.state.prompted[0].sessionId, 'session-uuid-1')
+
+  const second = engine.handleInbound('acct-1', dmMessage('第二回合'))
+  await waitUntil(() => session.state.prompted.length === 2)
+  session.emit(turnEnd())
+  await second
+  assert.equal(created.length, 1, '第二回合沿用绑定，不再 create')
+  assert.equal(session.state.prompted[1].sessionId, 'session-uuid-1')
+})
+
+test('回合开始发 typing 信号（caps.typing + setTyping 在位）；缺位时引擎安全跳过', async () => {
+  const session = liveSession()
+  const typed = []
+  const adapter = fakeAdapter({
+    caps: { editStream: false, nativeStream: false, maxMessageLength: 4096, typing: true },
+    setTyping: async (address) => {
+      typed.push(address.chatId)
+    },
+  })
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session })
+  const inflight = engine.handleInbound('acct-1', dmMessage('干活'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(turnEnd())
+  await inflight
+  assert.deepEqual(typed, ['c1'], '回合开始时先给「处理中」')
+
+  // 默认 fakeAdapter 既没 typing 位也没 setTyping：引擎不调、不报错（E1：缺位=明确降级）
+  const plain = fakeAdapter()
+  assert.equal(plain.caps.typing, undefined)
+  assert.equal(typeof plain.setTyping, 'undefined')
+})
+
 test('事件总线优先：tap 扇出驱动回合投递，总线在位时不走 follow', async () => {
   const session = liveSession()
   let followCalls = 0
