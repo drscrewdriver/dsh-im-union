@@ -2,6 +2,31 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.5.3（Discord Gateway 自动重连与 RESUME 续传：#2 收口）
+
+原挂账 T2.5 落地：连接一断就只记日志、不重建，而 Discord 会**定期**主动下发 `op 7 RECONNECT`，所以这条路径必然被走到——账号静默失联直到手动重启。
+
+### Added
+
+- **退避自动重连**：`close` / `op 7` / 僵尸判定统一走 `scheduleAttempt()`——指数退避 `base·2^(n-1)`（默认 1s 起）+ 正向抖动≤30%（免全量客户端同刻共击），封顶 60s；**不主动放弃**（IM 账号静默失联比慢重连更糟）。单一 `reconnectTimer` 位即并发守卫：close 与 op7 同时触发只保留一个排程。
+- **RESUME 续传**：捕获 READY 的 `session_id` 与 `resume_gateway_url`，断线重连优先打 resume 域并发 `op 6`（带最后 `seq`），不丢断口期间的事件也不重拉全量；拿不到 resume 信息时回退完整 IDENTIFY。`RESUMED` 帧才置 `connected`，并重连成功留痕（含第几次尝试）。
+- **僵尸连接判定**：发出 `HEARTBEAT` 后下一拍仍未收 ACK → 主动断开并进重连（官方推荐做法）；收到 ACK 即清位，不误判。
+- **`op 9` 两档分流**：`d=false` 会**清 session**（不清则后续 HELLO 误走 RESUME 反复碰壁）；两档均经退避排程而非零等待，消除「op9 d=true → 同连接立即 RESUME → 再被拒」的热循环。
+
+### Fixed
+
+- **重连与上层 `connect()` 叠出双 Gateway 连接**：`AccountManager.ensureConnected` 在任何操作前都会调 `connect()`，而它在 `connected=false` 时不撤内部排程就另建一条——Discord 视为两个 session，入站可能只投其中一条。现在 `connect()` 语义改为**接管**：先 `cancelScheduled()` + 主动拆旧 socket + 归零 `attempts`，全仓始终只有一条在途连接。
+- **被替换的旧 socket 迟到事件污染当前状态**：message/close/error 三个处理器均先比 `this.ws !== ws`，旧连接的迟到帧与 close 一律丢弃（不改 `connected`、不触发新排程、不向上层投递消息）。
+
+### 面板可见性
+
+无需新增 API：重连等待期内 `connected` 保持 false，而 `account-manager` 已按 `live?.adapter?.connected === true` 透出账号状态，故降级对用户可见（不再是“看着已连接但其实哑了”）。
+
+### 备注
+
+- `reconnectBaseMs` / `reconnectMaxMs` / `random` 仅作为适配器构造选项（供测试确定性断言），**不进用户设置面**：默认值已适用于生产，多一个开关就多一类误配。
+- 新增 9 例契约测试（共 40 例 discord / **780 例全量**）：退避递增封顶、op7 不叠加排程、RESUME 域名与 seq、IDENTIFY 回退、僵尸判定与 ACK 不误判、disconnect 不重连、connect 接管不叠连、旧 socket 事件丢弃。
+
 ## 0.5.2（Discord 服务器频道消息失联：Gateway intents 位值修正）
 
 感谢 @lide4144 在 #1 里的报告与双连接对照实验，定位、根因与修正值全部准确。

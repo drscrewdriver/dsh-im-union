@@ -99,6 +99,12 @@ export interface DiscordAdapterOptions {
   fetchImpl?: FetchLike
   WebSocketImpl?: WSFactory
   logger?: (msg: string) => void
+  /** 重连退避基准（默认 1000ms），按 2^n 递增到 `reconnectMaxMs`；测试可压小。 */
+  reconnectBaseMs?: number
+  /** 重连退避上限（默认 60000ms）：不放弃重试，只封顶等待。 */
+  reconnectMaxMs?: number
+  /** 抖动源（默认 `Math.random`）：测试注定值以确定性断言等待时长。 */
+  random?: () => number
 }
 
 export class DiscordApiError extends Error {
@@ -134,12 +140,29 @@ export class DiscordAdapter implements ChannelAdapter {
   private readonly fetchImpl: FetchLike
   private readonly wsFactory: WSFactory
   private readonly log: (msg: string) => void
+  private readonly reconnectBaseMs: number
+  private readonly reconnectMaxMs: number
+  private readonly random: () => number
   private listeners: MessageListener[] = []
   private ws: WSLike | undefined
   private botUserId = ''
   private lastSeq: number | undefined
   private heartbeat: ReturnType<typeof setInterval> | undefined
   private readonly closeController = new AbortController()
+  /** 首次 IDENTIFY 用的 Gateway 地址（`connect()` 取定）；重连优先走 `resumeUrl`。 */
+  private gatewayUrl = ''
+  /** READY 下发的 session_id：有值且 `resumeUrl` 在位才能 RESUME（不丢事件）。 */
+  private sessionId = ''
+  /** READY 下发的 resume_gateway_url（与初次 `/gateway` 不同域，必须用它续传）。 */
+  private resumeUrl = ''
+  /** 连续重连次数；READY/RESUMED 归零，驱动指数退避。 */
+  private attempts = 0
+  /** 已发 HEARTBEAT 等 ACK：下一拍仍未清即判定僵尸连接。 */
+  private awaitingAck = false
+  /** 待执行的重连排程（单一排程位即并发守卫：重复 close/RECONNECT 不叠加）。 */
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  /** 主动拆线位：`disconnect()` 后不得再自动重连。 */
+  private shuttingDown = false
 
   constructor(options: DiscordAdapterOptions) {
     if (typeof options.token !== 'string' || options.token === '') {
@@ -148,6 +171,9 @@ export class DiscordAdapter implements ChannelAdapter {
     this.token = options.token
     this.apiBase = options.apiBase ?? 'https://discord.com/api/v10'
     this.fetchImpl = options.fetchImpl ?? ((globalThis as { fetch?: FetchLike }).fetch as FetchLike)
+    this.reconnectBaseMs = options.reconnectBaseMs ?? 1000
+    this.reconnectMaxMs = options.reconnectMaxMs ?? 60_000
+    this.random = options.random ?? Math.random
     const globalWS = (globalThis as { WebSocket?: { new (url: string): WSLike } }).WebSocket
     this.wsFactory =
       options.WebSocketImpl ??
@@ -192,33 +218,83 @@ export class DiscordAdapter implements ChannelAdapter {
   // —— Gateway ——————————————————————————————————————————
 
   async connect(signal?: AbortSignal): Promise<void> {
+    this.shuttingDown = false
+    // 上层显式 connect（`AccountManager.ensureConnected` 在任何操作前都会调）：
+    // 由它接管重连。若不先撤内部排程并拆旧 socket，会同时存在两条 Gateway 连接
+    // （Discord 视为两个 session，入站可能只投其中一条）。
+    this.cancelScheduled()
+    this.attempts = 0
+    const prev = this.ws
+    if (prev !== undefined) {
+      this.ws = undefined // 先摘引用：旧 socket 迟到的 close/message 不再参与状态判定
+      this.stopHeartbeat()
+      try {
+        prev.close()
+      } catch {
+        // ignore：旧连接关不上也不能阻塞新连接建立。
+      }
+    }
     const me = (await this.rest('GET', '/users/@me', undefined, signal)) as { id?: string }
     this.botUserId = String(me.id ?? '')
     const gateway = (await this.rest('GET', '/gateway', undefined, signal)) as { url?: string }
     const url = String(gateway.url ?? 'wss://gateway.discord.gg/?v=10&encoding=json')
-    const wsUrl = url.includes('?') ? `${url}&encoding=json` : `${url}/?v=10&encoding=json`
+    this.gatewayUrl = url.includes('?') ? `${url}&encoding=json` : `${url}/?v=10&encoding=json`
+    this.openGateway()
+  }
+
+  /**
+   * 建一条 Gateway 连接。重连不重跑 `connect()` 的 REST 面：
+   * 能续传时用 READY 给的 `resume_gateway_url`，否则回退初次取定的 `gatewayUrl`。
+   */
+  private openGateway(): void {
+    if (this.shuttingDown) return
+    const wsUrl = this.resumeUrl !== '' ? this.resumeUrl : this.gatewayUrl
     const ws = this.wsFactory(wsUrl)
     this.ws = ws
-    ws.addEventListener('message', (event: { data: string }) => this.handleGatewayFrame(String(event.data)))
+    this.awaitingAck = false
+    // 两个处理器都先比 `this.ws !== ws`：被 connect()/重连替换过的旧 socket，
+    // 其迟到帧与 close 一律不得再改当前状态（否则会误判断开、叠排重连）。
+    ws.addEventListener('message', (event: { data: string }) => {
+      if (this.ws !== ws) return
+      this.handleGatewayFrame(String(event.data))
+    })
     ws.addEventListener('close', () => {
+      if (this.ws !== ws) return
       this.connected = false
       this.stopHeartbeat()
-      if (!this.closeController.signal.aborted) this.log('discord Gateway 断开（上层重连策略归 T2.5）')
+      // 主动拆线（disconnect / 宿主 abort / connect 接管）不重连；其余一律进退避排程。
+      if (this.shuttingDown || this.closeController.signal.aborted) return
+      this.scheduleReconnect('断开')
     })
     ws.addEventListener('error', () => {
+      if (this.ws !== ws) return
       this.connected = false
     })
   }
 
+  /** 取消待执行的重连排程（单一收口，避免各处 clearTimeout 写法走样）。 */
+  private cancelScheduled(): void {
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = undefined
+    }
+  }
+
   async disconnect(): Promise<void> {
+    this.shuttingDown = true
     this.stopHeartbeat()
+    this.cancelScheduled()
+    this.sessionId = ''
+    this.resumeUrl = ''
+    this.attempts = 0
     this.closeController.abort()
+    const ws = this.ws
+    this.ws = undefined
     try {
-      this.ws?.close()
+      ws?.close()
     } catch {
       // 已断开即目标达成。
     }
-    this.ws = undefined
     this.connected = false
   }
 
@@ -236,31 +312,58 @@ export class DiscordAdapter implements ChannelAdapter {
         const intervalMs = Number(frame.d?.heartbeat_interval ?? 41250)
         this.stopHeartbeat()
         this.heartbeat = setInterval(() => this.sendHeartbeat(), intervalMs)
-        this.sendIdentify()
+        // 有 session 就续传（不丢断口期间的事件、不重拉全量）；否则完整 IDENTIFY。
+        if (this.canResume()) this.sendResume()
+        else this.sendIdentify()
         return
       }
       case OP.HEARTBEAT_ACK:
+        this.awaitingAck = false
         return
       case OP.RECONNECT:
-        this.log('discord Gateway 要求重连（当前实现退IDENTIFY重建）')
+        // 服务端定期要求重连：先落排程，再关连接（close 处理器看到已有排程就不叠加）。
+        this.scheduleReconnect('收到 op7 RECONNECT')
         try {
           this.ws?.close()
         } catch {
-          // ignore
+          // ignore：排程已落，关失败也不影响下一轮。
         }
         return
       case OP.INVALID_SESSION: {
         this.connected = false
         this.stopHeartbeat()
-        if (frame.d === true) {
-          this.log('discord 会话可续（RESUME 归后续迭代），当前直接重 IDENTIFY')
-        }
-        this.sendIdentify()
+        // d=false 意味会话已确定没了：不清 session 的话，下一条 HELLO 会误走 RESUME 反复碰壁。
+        if (frame.d !== true) this.sessionId = ''
+        // 官方要求收到 op9 后等 1–5s 再动作；走同一退避位，不另并一套定时器，
+        // 也避免「op9 d=true → 同连接立即 RESUME → 再被拒」的热循环。
+        const useResume = this.canResume()
+        this.scheduleAttempt(`会话失效（op9 d=${String(frame.d)}）`, () => {
+          if (useResume) this.sendResume()
+          else this.sendIdentify()
+        })
         return
       }
       case OP.DISPATCH: {
         if (frame.t === 'READY') {
           this.connected = true
+          this.attempts = 0
+          this.awaitingAck = false
+          this.sessionId = String(frame.d?.session_id ?? '')
+          const resume = frame.d?.resume_gateway_url
+          if (typeof resume === 'string' && resume !== '') this.resumeUrl = resume
+          this.log(
+            this.sessionId !== '' && this.resumeUrl !== ''
+              ? 'discord Gateway 就绪（session 已建立，后续断开可 RESUME 续传）'
+              : 'discord Gateway 就绪（未拿到 resume 信息，后续断开将重 IDENTIFY）',
+          )
+          return
+        }
+        if (frame.t === 'RESUMED') {
+          const recovered = this.attempts
+          this.connected = true
+          this.attempts = 0
+          this.awaitingAck = false
+          this.log(`discord Gateway RESUME 成功（断口期间事件已续传${recovered > 1 ? `，第 ${recovered} 次尝试` : ''}）`)
           return
         }
         if (frame.t === 'MESSAGE_CREATE') {
@@ -297,7 +400,74 @@ export class DiscordAdapter implements ChannelAdapter {
     })
   }
 
+  /** 可续传：READY 同时给了 session_id 与 resume_gateway_url 才成立（缺一必须重 IDENTIFY）。 */
+  private canResume(): boolean {
+    return this.sessionId !== '' && this.resumeUrl !== ''
+  }
+
+  private sendResume(): void {
+    this.sendFrame({
+      op: OP.RESUME,
+      d: { token: this.token, session_id: this.sessionId, seq: this.lastSeq ?? 0 },
+    })
+  }
+
+  /** 指数退避 + 正向抖动（最多 +30%，避免全量客户端同刻共击）：base·2^(n-1) 封顶 maxMs。 */
+  private backoffMs(attempt: number): number {
+    const base = Math.min(this.reconnectBaseMs * 2 ** Math.max(0, attempt - 1), this.reconnectMaxMs)
+    return Math.round(base * (1 + this.random() * 0.3))
+  }
+
+  /**
+   * 唯一的退避排程原语。单一 `reconnectTimer` 位就是并发守卫：close、op7、op9 多源
+   * 同时触发时只保留第一个排程（不叠加、不互相覆盖、不泄漏旧定时器）。
+   * 不主动放弃：只把等待封顶在 `reconnectMaxMs`，IM 账号静默失联比慢重连更糟。
+   */
+  private scheduleAttempt(reason: string, action: () => void): void {
+    if (this.shuttingDown) return
+    if (this.reconnectTimer !== undefined) {
+      this.log(`discord ${reason}：已有重连排程在队，不叠加`)
+      return
+    }
+    const attempt = ++this.attempts
+    const wait = this.backoffMs(attempt)
+    this.log(`discord ${reason}，${wait}ms 后第 ${attempt} 次尝试`)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined
+      if (this.shuttingDown) return
+      try {
+        action()
+      } catch (error) {
+        // 建连/发帧本身抛（如宿主缺 WebSocket）：转下一轮退避，不把异常冒到事件循环外。
+        this.log(`discord 重连尝试失败: ${(error as Error).message}`)
+        this.scheduleAttempt('重连尝试失败', action)
+      }
+    }, wait)
+  }
+
+  /** 重连一条新连接：不重跑 `connect()` 的 REST 面，地址用已取定的 resume/gateway 位。 */
+  private scheduleReconnect(reason: string): void {
+    this.scheduleAttempt(`Gateway ${reason}`, () => {
+      this.openGateway()
+    })
+  }
+
   private sendHeartbeat(): void {
+    // 上一拍还没 ACK 就到了下一拍 = 僵尸连接（TCP 活着但服务端已不响应），
+    // 官方推荐做法是主动断开重建；close 处理器会接手排重连。
+    if (this.awaitingAck) {
+      this.awaitingAck = false
+      this.stopHeartbeat()
+      this.log('discord 心跳无 ACK，判定僵尸连接并主动断开重连')
+      try {
+        this.ws?.close()
+      } catch {
+        // close 处理器不可依赖时，手动补一排程。
+        this.scheduleReconnect('僵尸连接断开失败')
+      }
+      return
+    }
+    this.awaitingAck = true
     this.sendFrame({ op: OP.HEARTBEAT, d: this.lastSeq ?? null })
   }
 

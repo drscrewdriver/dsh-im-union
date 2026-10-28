@@ -62,16 +62,49 @@ const GATEWAY_ROUTES = (url) => {
   return resp(200, {})
 }
 
-async function connectedAdapter(restRoute = GATEWAY_ROUTES) {
+async function connectedAdapter(restRoute = GATEWAY_ROUTES, extra = {}) {
   const rest = fakeRest(restRoute)
   const ws = fakeWS()
-  const adapter = new DiscordAdapter({ token: 'DTOK', fetchImpl: rest.impl, WebSocketImpl: ws.factory, apiBase: 'https://api.test' })
-  const p = adapter.connect()
-  await p
+  const logs = []
+  const adapter = new DiscordAdapter({
+    token: 'DTOK',
+    fetchImpl: rest.impl,
+    WebSocketImpl: ws.factory,
+    apiBase: 'https://api.test',
+    // 重连退避压到毫秒级且抖定为 0：否则用例会真等 1s+ 且等待时长不可断言。
+    reconnectBaseMs: 5,
+    random: () => 0,
+    logger: (m) => logs.push(m),
+    ...extra,
+  })
+  await adapter.connect()
   ws.made[0].emit({ op: 10, d: { heartbeat_interval: 45000 } })
   ws.made[0].emit({ op: 0, t: 'READY', s: 1, d: { user: { id: '42' } } })
-  return { adapter, rest, ws, socket: ws.made[0] }
+  return { adapter, rest, ws, socket: ws.made[0], logs }
 }
+
+/** 已拿到 session 的连接：READY 带 session_id + resume_gateway_url，后续断开应走 RESUME。 */
+async function resumableAdapter(extra = {}) {
+  const rest = fakeRest(GATEWAY_ROUTES)
+  const ws = fakeWS()
+  const logs = []
+  const adapter = new DiscordAdapter({
+    token: 'DTOK',
+    fetchImpl: rest.impl,
+    WebSocketImpl: ws.factory,
+    apiBase: 'https://api.test',
+    reconnectBaseMs: 5,
+    random: () => 0,
+    logger: (m) => logs.push(m),
+    ...extra,
+  })
+  await adapter.connect()
+  ws.made[0].emit({ op: 10, d: { heartbeat_interval: 45000 } })
+  ws.made[0].emit({ op: 0, t: 'READY', s: 41, d: { user: { id: '42' }, session_id: 'SES-1', resume_gateway_url: 'wss://resume.test' } })
+  return { adapter, rest, ws, socket: ws.made[0], logs }
+}
+
+const nap = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // —— Gateway 协议 ——————————————————————————————————————————
 
@@ -157,19 +190,172 @@ test('HELLO 心跳按间隔发出并携带最后 seq', async () => {
   assert.equal(beats[0].d, 77, '心跳携带最后收到的 seq')
 })
 
-test('INVALID_SESSION 重发 IDENTIFY；RECONNECT 关连接', async () => {
-  const { adapter, socket } = await connectedAdapter()
+test('INVALID_SESSION：op9 不零等待动作，退避到点后同连接重 IDENTIFY', async () => {
+  const { adapter, socket, logs } = await connectedAdapter()
   const before = socket.sent.filter((f) => f.op === 2).length
   socket.emit({ op: 9, d: false })
-  assert.equal(socket.sent.filter((f) => f.op === 2).length, before + 1)
-  let closed = false
-  const origClose = socket.close
-  socket.close = () => {
-    closed = true
-    origClose.call(socket)
-  }
+  assert.equal(socket.sent.filter((f) => f.op === 2).length, before, '官方要求 op9 后等 1–5s，不得零等待重发')
+  await nap(25)
+  assert.equal(socket.sent.filter((f) => f.op === 2).length, before + 1, '退避到点后在同一连接上重 IDENTIFY')
+  assert.ok(logs.some((m) => m.includes('op9 d=false')), `需留痕失效档位，实际：${JSON.stringify(logs)}`)
+  await adapter.disconnect()
+})
+
+test('RECONNECT（op7）：落排程并关连接，close 再触发也不叠加排程', async () => {
+  const { adapter, socket, ws, logs } = await connectedAdapter()
   socket.emit({ op: 7 })
-  assert.equal(closed, true)
+  assert.equal(socket.readyState, 3, 'op7 应主动关连接')
+  assert.equal(ws.made.length, 1, '退避未到，不得立刻建新连接')
+  assert.ok(logs.some((m) => m.includes('不叠加')), 'close 与 op7 同时触发只保留一个排程')
+  await nap(25)
+  assert.equal(ws.made.length, 2, '退避到点后自动重连')
+  await adapter.disconnect()
+})
+
+test('断开自动重连：有 session 则走 RESUME 续传，且必打 resume_gateway_url', async () => {
+  const { adapter, ws, socket, logs } = await resumableAdapter()
+  assert.ok(logs.some((m) => m.includes('session 已建立')), 'READY 应留痕 session 可用')
+  socket.emit({ op: 7 })
+  await nap(25)
+  assert.equal(ws.made.length, 2, '应重建连接')
+  const next = ws.made[1]
+  assert.equal(next.url, 'wss://resume.test', 'RESUME 必须用 resume_gateway_url，不是初次 /gateway 地址')
+  next.emit({ op: 10, d: { heartbeat_interval: 45000 } })
+  const resume = next.sent.find((f) => f.op === 6)
+  assert.ok(resume, 'HELLO 后应发 RESUME')
+  assert.equal(next.sent.find((f) => f.op === 2), undefined, '可续传时不该退到 IDENTIFY（会丢断口事件）')
+  assert.equal(resume.d.session_id, 'SES-1')
+  assert.equal(resume.d.seq, 41, 'RESUME 必带最后收到的 seq，否则断口期间事件会丢/重放')
+  assert.equal(resume.d.token, 'DTOK')
+  assert.equal(adapter.connected, false, 'RESUME 发出但未确认前不算已连')
+  next.emit({ op: 0, t: 'RESUMED', s: 42, d: {} })
+  assert.equal(adapter.connected, true, 'RESUMED 帧才置连接')
+  assert.ok(logs.some((m) => m.includes('RESUME 成功')), '重连成功需留痕')
+  await adapter.disconnect()
+})
+
+test('无 session 可续：重连回退 IDENTIFY 并用初次 gateway 地址', async () => {
+  const { adapter, ws, socket } = await connectedAdapter()
+  socket.emit({ op: 7 })
+  await nap(25)
+  const next = ws.made[1]
+  assert.equal(next.url, 'wss://gateway.test/?v=10&encoding=json', '没有 resume_gateway_url 时用初次取定的 gateway 地址（含版本/编码补全）')
+  next.emit({ op: 10, d: { heartbeat_interval: 45000 } })
+  assert.ok(next.sent.some((f) => f.op === 2), '回退完整 IDENTIFY')
+  assert.equal(next.sent.find((f) => f.op === 6), undefined, '无 session 不得发 RESUME')
+  await adapter.disconnect()
+})
+
+test('心跳无 ACK = 僵尸连接：主动断开并自动重连（不等服务端踢）', async () => {
+  const rest = fakeRest(GATEWAY_ROUTES)
+  const ws = fakeWS()
+  const logs = []
+  const adapter = new DiscordAdapter({
+    token: 'DTOK',
+    fetchImpl: rest.impl,
+    WebSocketImpl: ws.factory,
+    apiBase: 'https://api.test',
+    reconnectBaseMs: 5,
+    random: () => 0,
+    logger: (m) => logs.push(m),
+  })
+  await adapter.connect()
+  const socket = ws.made[0]
+  // 20ms 心跳间隔且不回 ACK：第二拍即应判定僵尸。
+  socket.emit({ op: 10, d: { heartbeat_interval: 20 } })
+  await nap(70)
+  assert.ok(socket.sent.some((f) => f.op === 1), '第一拍正常发心跳')
+  assert.equal(socket.readyState, 3, '无 ACK 的第二拍→判定僵尸并断开')
+  assert.ok(logs.some((m) => m.includes('僵尸连接')), `需留痕判定原因，实际：${JSON.stringify(logs)}`)
+  await nap(25)
+  assert.equal(ws.made.length, 2, '僵尸断开后自动重连')
+  await adapter.disconnect()
+})
+
+test('ACK 正常时不误判僵尸：每拍收到 HEARTBEAT_ACK 即清位', async () => {
+  const { adapter, ws, socket, logs } = await connectedAdapter()
+  // 重新发 HELLO 以拿到短心跳间隔（上一拍 HELLO 用的是 45s）。
+  const origSend = socket.send
+  socket.send = (data) => {
+    const frame = JSON.parse(data)
+    if (frame.op === 1) socket.emit({ op: 11 }) // 立即回 ACK
+    origSend(data)
+  }
+  socket.emit({ op: 10, d: { heartbeat_interval: 20 } })
+  await nap(90)
+  const beats = socket.sent.filter((f) => f.op === 1)
+  assert.ok(beats.length >= 2, `多拍心跳应持续，实际 ${beats.length} 拍`)
+  assert.equal(ws.made.length, 1, '有 ACK 就不得误判僵尸而重建连接')
+  assert.ok(!logs.some((m) => m.includes('僵尸连接')), '无误判留痕')
+  assert.equal(socket.readyState, 1, '连接保持')
+  await adapter.disconnect()
+})
+
+test('退避递增并封顶：不放弃重试，只把等待封顶在 reconnectMaxMs', async () => {
+  const rest = fakeRest(GATEWAY_ROUTES)
+  const ws = fakeWS()
+  const logs = []
+  const adapter = new DiscordAdapter({
+    token: 'DTOK',
+    fetchImpl: rest.impl,
+    WebSocketImpl: ws.factory,
+    apiBase: 'https://api.test',
+    reconnectBaseMs: 10,
+    reconnectMaxMs: 30,
+    random: () => 0,
+    logger: (m) => logs.push(m),
+  })
+  await adapter.connect()
+  const socket = ws.made[0]
+  socket.emit({ op: 10, d: { heartbeat_interval: 45000 } })
+  socket.emit({ op: 0, t: 'READY', s: 1, d: { user: { id: '42' } } })
+  for (let i = 0; i < 5; i++) {
+    socket.emit({ op: 9, d: false })
+    await nap(45)
+  }
+  const waits = logs
+    .filter((m) => m.includes('次尝试'))
+    .map((m) => Number(/(\d+)ms 后第/.exec(m)?.[1]))
+  assert.deepEqual(waits, [10, 20, 30, 30, 30], `10/20/30 递增后封顶且不断重试，实际：${JSON.stringify(waits)}`)
+  await adapter.disconnect()
+})
+
+test('disconnect 后不得自动重连（主动拆线与意外断开分流）', async () => {
+  const { adapter, ws, socket } = await connectedAdapter()
+  await adapter.disconnect()
+  // 拆线后再推一个 close（模拟服务端迟到帧）与手动 close：都不得起新连接。
+  socket.emit({ op: 7 })
+  await nap(25)
+  assert.equal(ws.made.length, 1, 'disconnect 后的任何断开信号都不应触发重连')
+  assert.equal(adapter.connected, false)
+})
+
+test('重连排程在途时上层再 connect：接管而非叠出第二条 Gateway 连接', async () => {
+  const { adapter, ws, socket } = await connectedAdapter()
+  socket.emit({ op: 7 }) // 落一个尚未到点的重连排程
+  assert.equal(ws.made.length, 1)
+  await adapter.connect() // `AccountManager.ensureConnected` 的调用路径
+  assert.equal(ws.made.length, 2, '只应新建一条，被接管的排程不得再补一条')
+  assert.equal(socket.readyState, 3, '旧连接应被主动拆掉')
+  await nap(25)
+  assert.equal(ws.made.length, 2, '等待期内仍只有一条：双 Gateway 连接会让入站只投此一个 session')
+  await adapter.disconnect()
+})
+
+test('被替换的旧 socket：迟到帧与 close 一律忽略，不改状态也不投递', async () => {
+  const { adapter, ws, socket } = await connectedAdapter()
+  await adapter.connect() // 换成第二条连接
+  const next = ws.made[1]
+  assert.equal(ws.made.length, 2)
+  const got = []
+  adapter.onMessage((m) => got.push(m))
+  // 旧 socket 补发断开信号与一条入站：两者都必须被丢。
+  socket.emit({ op: 7 })
+  socket.emit({ op: 0, t: 'MESSAGE_CREATE', s: 99, d: { channel_id: 'stale', author: { id: '9' }, content: 'stale' } })
+  await nap(25)
+  assert.equal(ws.made.length, 2, '旧 socket 事件不得触发新排程')
+  assert.equal(next.readyState, 1, '旧 socket 不得把当前连接误判为已断开')
+  assert.equal(got.length, 0, `旧 socket 的迟到入站不得投递给上层，实际：${JSON.stringify(got.map((m) => m.address))}`)
   await adapter.disconnect()
 })
 
