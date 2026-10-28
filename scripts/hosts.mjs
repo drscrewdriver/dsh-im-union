@@ -3,7 +3,7 @@
  *
  * 枚举口径（2026-10-17 定稿，机制移植自 dsh-tidy-display/scripts/hosts.mjs 的
  * 单源纪律，版本集合按 IM 插件的宿主面裁剪）：
- * - 起步支持 0.1.2-rc.1 .. 0.2.1-rc.3 共 13 个 tag（对标 MichengAI/dsh-im-connect
+ * - 起步支持 0.1.2-rc.1 .. 0.2.1-rc.4 共 14 个 tag（对标 MichengAI/dsh-im-connect
  *   的声明面），由本地隔离矩阵逐格验证后**删红留绿**；矩阵结论落 `.compat-results/`。
  * - 0.1.0/0.1.1 线**不入列**：缺认证与会话控制接口（IM 插件硬依赖），装上也必挂；
  *   代码里保留 gen1 设置面兜底路径仅为家族其他插件复用 settings-compat 服务。
@@ -36,12 +36,15 @@ export const supportedHosts = Object.freeze([
   // npm 存在性已核 @deepseek-ai/dsh-web versions 含 0.2.1-rc.2；
   // rc.3 于 2026-10-24 同裁定入列：rc.2→rc.3 契约面零断裂（host-matrix 探针 14 列
   // rc.2↔rc.3 复核 + source-analysis v0.2.1-rc.3 四件套），本插件不触 ctx.web
-  // provider 钉选/模型标签槽/startSession 系；三域条目仅用户可隐藏，不破功能）
+  // provider 钉选/模型标签槽/startSession 系；三域条目仅用户可隐藏，不破功能；
+  // rc.4 于 2026-10-28 同裁定入列：rc.3→rc.4 纯修复车契约面零 diff（source-analysis
+  // v0.2.1-rc.4 四件套 + 配对探针 14 列全等），本插件不触页签 tooltip 探针锚/ACP stdout 抓取的声明面）
   '0.2.1-alpha.2',
   '0.2.1-alpha.3',
   '0.2.1-rc.1',
   '0.2.1-rc.2',
   '0.2.1-rc.3',
+  '0.2.1-rc.4',
 ])
 
 /** peerDependencies / engines.dsh 共用的枚举串（精确枚举无暗坑：caret 与 `<x-0` 上界实测漏 rc 线）。 */
