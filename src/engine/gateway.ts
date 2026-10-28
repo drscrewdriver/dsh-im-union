@@ -32,6 +32,26 @@ import { zipSync } from './zip.js'
 import { withFileLog } from '../plugin-log.js'
 import type { ApprovalOutcome, ApprovalRequest, QuestionAnswer, QuestionRequest } from '../host-compat/interaction.js'
 import type { ChannelAdapter, Receipt, ReplyStream, SemanticMessage } from '../channels/types.js'
+import type { QqGroupResult } from '../channels/qq-group-admin.js'
+import { rewriteMarkdownLocalImages } from '../channels/qq.js'
+
+/** QQ 适配器群管理方法集（仅 qq 适配器实现；此处仅做结构型鸭子断言，不入 ChannelAdapter 契约）。 */
+interface QqGroupAdminLike extends ChannelAdapter {
+  qqGroupListJoinRequests(gid: string, signal?: AbortSignal): Promise<QqGroupResult<Record<string, unknown>[]>>
+  qqGroupApproveJoin(gid: string, memberOpenid: string, op: 'approve' | 'decline', opts?: { joinRequestId?: string }): Promise<QqGroupResult<true>>
+  qqGroupGetMuteState(gid: string): Promise<QqGroupResult<Record<string, unknown>>>
+  qqGroupSetMute(gid: string, memberOpenids: readonly string[], muteSeconds: number): Promise<QqGroupResult<true>>
+  qqGroupRecall(peerId: string, msgId: string, scope?: 'group' | 'c2c'): Promise<QqGroupResult<true>>
+}
+
+/** markdown 内联本地图片扩展名→mime（仅官方媒体图支持的四类，其余不尝试上传）。 */
+const QQ_INLINE_IMG_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+}
 import type { RelayStore } from './relay.js'
 import { sanitizeImReply } from './reply-sanitize.js'
 import { renderSvgToPng } from './svg-render.js'
@@ -77,6 +97,8 @@ export interface AccountPolicy {
   session?: AccountSessionPrefs
   /** 人类可读别名（0.4.7）：`/relay` 等命令面可用别名代替代理键 accountId（唯一才解）。 */
   alias?: string
+  /** QQ 群管理授权成员 openid 集（/qq 命令的唯一放行名单；空=命令惰性拒绝）。 */
+  groupAdminOpenids?: Set<string>
 }
 
 export interface EngineDeps {
@@ -260,6 +282,7 @@ export class ImUnionEngine {
         commandExec: normalizeCommandExec(policy?.commandExec),
         ...(policy?.session !== undefined ? { session: policy.session } : {}),
         ...(policy?.alias !== undefined && policy.alias !== '' ? { alias: policy.alias } : {}),
+        ...(policy?.groupAdminOpenids !== undefined ? { groupAdminOpenids: new Set(policy.groupAdminOpenids) } : {}),
       },
     })
     adapter.onMessage((message) => void this.handleInbound(accountId, message))
@@ -278,6 +301,70 @@ export class ImUnionEngine {
     if (hits.length === 1) return { id: hits[0] }
     if (hits.length > 1) return { ambiguous: true }
     return {}
+  }
+
+  /** QQ 群管理命令实现（P6/F6）：仅 QQ 群聊、仅授权名单成员，作用于本群（gid=address.chatId）。 */
+  private async qqGroupAdmin(
+    accountId: string,
+    address: ChatAddress,
+    sub: string,
+    arg: string,
+    userId?: string,
+  ): Promise<string> {
+    if (address.channel !== 'qq') return '群管理仅 QQ 渠道可用。'
+    if (address.kind !== 'group') return '群管理需在群聊内使用（只作用于本群）。'
+    const entry = this.accounts.get(accountId)
+    if (entry === undefined) return '账号未就绪。'
+    const allow = entry.policy.groupAdminOpenids
+    if (allow === undefined || allow.size === 0) return '群管理未授权：请在设置面板为本 QQ 账号填入「群管理授权成员 openid」名单。'
+    if (userId === undefined || !allow.has(userId)) return '你不在本账号群管理授权名单内，操作已拒绝。'
+    const adapter = entry.adapter as unknown as Partial<QqGroupAdminLike>
+    if (typeof adapter.qqGroupListJoinRequests !== 'function') return '当前 QQ 适配器无群管理面。'
+    const gid = address.chatId
+    const [headRaw, ...tailParts] = arg.split(':')
+    const head = (headRaw ?? '').trim()
+    const tail = tailParts.join(':').trim()
+    switch (sub) {
+      case 'join':
+      case 'joinlist': {
+        const r = await adapter.qqGroupListJoinRequests!(gid)
+        if (!r.ok) return `入群申请查询失败：${r.human}`
+        if (r.data.length === 0) return '本群暂无待审入群申请。'
+        return ['待审入群申请（/qq approve <member_openid>[:<join_request_id>]）：',
+          ...r.data.map((x) => `- member=${String(x.member_openid ?? x.union_openid ?? '?')}${x.join_request_id ? ` id=${String(x.join_request_id)}` : ''}${x.username ? ` 昵称=${String(x.username)}` : ''}`),
+        ].join('\n')
+      }
+      case 'approve':
+      case 'decline': {
+        if (head === '') return `用法：/qq ${sub} <member_openid>[:<join_request_id>]`
+        const r = await adapter.qqGroupApproveJoin!(gid, head, sub === 'approve' ? 'approve' : 'decline', tail !== '' ? { joinRequestId: tail } : undefined)
+        return r.ok ? `已${sub === 'approve' ? '同意' : '拒绝'} ${head} 入群。` : `审批失败：${r.human}`
+      }
+      case 'mute': {
+        const ids = head.split(',').map((s) => s.trim()).filter((s) => s !== '')
+        if (ids.length === 0) return '用法：/qq mute <member_openid[,..]>[:<秒>]'
+        const sec = tail !== '' ? Number(tail) : 600
+        const r = await adapter.qqGroupSetMute!(gid, ids, Number.isFinite(sec) && sec > 0 ? Math.floor(sec) : 600)
+        return r.ok ? `已禁言 ${ids.length} 人。` : `禁言失败：${r.human}`
+      }
+      case 'unmute': {
+        const ids = head.split(',').map((s) => s.trim()).filter((s) => s !== '')
+        if (ids.length === 0) return '用法：/qq unmute <member_openid[,..]>'
+        const r = await adapter.qqGroupSetMute!(gid, ids, 0)
+        return r.ok ? `已解除 ${ids.length} 人禁言。` : `解除失败：${r.human}`
+      }
+      case 'mutestate': {
+        const r = await adapter.qqGroupGetMuteState!(gid)
+        return r.ok ? `禁言状态：${JSON.stringify(r.data)}` : `查询失败：${r.human}`
+      }
+      case 'recall': {
+        if (head === '') return '用法：/qq recall <message_id>'
+        const r = await adapter.qqGroupRecall!(gid, head, 'group')
+        return r.ok ? '已提交撤回（失败则核对 2 分钟窗口/是否本机器人所发）。' : `撤回失败：${r.human}`
+      }
+      default:
+        return '用法：/qq <join|approve|decline|mute|unmute|mutestate|recall> …（仅群聊、需机器人为群管理员、且你在授权名单内）'
+    }
   }
 
   /** 凭据无关的编辑（别名/白名单/准入档位/会话偏好）原位同步策略，不重建适配器。 */
@@ -300,6 +387,12 @@ export class ImUnionEngine {
           : {}
         : entry.policy.alias !== undefined
           ? { alias: entry.policy.alias }
+          : {}),
+      // 群管理授权名单：传数组/集合=覆盖，不传=保持。
+      ...(policy.groupAdminOpenids !== undefined
+        ? { groupAdminOpenids: new Set(policy.groupAdminOpenids) }
+        : entry.policy.groupAdminOpenids !== undefined
+          ? { groupAdminOpenids: entry.policy.groupAdminOpenids }
           : {}),
     }
     // 偏好改即生效：权限预设对该账号已回路的会话逐个补应用（新建会话由 create 面自落）。
@@ -435,7 +528,7 @@ export class ImUnionEngine {
       // 命令在静音判定之前：静音期必须还能 /mute 解除（否则永久静默）。
       // resolve 对未绑定聊天登记的隐式绑定与 runTurn 惰性解析同值，无额外副作用。
       const sessionId = this.deps.router.resolve(message.address).sessionId
-      const reply = await runCommand(this.commandDeps(accountId), message.address, sessionId, command)
+      const reply = await runCommand(this.commandDeps(accountId), message.address, sessionId, command, message.userId)
       if (reply !== '') await adapter.reply(message.address, reply)
       return
     }
@@ -512,6 +605,8 @@ export class ImUnionEngine {
         }
         return '当前渠道不支持语音输出（或未开启语音档）。'
       },
+      // /qq（P6/F6）：仅 QQ 群聊、仅授权名单成员；作用于本群（gid=address.chatId）。
+      qqGroupAdmin: (address, sub, arg, userId) => this.qqGroupAdmin(accountId, address, sub, arg, userId),
       // /new 轮换（0.4.0）：确定性 id 下解绑重建=同会话（desktop 实证 /new 无效），
       // 轮换带 13 位毫秒纪元并转历史；busy 守卫用回合队列的 running 位。
       rotateSession: (address) => this.rotateSessionFor(address, accountId),
@@ -839,7 +934,7 @@ export class ImUnionEngine {
           : sanitized.svgBlocks.length > 0
             ? '（图表见附图）'
             : '本轮无可见输出。'
-      const parts = splitText(finalText, adapter.caps.maxMessageLength ?? 0)
+      const parts = splitText(await this.rewriteQQInlineImages(adapter, finalText, sessionId, message.address), adapter.caps.maxMessageLength ?? 0)
       const meta: DeliverMeta = { accountId, sessionId, turn: lastTurn }
 
       if (canStream && !streamBroken && stream !== undefined) {
@@ -979,6 +1074,40 @@ export class ImUnionEngine {
       ...(opts?.error !== undefined ? { error: opts.error } : {}),
     })
     if (status === 'failed') this.outbox.set(rec.seq, text)
+  }
+
+  /**
+   * QQ markdown 内联本地图片自动上传（P8/task_8）：仅当适配器具备 uploadMarkdownImage（QQ）、正文含 `![`、
+   * 且工作区读面可用时触发。本地路径经宿主受管读（workspaceRoot 限定）取字节→上传换 url→替回。
+   * 非 QQ/无本地图/读失败/上传失败均原样保留（不阻断投递）。网络图/data:/qqbot-media: 不碰。
+   */
+  private async rewriteQQInlineImages(
+    adapter: ChannelAdapter,
+    text: string,
+    sessionId: string,
+    address: ChatAddress,
+  ): Promise<string> {
+    const md = adapter as unknown as Partial<{
+      uploadMarkdownImage: (f: { name: string; data: Uint8Array; mimeType?: string }) => Promise<QqGroupResult<{ url: string }>>
+    }>
+    if (typeof md.uploadMarkdownImage !== 'function') return text
+    if (!text.includes('![')) return text
+    const deliv = this.deps.deliverables
+    if (deliv === undefined || deliv.mode !== 'workspace') return text
+    const workspaceRoot = this.workspaceOverrides.get(chatOverrideKey(address))
+    return rewriteMarkdownLocalImages(text, async (rawPath) => {
+      const name = rawPath.split(/[\\/]/).pop() ?? 'image'
+      const mime = QQ_INLINE_IMG_MIME[(name.split('.').pop() ?? '').toLowerCase()]
+      if (mime === undefined) return undefined
+      const got = await deliv.read(sessionId, { path: rawPath, name }, workspaceRoot)
+      if (got === undefined) return undefined
+      try {
+        const up = await md.uploadMarkdownImage!({ name: got.name, data: got.data, mimeType: mime })
+        return up.ok ? up.data.url : undefined
+      } catch {
+        return undefined
+      }
+    })
   }
 
   /** /delivery retry：确定性失败且 <MAX_RETRY 才可补；uncertain 绝不补（D7）。 */

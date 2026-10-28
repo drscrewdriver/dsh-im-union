@@ -56,6 +56,8 @@ export interface CommandDeps {
     bind(sessionId: string, notifyAccountId: string): Promise<string>
     unbind(sessionId: string): Promise<string>
   }
+  /** /qq：QQ 群管理（入群审批/禁言/撤回）；gateway 注入，携带发起者 userId 供授权名单校验。缺位=降级文案。 */
+  qqGroupAdmin?: (address: ChatAddress, sub: string, arg: string, userId?: string) => Promise<string>
 }
 
 export interface ParsedCommand {
@@ -89,6 +91,7 @@ const COMMAND_TABLE: Array<{ name: string; usage: string; desc: string }> = [
   { name: 'export', usage: '/export', desc: '导出本聊天投递记录 ZIP' },
   { name: 'speak', usage: '/speak <文本>', desc: '语音回复（仅开启语音档的渠道）' },
   { name: 'relay', usage: '/relay <通知账号|->', desc: '绑定/解绑抄送通知（无参列出）' },
+  { name: 'qq', usage: '/qq <join|approve|decline|mute|unmute|mutestate|recall> …', desc: 'QQ 群管理（仅群聊、需授权名单与群管理员）' },
 ]
 
 /** 行首 `/词` 才是命令；`/path` 之类文本不触发（群聊粘贴路径的误触面）。 */
@@ -160,6 +163,7 @@ export async function runCommand(
   address: ChatAddress,
   sessionId: string,
   command: ParsedCommand,
+  userId?: string,
 ): Promise<string> {
   const { sessionApi, router, caps } = deps
   switch (command.name) {
@@ -426,6 +430,11 @@ export async function runCommand(
       if (command.arg === '') return '用法：/speak <要念的文本>'
       if (deps.speakText === undefined) return '当前宿主无语音面。'
       return await deps.speakText(address, command.arg)
+    }
+    case 'qq': {
+      if (deps.qqGroupAdmin === undefined) return '群管理面未启用（当前构建/渠道不支持）。'
+      const [sub, ...rest] = command.arg.split(/\s+/)
+      return await deps.qqGroupAdmin(address, (sub ?? '').toLowerCase(), rest.join(' ').trim(), userId)
     }
     default:
       return `未知命令 /${command.name}（/help 看可用命令）`

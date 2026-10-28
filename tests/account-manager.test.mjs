@@ -380,3 +380,18 @@ test('listPublic：最近发送诊断位透出（失败标/成功不喧哗/未�
   const okRows = await manager.listPublic()
   assert.equal(okRows[0].lastSendOk, true)
 })
+
+test('初始注册即携带 groupAdminOpenids（与 alias 对称，不等 syncPolicy）：config.groupAdminUsers 逗号/空白分隔→Set；空配=空集不误放行', async () => {
+  const { manager, engine } = makeManager()
+  await manager.upsert(rec({ config: { groupAdminUsers: 'op1, op2  op3' } }), undefined, { skipConnect: true })
+  await manager.ensureConnected('a1')
+  const reg = engine.registered.find((r) => r.accountId === 'a1')
+  assert.ok(reg, '应发生初始注册')
+  assert.deepEqual([...reg.policy.groupAdminOpenids], ['op1', 'op2', 'op3'], '初注策略即带授权名单')
+
+  const blank = makeManager()
+  await blank.manager.upsert(rec({ accountId: 'a2', config: {} }), undefined, { skipConnect: true })
+  await blank.manager.ensureConnected('a2')
+  const reg2 = blank.engine.registered.find((r) => r.accountId === 'a2')
+  assert.equal(reg2.policy.groupAdminOpenids.size, 0, '未配置→空集（命令侧据此拒绝，绝不默认放行）')
+})

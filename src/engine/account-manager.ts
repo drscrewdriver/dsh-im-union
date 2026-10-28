@@ -274,6 +274,17 @@ export class AccountManager {
     }
   }
 
+  /**
+   * QQ 群管理(/qq)授权成员集：由账号 config.groupAdminUsers（逗号/空白分隔）派生。
+   * 单源于此，registerAccount（初注）与 syncPolicy（原位同步）两处共用，避免一侧漏改。
+   */
+  private groupAdminSet(record: AccountRecord): Set<string> {
+    return new Set((record.config?.groupAdminUsers ?? '')
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .filter((s) => s !== ''))
+  }
+
   /** 编辑后的策略原位下发（引擎 updatePolicy，不重复挂 onMessage）。 */
   private async syncPolicy(record: AccountRecord): Promise<void> {
     const live = this.live.get(record.accountId)
@@ -286,6 +297,8 @@ export class AccountManager {
       commandExec: normalizeCommandExec(record.commandExec),
       // 别名同步给引擎（0.4.7）：/relay 等命令面可用别名代替代理键；空串=清空。
       alias: record.alias ?? '',
+      // QQ 群管理授权名单（P6/F6）：config.groupAdminUsers 逗号/空白分隔→/qq 命令放行集。
+      groupAdminOpenids: this.groupAdminSet(record),
       ...(record.session !== undefined ? { session: sanitizeSessionPrefs(record.session) } : {}),
     })
   }
@@ -450,6 +463,8 @@ export class AccountManager {
         privateAccess: record.privateAccess === 'all' ? 'all' : 'approved',
         commandExec: normalizeCommandExec(record.commandExec),
         ...(record.alias !== undefined && record.alias !== '' ? { alias: record.alias } : {}),
+        // QQ 群管理授权名单初始即下发（与 alias 对称）：不等后续 syncPolicy，新建账号首次 /qq 即可裁决。
+        groupAdminOpenids: this.groupAdminSet(record),
         ...(record.session !== undefined ? { session: sanitizeSessionPrefs(record.session) } : {}),
       })
       await adapter.connect()

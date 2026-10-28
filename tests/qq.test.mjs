@@ -2,7 +2,8 @@
 // 网络面全注入（fetchImpl + SocketImpl），零真实请求。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { QqAdapter, QQApiError, QQUncertainError, createQqAdapter, fitByteBudget } from '../lib/channels/qq.js'
+import { createHash } from 'node:crypto'
+import { QqAdapter, QQApiError, QQUncertainError, createQqAdapter, fitByteBudget, rewriteMarkdownLocalImages } from '../lib/channels/qq.js'
 
 const APP = 'APPID-1'
 const SEC = 'SUPERSECRETV'
@@ -25,7 +26,7 @@ function restRecorder(route) {
         parsed = undefined
       }
     }
-    calls.push({ url, method: init?.method ?? 'GET', body: parsed, headers: init?.headers ?? {} })
+    calls.push({ url, method: init?.method ?? 'GET', body: parsed, rawBody: init?.body, headers: init?.headers ?? {} })
     return route(url, init?.method ?? 'GET', parsed, init)
   }
   return { impl, calls }
@@ -566,7 +567,7 @@ test('setTyping 失败一律吞（装饰面不得影响主回复链）', async (
   await adapter.disconnect()
 })
 
-test('caps 诚实位 + authorize 恒交网关 + 无 beginStream/sendFile/askChoices 面', async () => {
+test('caps 诚实位 + authorize 恒交网关 + fileOut 已实装(beginStream/askChoices 仍缺)', async () => {
   const { adapter } = await ready()
   assert.equal(adapter.id, 'qq')
   assert.deepEqual(adapter.caps, {
@@ -575,31 +576,26 @@ test('caps 诚实位 + authorize 恒交网关 + 无 beginStream/sendFile/askChoi
     nativeChoices: false,
     statusReaction: false,
     typing: true,
-    imageIn: false,
-    fileIn: false,
-    fileOut: false,
+    imageIn: true,
+    fileIn: true,
+    fileOut: true,
     threads: false,
     voice: false,
     maxMessageLength: 1300,
   })
   assert.equal(adapter.authorize(), undefined)
   assert.equal(adapter.beginStream, undefined)
-  assert.equal(adapter.sendFile, undefined)
-  assert.equal(adapter.askChoices, undefined)
+  assert.equal(typeof adapter.sendFile, 'function', 'P1/F1 已实装出站图片')
+  assert.equal(typeof adapter.askChoices, 'function', 'P5/F4 方法在位，但 keyboard 默认关→nativeChoices=false')
   await adapter.disconnect()
 })
 
-// 文件面声明一致性回归（M2 T2.4）：QQ 官方机器人面出站富媒体需先换 file_info
-// （/v2/users/{id}/files 上传接口）且群聊 file_type=4「文件暂不开放」+ 日配额
-// 40093002（文档 https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/rich-message.html
-// https://open.qq.com/doc/qqbot/api/medi上传）；入站 attachments[].url 携带时效 rkey
-// 且文件下载权限未实证 → 做不到即不声明：caps.fileOut=false 且 sendFile 不存在。
-test('文件面未实装：caps.fileOut===false 且 typeof sendFile!==function（声明=实装 E1）', async () => {
+// 出站文件面声明一致性（P1/F1 后翻转）：fileOut=true 必须与 sendFile 在位同批（声明=实装 E1）。
+// QQ 官方机器人出站富媒体仅图片档开放（file_type=1），file_type=4 文件未开放 → 非图片优雅拒绝。
+test('出站文件面：caps.fileOut===true 与 sendFile 同批在位（声明=实装 E1）', async () => {
   const { adapter } = await ready()
-  assert.equal(adapter.caps.fileOut, false)
-  assert.equal(adapter.caps.fileIn, false)
-  assert.notEqual(typeof adapter.sendFile, 'function')
-  assert.equal(adapter.sendFile, undefined)
+  assert.equal(adapter.caps.fileOut, true)
+  assert.equal(typeof adapter.sendFile, 'function')
   await adapter.disconnect()
 })
 
@@ -608,17 +604,94 @@ test('入站附件事件：无公开下载面实证 → 不填 files，事件不
   const { adapter, sock } = await ready()
   const seen = []
   adapter.onMessage((m) => seen.push(m))
-  sock.push(C2C_FRAME({ id: 'ROBOT1.0_attach1', content: '', attachments: [{ id: 'att-1', url: 'https://qqfile.example/a.bin?rkey=exp', file_type: 4, file_name: 'a.bin', file_size: 12 }] }))
+  sock.push(C2C_FRAME({ id: 'ROBOT1.0_attach1', content: '', attachments: [{ content_type: 'file', url: 'https://qqfile.example/a.bin?rkey=exp', file_name: 'a.bin', file_size: 12 }] }))
+  await tick()
   assert.equal(seen.length, 1, '附件类事件仍产出（不丢整条）')
-  assert.equal(seen[0].files, undefined, 'caps.fileIn=false → 不下载字节')
-  assert.equal(seen[0].images, undefined, 'imageIn=false → 图片面同样不跟跑')
+  assert.equal(seen[0].files, undefined, 'fake 下载面无 arrayBuffer → 不填 files（不静默丢字节）')
+  assert.equal(seen[0].images, undefined, '非图片且无下载能力 → images 不填')
   await adapter.disconnect()
 })
 
-test('数字菜单回退前提：nativeChoices=false 时引擎走文本档位，本渠道不实现按钮面', async () => {
+// P3/F3 真下载：注入带 arrayBuffer 的下载面 → 图片入站填 images[]。
+test('入站图片下载：注入带 arrayBuffer 的 GET 面 → 填 images[] 含字节与 mimeType', async () => {
+  const bin = new Uint8Array([9, 8, 7, 6]).buffer
+  const route = (url, method, _body, init) => {
+    if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+    if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+    if (url.includes('multimedia') || url.endsWith('.png')) return { ok: true, status: 200, json: async () => ({}), arrayBuffer: async () => bin }
+    return httpResp(200, {})
+  }
+  const { adapter, sock } = await ready({}, route)
+  const seen = []
+  adapter.onMessage((m) => seen.push(m))
+  sock.push(C2C_FRAME({ id: 'ROBOT1.0_img1', content: '', attachments: [{ content_type: 'image/png', filename: 'p.png', url: 'https://multimedia.nt.qq.com.cn/download?p=1&rkey=abc.png' }] }))
+  await tick()
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].images?.length, 1, '图片下载到 1 个附件')
+  assert.deepEqual(Array.from(seen[0].images[0].data), [9, 8, 7, 6])
+  assert.equal(seen[0].images[0].mimeType, 'image/png')
+  await adapter.disconnect()
+})
+
+// P4/F5 语音 ASR 免解码：事件带 asr_refer_text → 直接取转写作正文，不解码、不引依赖。
+test('入站语音：优先取事件原生 asr_refer_text 作正文（免解码）', async () => {
+  const { adapter, sock } = await ready()
+  const seen = []
+  adapter.onMessage((m) => seen.push(m))
+  sock.push(C2C_FRAME({ id: 'ROBOT1.0_v1', content: '', attachments: [{ content_type: 'voice', voice_wav_url: 'https://cdn.test/w.wav', asr_refer_text: '今天天气不错' }] }))
+  await tick()
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].text, '今天天气不错', 'ASR 文本直接入正文')
+  await adapter.disconnect()
+})
+
+test('数字菜单回退前提：keyboard 默认关 → nativeChoices=false，引擎走文本档位；askChoices 存在但拒绝（回落）', async () => {
   const { adapter } = await ready()
   assert.equal(adapter.caps.nativeChoices, false)
-  assert.equal(typeof adapter.askChoices, 'undefined')
+  assert.equal(typeof adapter.askChoices, 'function')
+  // keyboard 未启用时 askChoices 抛错 → 引擎 catch 后回落纯文本菜单（interactions.approvalViaButtons）。
+  await assert.rejects(
+    () => adapter.askChoices({ channel: 'qq', kind: 'dm', chatId: 'OPENID-U' }, 'q', ['a', 'b'], false),
+    /keyboard 未启用/,
+  )
+  await adapter.disconnect()
+})
+
+test('keyboard 档位开启：config.enableKeyboard → nativeChoices=true 且 IDENTIFY intents 含 INTERACTION 位', async () => {
+  const { adapter, sock } = await ready({ enableKeyboard: true })
+  assert.equal(adapter.caps.nativeChoices, true)
+  // 等待 HELLO→IDENTIFY 帧发出
+  await tick()
+  const identify = sock.sent.find((f) => f.op === 2)
+  assert.ok(identify, '应发出 IDENTIFY(op2)')
+  assert.equal(identify.d.intents & (1 << 26), 1 << 26, 'intents 含 INTERACTION_CREATE(1<<26)')
+  await adapter.disconnect()
+})
+
+test('askChoices 按钮闭环：发送 msg_type=2+keyboard → INTERACTION_CREATE 回传结算（D5 忽略非发起者）', async () => {
+  const dm = { channel: 'qq', kind: 'dm', chatId: 'OPENID-U' }
+  const { adapter, rest, sock } = await ready({ enableKeyboard: true })
+  const p = adapter.askChoices(dm, '需要审批', ['允许一次', '拒绝'], false, undefined, { ownerUserId: 'OPENID-U' })
+  await tick()
+  const msgCall = [...rest.calls].reverse().find((c) => c.url.endsWith('/messages') && c.body?.keyboard)
+  assert.ok(msgCall, '应发出带 keyboard 的 markdown 消息')
+  assert.equal(msgCall.body.msg_type, 2)
+  // 官方 InlineKeyboard 形状：keyboard.content.rows（少一层 content 平台不渲染）。
+  assert.equal(msgCall.body.keyboard.content.rows.length, 2)
+  const dataAllow = msgCall.body.keyboard.content.rows[0].buttons[0].action.data
+  const dataDeny = msgCall.body.keyboard.content.rows[1].buttons[0].action.data
+  // 非发起者点按「允许」→ 忽略（D5），不改判。
+  sock.push({ op: 0, t: 'INTERACTION_CREATE', s: 30, d: { id: 'INT-1', data: dataAllow, user: { user_openid: 'OTHER' } } })
+  await tick()
+  // 发起者点按「拒绝」→ 结算。
+  sock.push({ op: 0, t: 'INTERACTION_CREATE', s: 31, d: { id: 'INT-2', data: dataDeny, user: { user_openid: 'OPENID-U' } } })
+  const res = await p
+  assert.equal(res.answer, '拒绝', '仅接受发起者点按')
+  assert.equal(res.uncertain, false)
+  // 官方交互确认面：每次回传都要 PUT /interactions/{id} {code:0}。
+  const acks = rest.calls.filter((c) => c.method === 'PUT' && /\/interactions\/INT-\d$/.test(c.url))
+  assert.equal(acks.length, 2, '两次回传均上交互确认（含被 D5 忽略的那次）')
+  assert.deepEqual(acks[0].body, { code: 0 })
   await adapter.disconnect()
 })
 
@@ -713,4 +786,313 @@ test('入站缺消息 id / 缺 openid 的畸形帧与越界事件型不产生入
   assert.equal(got.length, 0, '缺 id/缺 openid 的事件与未订阅事件型均安全丢弃')
   assert.equal(adapter.connected, true, '二次 READY 只刷新会话位')
   await adapter.disconnect()
+})
+
+// —— 富媒体出站 sendFile（P1/F1）——————————————————————————
+
+const MEDIA_ROUTE = (url, method) => {
+  if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+  if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+  if (method === 'POST' && url.endsWith('/files')) return httpResp(200, { file_info: 'FI-1', url: 'qpic://x', ttl: 3600 })
+  if (method === 'POST' && url.endsWith('/messages')) return httpResp(200, { id: 'SENT-IMG' })
+  return httpResp(200, {})
+}
+const PNG = { name: 'chart.png', data: new Uint8Array([1, 2, 3]), mimeType: 'image/png' }
+const DM = { channel: 'qq', kind: 'dm', chatId: 'OPENID-U' }
+
+test('sendFile：图片先上传换 file_info→msg_type=7 携 image；窗口内带 msg_id/msg_seq', async () => {
+  const { adapter, rest, sock } = await ready({}, MEDIA_ROUTE)
+  sock.push(C2C_FRAME())
+  await tick()
+  const receipt = await adapter.sendFile(DM, PNG)
+  assert.equal(receipt.platformMessageId, 'SENT-IMG')
+  const upload = rest.calls.find((c) => c.url.endsWith('/files'))
+  assert.ok(upload, '应有上传调用')
+  assert.match(upload.url, /\/v2\/users\/OPENID-U\/files$/)
+  assert.equal(upload.headers.authorization, `QQBot ${AT}`, '上传带鉴权头')
+  // 官方 SDK 小文件形态：JSON + base64 file_data（非 multipart）。
+  assert.equal(upload.body.file_type, 1, '图片档 file_type=1')
+  assert.equal(upload.body.file_name, 'chart.png')
+  assert.equal(upload.body.srv_send_msg, false, 'srv_send_msg=false，否则平台自己发图与后续 msg_type=7 构成重发')
+  assert.deepEqual(Buffer.from(upload.body.file_data, 'base64'), Buffer.from([1, 2, 3]), 'file_data 为 base64')
+  const send = rest.calls.filter((c) => c.url.endsWith('/messages')).at(-1)
+  assert.equal(send.body.msg_type, 7)
+  assert.equal(send.body.media.file_info, 'FI-1', '官方体形：media:{file_info}，非旧式 image:<str>')
+  assert.equal(send.body.msg_id, 'ROBOT1.0_msg1')
+  assert.equal(send.body.msg_seq, 1)
+  await adapter.disconnect()
+})
+
+test('sendFile 群聊：走 /v2/groups/{id}/files 端点（群/单聊不互通）', async () => {
+  const { adapter, rest } = await ready({}, MEDIA_ROUTE)
+  await adapter.sendFile({ channel: 'qq', kind: 'group', chatId: 'GROUP-OPENID' }, { name: 'a.jpg', data: new Uint8Array([9]), mimeType: 'image/jpeg' })
+  const upload = rest.calls.find((c) => c.url.endsWith('/files'))
+  assert.match(upload.url, /\/v2\/groups\/GROUP-OPENID\/files$/)
+  assert.equal(upload.body.file_type, 1)
+  await adapter.disconnect()
+})
+
+test('sendFile 上传回退：JSON 形态被平台确定性拒绝→再试 multipart 形态一次', async () => {
+  const route = (url, method, _body, init) => {
+    if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+    if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+    if (method === 'POST' && url.endsWith('/files')) {
+      // 第一次（JSON）拒，第二次（multipart 形态）接受。
+      if (typeof init?.body === 'string') return httpResp(400, { err_code: 11001, message: '参数不正确' })
+      return httpResp(200, { file_info: 'FI-FORM-9', ttl: 3600 })
+    }
+    if (method === 'POST' && url.endsWith('/messages')) return httpResp(200, { id: 'SENT-FB' })
+    return httpResp(200, {})
+  }
+  const { adapter, rest } = await ready({}, route)
+  const r = await adapter.sendFile(DM, PNG)
+  assert.equal(r.platformMessageId, 'SENT-FB')
+  const uploads = rest.calls.filter((c) => c.url.endsWith('/files'))
+  assert.equal(uploads.length, 2, '先 JSON 后 multipart 两次尝试')
+  assert.ok(uploads[1].rawBody instanceof FormData, '第二次为 multipart 形态')
+  assert.equal(uploads[1].rawBody.get('file_type'), '1')
+  assert.equal(rest.calls.find((c) => c.url.endsWith('/messages')).body.media.file_info, 'FI-FORM-9', '用回退形态拿到的 file_info')
+  await adapter.disconnect()
+})
+
+test('sendFile 上传网络不确定时不重试（D7，上传重试会白占配额）', async () => {
+  const route = (url, method) => {
+    if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+    if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+    if (method === 'POST' && url.endsWith('/files')) return httpResp(500, {})
+    return httpResp(200, {})
+  }
+  const { adapter, rest } = await ready({}, route)
+  await assert.rejects(() => adapter.sendFile(DM, PNG), (err) => err instanceof QQUncertainError)
+  assert.equal(rest.calls.filter((c) => c.url.endsWith('/files')).length, 1, '5xx 不触发 multipart 回退')
+  await adapter.disconnect()
+})
+
+test('sendFile 非图片 mime：优雅拒绝、不静默、不触发上传', async () => {
+  const { adapter, rest } = await ready({}, MEDIA_ROUTE)
+  await assert.rejects(
+    () => adapter.sendFile(DM, { name: 'export.zip', data: new Uint8Array([1]), mimeType: 'application/zip' }),
+    (err) => err instanceof QQApiError && /仅开放图片/.test(err.message),
+  )
+  assert.equal(rest.calls.filter((c) => c.url.endsWith('/files')).length, 0, '非图片不应触发上传')
+  await adapter.disconnect()
+})
+
+test('sendFile 空字节：拒发不上传', async () => {
+  const { adapter, rest } = await ready({}, MEDIA_ROUTE)
+  await assert.rejects(
+    () => adapter.sendFile(DM, { name: 'e.png', data: new Uint8Array([]), mimeType: 'image/png' }),
+    /空文件/,
+  )
+  assert.equal(rest.calls.filter((c) => c.url.endsWith('/files')).length, 0)
+  await adapter.disconnect()
+})
+
+test('sendFile 上传成功但缺 file_info：结果不确定(uncertain)，禁自动重发', async () => {
+  const route = (url, method) => {
+    if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+    if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+    if (method === 'POST' && url.endsWith('/files')) return httpResp(200, {})
+    return httpResp(200, {})
+  }
+  const { adapter } = await ready({}, route)
+  await assert.rejects(() => adapter.sendFile(DM, PNG), (err) => err instanceof QQUncertainError)
+  await adapter.disconnect()
+})
+
+test('sendFile 上传 5xx：网络不确定(uncertain)', async () => {
+  const route = (url, method) => {
+    if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+    if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+    if (method === 'POST' && url.endsWith('/files')) return httpResp(500, {})
+    return httpResp(200, {})
+  }
+  const { adapter } = await ready({}, route)
+  await assert.rejects(() => adapter.sendFile(DM, PNG), (err) => err instanceof QQUncertainError)
+  await adapter.disconnect()
+})
+
+test('sendFile 撞日配额(40093002)：确定性失败上抛', async () => {
+  const route = (url, method) => {
+    if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+    if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+    if (method === 'POST' && url.endsWith('/files')) return httpResp(200, { file_info: 'FI-1', ttl: 3600 })
+    if (method === 'POST' && url.endsWith('/messages')) return httpResp(400, { err_code: 40093002, message: '超过今天发送文件容量上限' })
+    return httpResp(200, {})
+  }
+  const { adapter } = await ready({}, route)
+  await assert.rejects(
+    () => adapter.sendFile(DM, PNG),
+    (err) => err instanceof QQApiError && err.errCode === 40093002,
+  )
+  await adapter.disconnect()
+})
+
+// —— P2/F2 Markdown 出站 ——————————————————————
+test('reply：含 markdown 图片内嵌→msg_type=2+markdown.content', async () => {
+  const { adapter, rest } = await ready()
+  await adapter.reply(DM, '看图 ![chart](https://x/y.png)')
+  const body = rest.calls.at(-1).body
+  assert.equal(body.msg_type, 2)
+  assert.deepEqual(body.markdown, { content: '看图 ![chart](https://x/y.png)' })
+  await adapter.disconnect()
+})
+
+test('reply：markdown 被确定性拒绝(304036 无模板权限)→降级纯文本重发一次', async () => {
+  const route = (url, method, body) => {
+    if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+    if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+    if (method === 'POST' && url.endsWith('/messages')) {
+      if (body?.msg_type === 2) return httpResp(400, { err_code: 304036, message: '没有 Markdown 模板权限' })
+      return httpResp(200, { id: 'SENT-TEXT' })
+    }
+    return httpResp(200, {})
+  }
+  const { adapter, rest } = await ready({}, route)
+  const receipt = await adapter.reply(DM, '正文 ![i](u)')
+  assert.equal(receipt.platformMessageId, 'SENT-TEXT')
+  const calls = rest.calls.filter((c) => c.url.endsWith('/messages'))
+  assert.equal(calls.at(-2)?.body.msg_type, 2, '先试 markdown')
+  assert.equal(calls.at(-1)?.body.msg_type, 0, '降级纯文本')
+  await adapter.disconnect()
+})
+
+// —— P6/F6 群管理 ——————————————————————
+const GA_ROUTE = (url, method, _body) => {
+  if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+  if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+  if (method === 'GET' && url.includes('/join_request_list')) return httpResp(200, { join_requests: [{ member_openid: 'M1', join_request_id: 'J1', username: '新人' }] })
+  if (method === 'POST' && url.includes('/approval_join_request/')) return httpResp(200, {})
+  if (method === 'GET' && url.includes('/restrict_chat_setting')) return httpResp(200, { members: [] })
+  if (method === 'POST' && url.includes('/restrict_chat_setting')) return httpResp(200, {})
+  if (method === 'DELETE' && url.includes('/messages/')) return httpResp(200, {})
+  return httpResp(200, {})
+}
+
+test('群管：入群申请列表/审批/禁言/撤回均走对应官方端点', async () => {
+  const { adapter, rest } = await ready({}, GA_ROUTE)
+  const list = await adapter.qqGroupListJoinRequests('G1')
+  assert.equal(list.ok, true)
+  assert.equal(list.data[0].member_openid, 'M1')
+  assert.match(rest.calls.at(-1).url, /\/v2\/groups\/G1\/join_request_list$/)
+
+  const ap = await adapter.qqGroupApproveJoin('G1', 'M1', 'approve', { joinRequestId: 'J1' })
+  assert.equal(ap.ok, true)
+  const apCall = rest.calls.at(-1)
+  assert.match(apCall.url, /\/v2\/groups\/G1\/approval_join_request\/M1$/)
+  assert.equal(apCall.body.op, 'approve')
+  assert.equal(apCall.body.join_request_id, 'J1')
+
+  const mute = await adapter.qqGroupSetMute('G1', ['M1'], 600)
+  assert.equal(mute.ok, true)
+  assert.equal(rest.calls.at(-1).body.members[0].op, 'add')
+
+  const un = await adapter.qqGroupSetMute('G1', ['M1', 'M2'], 0)
+  assert.equal(un.ok, true)
+  assert.equal(rest.calls.at(-1).body.members.length, 2, '解除禁言一次批量 del')
+  assert.equal(rest.calls.at(-1).body.members[0].op, 'del')
+
+  const rc = await adapter.qqGroupRecall('G1', 'MSG1', 'group')
+  assert.equal(rc.ok, true)
+  assert.equal(rest.calls.at(-1).method, 'DELETE')
+  assert.match(rest.calls.at(-1).url, /\/v2\/groups\/G1\/messages\/MSG1$/)
+  await adapter.disconnect()
+})
+
+test('群管：无权限码(11703) → 人话回传、不抛；未开门(内邀) → 拒绝不发请求', async () => {
+  const denyRoute = (url, method) => {
+    if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+    if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+    if (method === 'GET' && url.includes('/join_request_list')) return httpResp(403, { code: 11703, message: 'no permission' })
+    return httpResp(200, {})
+  }
+  const { adapter, rest } = await ready({}, denyRoute)
+  const r = await adapter.qqGroupListJoinRequests('G1')
+  assert.equal(r.ok, false)
+  assert.equal(r.code, '11703')
+  assert.match(r.human, /群管理员/, '错误码人话化')
+  // 未开门能力（listMembers/getMemberInfo）未实现为方法 → 不存在即不发（不猜）。
+  assert.equal(typeof adapter.qqGroupListMembers, 'undefined')
+  await adapter.disconnect()
+})
+
+test('diagnose：native-choices 位随 keyboard 档位如实反映（关=passed 回退/开=unverified 待实测）', async () => {
+  const off = await ready()
+  const ncOff = (await off.adapter.diagnose()).find((c) => c.name === 'native-choices')
+  assert.equal(ncOff.status, 'passed', 'keyboard 关→回退数字菜单，属健康态')
+  await off.adapter.disconnect()
+
+  const on = await ready({ enableKeyboard: true })
+  const ncOn = (await on.adapter.diagnose()).find((c) => c.name === 'native-choices')
+  assert.equal(ncOn.status, 'unverified', 'keyboard 开→按钮闭环需真机测')
+  await on.adapter.disconnect()
+})
+
+// —— P8/task_8 markdown 内联本地图片上传原语 ——————————————————
+const MD4 = new Uint8Array([1, 2, 3, 4])
+const MD_ROUTE = (url, method) => {
+  if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+  if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+  if (method === 'GET' && url.endsWith('/v2/media-images')) return httpResp(200, { images: [] })
+  if (method === 'POST' && url.endsWith('/v2/media-images/prepare')) return httpResp(200, { upload_id: 'UP1', presigned_url: 'https://cos.example/put?sig=x' })
+  if (method === 'PUT' && url.includes('cos.example')) return httpResp(200, {})
+  if (method === 'POST' && url.endsWith('/v2/media-images/complete')) return httpResp(200, { image_id: 'IMG1', url: 'qqbot-media://image/v1/TOKEN' })
+  return httpResp(200, {})
+}
+
+test('uploadMarkdownImage：prepare→PUT 直传→complete 3 步，prepare 体含内容指纹/md5/sha1，直传不带 QQBot 鉴权头', async () => {
+  const { adapter, rest } = await ready({}, MD_ROUTE)
+  const r = await adapter.uploadMarkdownImage({ name: 'chart.png', data: MD4, mimeType: 'image/png' })
+  assert.equal(r.ok, true)
+  assert.equal(r.data.url, 'qqbot-media://image/v1/TOKEN')
+  const prep = rest.calls.find((c) => c.url.endsWith('/media-images/prepare'))
+  assert.equal(prep.body.content_type, 'image/png')
+  assert.equal(prep.body.file_size, 4)
+  assert.match(prep.body.file_name, /^chart_[0-9a-f]{12}\.png$/)
+  assert.match(prep.body.md5, /^[0-9a-f]{32}$/)
+  assert.match(prep.body.sha1, /^[0-9a-f]{40}$/)
+  const put = rest.calls.find((c) => c.method === 'PUT')
+  assert.equal(put.url, 'https://cos.example/put?sig=x')
+  assert.equal(put.headers['content-type'], 'image/png')
+  assert.equal(put.headers.authorization, undefined, '直传 presigned 不带 QQBot 鉴权头')
+  assert.ok(put.rawBody instanceof Uint8Array, 'PUT 体为原始字节')
+  await adapter.disconnect()
+})
+
+test('uploadMarkdownImage dedup：服务端同名命中→复用不占配额、不再 prepare', async () => {
+  const sha = createHash('sha256').update(Buffer.from(MD4)).digest('hex').slice(0, 12)
+  const name = `chart_${sha}.png`
+  const route = (url, method) => {
+    if (url.endsWith('/app/getAppAccessToken')) return httpResp(200, { access_token: AT, expires_in: 7200 })
+    if (url.endsWith('/gateway')) return httpResp(200, { url: 'wss://qq.test/websocket' })
+    if (method === 'GET' && url.endsWith('/v2/media-images')) return httpResp(200, { images: [{ file_name: name, url: 'qqbot-media://cached', image_id: 'CID' }] })
+    return httpResp(200, {})
+  }
+  const { adapter, rest } = await ready({}, route)
+  const r = await adapter.uploadMarkdownImage({ name: 'chart.png', data: MD4, mimeType: 'image/png' })
+  assert.equal(r.ok, true)
+  assert.equal(r.data.url, 'qqbot-media://cached')
+  assert.equal(rest.calls.filter((c) => c.url.endsWith('/media-images/prepare')).length, 0, '命中同名不重传')
+  await adapter.disconnect()
+})
+
+test('uploadMarkdownImage 非白名单 mime：拒发、零网络', async () => {
+  const { adapter, rest } = await ready({}, MD_ROUTE)
+  const r = await adapter.uploadMarkdownImage({ name: 'a.txt', data: MD4, mimeType: 'text/plain' })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, 'BAD_MIME')
+  assert.equal(rest.calls.filter((c) => c.url.includes('media-images')).length, 0)
+  await adapter.disconnect()
+})
+
+test('rewriteMarkdownLocalImages：本地路径替 url、网络图保留、resolver 不中则原样', async () => {
+  const seen = []
+  const out = await rewriteMarkdownLocalImages(
+    '图 ![a](local/x.png) 与 ![b](https://cdn/y.png) 与缺 ![c](gone.jpg)',
+    async (p) => { seen.push(p); return p === 'gone.jpg' ? undefined : `qqbot-media://${p}` },
+  )
+  assert.ok(out.includes('![a](qqbot-media://local/x.png)'), '本地路径替为上传 url')
+  assert.ok(out.includes('![b](https://cdn/y.png)'), '网络图不动')
+  assert.ok(out.includes('![c](gone.jpg)'), 'resolver 未命中保留原样')
+  assert.deepEqual(seen, ['local/x.png', 'gone.jpg'], '仅本地路径进 resolver')
 })

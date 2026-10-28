@@ -54,6 +54,7 @@ function makeEngine(adapter, policy, extra = {}) {
     // Phase 7/8：缺位不影响既有测试（undefined=现状行为）。
     relayStore: extra.relayStore,
     modelWhitelist: extra.modelWhitelist,
+    deliverables: extra.deliverables,
   })
   engine.registerAccount(adapter, 'acct-1', policy)
   return { engine, router }
@@ -225,6 +226,56 @@ test('无流式 caps → 收轮后 reply 投递全文（降级路径）', async 
   await inflight
   assert.equal(adapter.replies.length, 1)
   assert.equal(adapter.replies[0].text, '结果文本')
+})
+
+test('QQ markdown 内联本地图片：投递前经 gateway 受管读→上传→替回 qqbot-media url', async () => {
+  const uploads = []
+  const reads = []
+  const adapter = fakeAdapter({
+    caps: { maxMessageLength: 4096, fileOut: true },
+    async uploadMarkdownImage(file) {
+      uploads.push(file)
+      return { ok: true, data: { url: 'qqbot-media://IMG1', imageId: 'IMG1' } }
+    },
+  })
+  const deliverables = {
+    mode: 'workspace',
+    async read(sessionId, ref) {
+      reads.push(ref.path)
+      return { name: ref.name, data: new Uint8Array([1, 2, 3]) }
+    },
+    status: () => ({ name: 'deliverables', status: 'passed' }),
+  }
+  const session = liveSession()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session, deliverables })
+  const inflight = engine.handleInbound('acct-1', dmMessage('go'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(assistantEvent('看图 ![c](out/chart.png) 完'))
+  session.emit(turnEnd())
+  await inflight
+  assert.deepEqual(reads, ['out/chart.png'], '本地图路径经宿主受管读')
+  assert.equal(uploads.length, 1)
+  assert.equal(uploads[0].mimeType, 'image/png')
+  assert.equal(adapter.replies[0].text, '看图 ![c](qqbot-media://IMG1) 完', 'url 已替回正文')
+})
+
+test('非上传渠道（无 uploadMarkdownImage）：正文内联本地路径原样不动', async () => {
+  const reads = []
+  const adapter = fakeAdapter({ caps: { maxMessageLength: 4096 } })
+  const deliverables = {
+    mode: 'workspace',
+    async read(_s, ref) { reads.push(ref.path); return { name: ref.name, data: new Uint8Array([1]) } },
+    status: () => ({ name: 'deliverables', status: 'passed' }),
+  }
+  const session = liveSession()
+  const { engine } = makeEngine(adapter, { dmAllowlist: new Set(['u1']) }, { sessionApi: session, deliverables })
+  const inflight = engine.handleInbound('acct-1', dmMessage('go'))
+  await waitUntil(() => session.state.prompted.length === 1)
+  session.emit(assistantEvent('![c](out/chart.png)'))
+  session.emit(turnEnd())
+  await inflight
+  assert.equal(reads.length, 0, '非上传面不触发受管读')
+  assert.equal(adapter.replies[0].text, '![c](out/chart.png)', '原样保留')
 })
 
 test('turn/end 非 completed → 正文后追加状态说明（不泄内部异常）', async () => {

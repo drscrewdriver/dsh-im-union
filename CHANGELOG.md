@@ -2,6 +2,25 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.5.0（QQ 渠道能力补齐：出站图片 / Markdown / 入站图片文件 / 审批按钮 / 群管理）
+
+对照 `_ref-im/dsh-qqbot`（同一套 QQ 官方 api-v2）逐面解锁 `src/channels/qq.ts`，遵守净室 / 零运行时依赖 / D7 纪律。
+
+### Added
+
+- **出站图片 `caps.fileOut` + `sendFile`**：上传换 file_info → msg_type=7 携带 **`media: { file_info }`**（体形按官方 `@tencent-connect/qqbot-nodejs` 1.0.5 `sendMediaMessage` 对账，非旧式 `image: file_info`）；上传采用**双形态递降**：先官方 SDK 小文件形态（JSON + base64 `file_data`，`file_type=1`、`srv_send_msg=false`），被平台确定性拒绝再回退官方文档记载的 multipart/form-data 形态一次（网络不确定绝不重试，D7 免白占配额）；群/单聊分 `/files` 端点，窗口内带 msg_id/seq；一举激活网关 SVG→PNG 附图链、产物回传与 `/export`。非图片 mime（zip/文件）优雅拒绝（官方 file_type=4 未开放）；304080/40093002 确定性转译
+- **Markdown 出站 msg_type=2**：正文含 `![` 图片内嵌或 `qqbot-media://` 时走 markdown 通道；被平台确定性拒绝（如 304036 无模板权限）自动降级纯文本重发一次
+- **Markdown 内联本地图片自动上传（task_8）**：新增 `QqAdapter.uploadMarkdownImage`（3 步 `/v2/media-images`：prepare→COS 直传→complete，sha256 内容指纹去重、10MB 上限），gateway 投递前将正文 `![](本地路径)` 经宿主 `workspaceFiles` 受管读（workspaceRoot 限定，适配器不碰盘）取字节上传、回替 `qqbot-media://` url；非 QQ/无本地图/读失败/上传失败均原样保留
+- **入站图片/文件 `caps.imageIn/fileIn`**：事件 `attachments[].url`（rkey 时效）即时下载填 `images[]/files[]`（含 mimeType）；群聊图片 content_type 实测为 'file' → 兼用 URL 形态判定；无 arrayBuffer/非 2xx/空字节按占位不丢事件；入站派发改串行链保序（异步下载不打乱消息顺序）
+- **审批/提问按钮 `askChoices`（keyboard）**：msg_type=2 + **`keyboard: { content: { rows } }`**（官方 InlineKeyboard 包装层，少一层平台不渲染），action.type=1 回传；收到 INTERACTION_CREATE 后**best-effort `PUT /interactions/{id} {code:0}` 上确认**再结算；D5 仅接受发起者点按；`config.keyboard=on` 才订阅 INTERACTION intent 并置 `nativeChoices=true`（默认关=零风险，未配置回退数字菜单）
+- **语音入站免解码**：优先取事件原生 `asr_refer_text` 作正文，无则占位；不引入 silk 解码依赖
+- **QQ 群管理**：新建 `src/channels/qq-group-admin.ts`（FEATURE_GATES 门控 + 端点/错误码人话映射），QqAdapter 暴露入群申请列表/审批、群禁言查询/设置、消息撤回；经 `/qq` 命令面可达，仅群聊、作用于本群、需 `config.groupAdminUsers` 授权名单（空=命令惰性拒绝）+ 机器人为群管理员
+
+### Notes
+
+- 撤回/编辑 `editStream`、原生流式 `nativeStream` 本轮不做（协议语义未逐面核实、与 dsh-qqbot 打平）
+- 全量 753 单测绿（QQ +8）；真机农场冒烟需 QQ 凭据待验
+
 ## 0.4.12（飞书审批卡片：权限 ask 走按钮确认）
 
 ### Added

@@ -96,7 +96,12 @@ export const CHANNEL_META: Record<string, ChannelMeta> = {
     id: 'qq',
     label: { zh: 'QQ', en: 'QQ' },
     bind: 'qr-or-credentials',
-    fields: [cred('appId', 'AppID', 'AppID'), cred('appSecret', 'AppSecret', 'AppSecret')],
+    fields: [
+      cred('appId', 'AppID', 'AppID'),
+      cred('appSecret', 'AppSecret', 'AppSecret'),
+      plain('keyboard', '审批/提问按钮面 on/off（需机器人已开通交互事件与按钮模板）', 'Approval/question keyboard on/off (requires interaction events + button template)'),
+      plain('groupAdminUsers', '群管理(/qq)授权成员 openid（逗号分隔；空=禁用）', 'Group-admin (/qq) authorized member openids (comma separated; empty=disabled)'),
+    ],
   },
   slack: {
     id: 'slack',
