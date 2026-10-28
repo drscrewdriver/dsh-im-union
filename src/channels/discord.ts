@@ -39,11 +39,24 @@ import type {
   SemanticMessage,
 } from './types.js'
 
+/**
+ * Gateway intents：位值逐条对齐官方 list-of-intents。
+ *
+ * 写错不会报错也不会断连——只是对应事件永远不推，连接看着完全健康，所以很难发现
+ * （历史上 `GUILD_MESSAGES` 被写成 `1 << 15`、`MESSAGE_CONTENT` 写成 `1 << 24`，
+ * 于是服务器频道消息永远收不到）。故每个常量带官方位号注释，并由
+ * `tests/discord.test.mjs` 按位钉值校验（断言写在测试里的必须是官方文档值，
+ * 不得拿实现值自证）。
+ */
 const INTENTS = {
+  /** `1 << 0` GUILDS：`GUILD_CREATE` 等（非特权）。 */
   GUILDS: 1 << 0,
+  /** `1 << 9` GUILD_MESSAGES：服务器频道 `MESSAGE_CREATE`（非特权）。 */
+  GUILD_MESSAGES: 1 << 9,
+  /** `1 << 12` DIRECT_MESSAGES：私聊 `MESSAGE_CREATE`（非特权）。 */
   DIRECT_MESSAGES: 1 << 12,
-  GUILD_MESSAGES: 1 << 15,
-  MESSAGE_CONTENT: 1 << 24,
+  /** `1 << 15` MESSAGE_CONTENT：读消息正文（**特权** intent，需在开发者门户勾选）。 */
+  MESSAGE_CONTENT: 1 << 15,
 } as const
 
 const OP = {
@@ -277,7 +290,8 @@ export class DiscordAdapter implements ChannelAdapter {
       op: OP.IDENTIFY,
       d: {
         token: this.token,
-        intents: INTENTS.GUILD_MESSAGES | INTENTS.DIRECT_MESSAGES | INTENTS.MESSAGE_CONTENT,
+        // 含 GUILDS：否则无 GUILD_CREATE，部分场景（刚加入的服务器、缓存缺失的频道）拿不到上下文。
+        intents: INTENTS.GUILDS | INTENTS.GUILD_MESSAGES | INTENTS.DIRECT_MESSAGES | INTENTS.MESSAGE_CONTENT,
         properties: { os: 'dsh-plugin', browser: 'dsh-im-union', device: 'dsh-im-union' },
       },
     })
@@ -647,13 +661,19 @@ export function createDiscordAdapter(options: {
   accountId: string
   config: Record<string, string>
   secrets: Record<string, string | undefined>
+  /** 生命周期日志出口（`ChannelFactory` 契约字段）；不接则 Gateway 断开等日志静默。 */
+  logger?: (msg: string) => void
 }): DiscordAdapter {
   const token = options.secrets.botToken
   if (typeof token !== 'string' || token === '') {
     throw new Error(`discord 账号 ${options.accountId}: botToken 未入库（检查凭据配置）`)
   }
   const apiBase = options.config.apiBaseUrl
-  return new DiscordAdapter({ token, ...(apiBase !== undefined && apiBase !== '' ? { apiBase } : {}) })
+  return new DiscordAdapter({
+    token,
+    ...(apiBase !== undefined && apiBase !== '' ? { apiBase } : {}),
+    ...(options.logger !== undefined ? { logger: options.logger } : {}),
+  })
 }
 
 interface DiscordMessageLike {

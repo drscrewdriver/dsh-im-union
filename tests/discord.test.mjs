@@ -80,7 +80,15 @@ test('connect：REST 取 gateway → HELLO 后 IDENTIFY（intents 组合）→ R
   const identify = socket.sent.find((f) => f.op === 2)
   assert.ok(identify, 'HELLO 后必发 IDENTIFY')
   assert.equal(identify.d.token, 'DTOK')
-  assert.equal(identify.d.intents, (1 << 15) | (1 << 12) | (1 << 24))
+  // intents 逐位按 Discord 官方 list-of-intents 的文档值断言，不得拿实现常量自证：
+  // GUILDS=1<<0 · GUILD_MESSAGES=1<<9 · DIRECT_MESSAGES=1<<12 · MESSAGE_CONTENT=1<<15。
+  // 本行历史上写的是 (1<<15)|(1<<12)|(1<<24)——把错位的实现值一起钉死了（issue #1）。
+  assert.equal(identify.d.intents, (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15))
+  assert.ok(identify.d.intents & (1 << 9), '必订 GUILD_MESSAGES：缺它则服务器频道 MESSAGE_CREATE 永不推送')
+  assert.ok(identify.d.intents & (1 << 15), '必订 MESSAGE_CONTENT：缺它则正文为空')
+  assert.ok(identify.d.intents & (1 << 12), '必订 DIRECT_MESSAGES（私聊）')
+  assert.ok(identify.d.intents & (1 << 0), '必订 GUILDS（GUILD_CREATE 上下文）')
+  assert.equal(identify.d.intents & (1 << 24), 0, '1<<24 不是任何已定义 intent，请求它只会把真缺的位掩盖掉')
   assert.equal(adapter.connected, true)
   await adapter.disconnect()
   assert.equal(adapter.connected, false)
@@ -285,6 +293,21 @@ test('长文截断到 2000 并以省略号收尾', async () => {
 
 test('createDiscordAdapter：token 缺失即抛', () => {
   assert.throws(() => createDiscordAdapter({ accountId: 'a', config: {}, secrets: {} }), /botToken 未入库/)
+})
+
+test('createDiscordAdapter：logger 透传到适配器（issue #1 顺带：断开日志不得静默）', () => {
+  const logs = []
+  const wired = createDiscordAdapter({
+    accountId: 'a',
+    config: {},
+    secrets: { botToken: 'DTOK' },
+    logger: (m) => logs.push(m),
+  })
+  // `log` 是编译期 private（存的是函数字段），运行时可直接触发，验证“工厂→适配器”这一跳。
+  wired.log('gateway 断开')
+  assert.deepEqual(logs, ['gateway 断开'], 'factory 必须把 logger 接到适配器，否则全量生命周期日志落空')
+  const silent = createDiscordAdapter({ accountId: 'a', config: {}, secrets: { botToken: 'DTOK' } })
+  assert.doesNotThrow(() => silent.log('dropped'), '不传 logger 时缺省 no-op，不得抛')
 })
 
 // —— 文件输入/输出面（T2.4 渠道侧）——————————————————————————————————————

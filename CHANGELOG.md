@@ -2,6 +2,21 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.5.2（Discord 服务器频道消息失联：Gateway intents 位值修正）
+
+感谢 @lide4144 在 #1 里的报告与双连接对照实验，定位、根因与修正值全部准确。
+
+### Fixed
+
+- **Gateway intents 位值写错导致服务器频道消息永远收不到**（#1）：`GUILD_MESSAGES` 实写为 `1 << 15`（应为 `1 << 9`）、`MESSAGE_CONTENT` 实写为 `1 << 24`（应为 `1 << 15`，且 `1 << 24` 不是任何已定义 intent）。于是 IDENTIFY 实际请求的是 `MESSAGE_CONTENT | DIRECT_MESSAGES | 未定义位`，**从未订阅 GUILD_MESSAGES**——Discord 因此不推送服务器频道的 `MESSAGE_CREATE`；而握手/READY/心跳全部正常，连接看着是健康的，故极难发现。有有效值 `16814080 → 37377`。**不引入新的门户勾选要求**：`MESSAGE_CONTENT`（特权位）此前已被 `1 << 15` 误命名请求着，行为不变。
+- **IDENTIFY 补齐 `GUILDS`（`1 << 0`）**：此前 `INTENTS.GUILDS` 定了却从未使用，招不到 `GUILD_CREATE`，部分场景（刚加入的服务器、缓存缺失的频道）拿不到上下文。
+- **`createDiscordAdapter` 透传 `logger`**：`ChannelFactory` 契约早已有 `logger` 字段（宿主接线到 `plugin.log`），本工厂始终丢弃它，导致 Discord 适配器的全量生命周期日志（含“Gateway 断开”）不落盘——#1 里“`plugin.log` 没有任何入站记录”的次因。
+- **测试不得拿实现值自证**：`tests/discord.test.mjs` 原本把错误位值 `(1<<15)|(1<<12)|(1<<24)` 钉进了断言，这是本缺陷能存活的原因。现改为按官方文档值逐位断言，并加“`1<<24` 必须为 0”的回归守卫；新增 logger 透传用例。全量 771/771 绿。
+
+### Known（本版本未动，另单跟踪）
+
+- Gateway `close` 后无自动重连（仅记日志），op 7 RECONNECT 后靠重建；`AccountManager.ensureConnected` 只在操作时触发——Discord 定期下发 RECONNECT 时会静默失联直到手动重启。属代码内已标注的 **T2.5 挂账**（需退避策略 + RESUME/session 生命周期设计），与本次位值修正无关。
+
 ## 0.5.0（QQ 渠道能力补齐：出站图片 / Markdown / 入站图片文件 / 审批按钮 / 群管理）
 
 对照 `_ref-im/dsh-qqbot`（同一套 QQ 官方 api-v2）逐面解锁 `src/channels/qq.ts`，遵守净室 / 零运行时依赖 / D7 纪律。
