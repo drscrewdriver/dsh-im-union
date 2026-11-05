@@ -522,6 +522,11 @@ test('权限预设：updatePolicy 改权限即对该账号已回路会话补应�
 })
 
 test('相对 cwd 偏好被丢弃：不透传 createSession，会话照常建立；绝对路径正常透传', async () => {
+  // 跨平台绝对路径样本：Windows 上 drive-letter 形式天然绝对；
+  // Linux/mac CI 上 'E:/...' 会被 path.isAbsolute 判为相对 ⇒ 断言假阴。
+  // 按平台选一个两侧都同意的绝对样本。
+  const { isAbsolute } = await import('node:path')
+  const ABS_CWD = isAbsolute('E:/proj/rewrite-agently') ? 'E:/proj/rewrite-agently' : '/abs/proj/rewrite-agently'
   const session = liveSession()
   const created = []
   session.createSession = async (options) => {
@@ -544,13 +549,13 @@ test('相对 cwd 偏好被丢弃：不透传 createSession，会话照常建立�
   assert.equal(session.state.prompted[0].sessionId, 's-rel')
 
   // 换绝对路径偏好 + 解绑重开（既有显式绑定按设计不重建）。
-  engine.updatePolicy('acct-1', { session: { cwd: 'E:/proj/rewrite-agently' } })
+  engine.updatePolicy('acct-1', { session: { cwd: ABS_CWD } })
   router.unbind(addressOf('telegram', 'dm', 'c1'))
   const inflight2 = engine.handleInbound('acct-1', dmMessage('再来一个'))
   await waitUntil(() => session.state.prompted.length === 2)
   session.emit(turnEnd('completed', 2))
   await inflight2
-  assert.equal(created[1].cwd, 'E:/proj/rewrite-agently', '绝对 cwd 照常透传')
+  assert.equal(created[1].cwd, ABS_CWD, '绝对 cwd 照常透传')
 })
 
 test('createSession 失败 → prompt 失败时回包带参考号 + 根因链', async () => {
