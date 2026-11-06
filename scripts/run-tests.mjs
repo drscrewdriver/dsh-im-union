@@ -12,5 +12,5 @@ if (files.length === 0) {
   console.error('tests/ 下没有 *.test.mjs')
   process.exit(1)
 }
-const result = spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit', cwd: ROOT })
+const result = spawnSync(process.execPath, ['--test', '--test-force-exit', ...files], { stdio: 'inherit', cwd: ROOT })
 process.exit(result.status ?? 1)
