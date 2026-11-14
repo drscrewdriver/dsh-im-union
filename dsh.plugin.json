@@ -8,7 +8,7 @@
   },
   "license": "MIT",
   "engines": {
-    "dsh": ">=0.1.2-rc.1 <0.3.0"
+    "dsh": ">=0.1.2-rc.1 <0.3.0-0"
   },
   "main": "./lib/index.js",
   "client": {

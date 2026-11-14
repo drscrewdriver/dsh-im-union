@@ -1,6 +1,6 @@
 // 宿主兼容矩阵一致性：要求支持的宿主版本必须是声明范围的**子集**。
 // 声明面（2026-11-14 版本上下限改造后）：dsh.plugin.json / package.json 的
-// engines.dsh 发有界区间（下限＝矩阵起点、上限 `<0.3.0`），peerDependencies 每个
+// engines.dsh 发有界区间（下限＝矩阵起点、上限 `<0.3.0-0`），peerDependencies 每个
 // @deepseek-ai/dsh-* 仍逐 rc 枚举（包管理器解析不带 includePrerelease），
 // scripts/hosts.mjs supportedHosts 矩阵必须被区间完整覆盖，防止单点改动收窄。
 import test from 'node:test'
@@ -66,8 +66,8 @@ test('六个 rc 宿主版本是支持矩阵的子集', () => {
   }
 })
 
-test('engines.dsh 是有界区间：下限＝矩阵起点、上限 <0.3.0', () => {
-  assert.equal(enginesRange, `>=${supportedHosts[0]} <0.3.0`)
+test('engines.dsh 是有界区间：下限＝矩阵起点、上限 <0.3.0-0', () => {
+  assert.equal(enginesRange, `>=${supportedHosts[0]} <0.3.0-0`)
   assert.equal(plugin.engines.dsh, enginesRange)
   assert.equal(pkg.engines.dsh, enginesRange)
 })
@@ -92,16 +92,22 @@ test('engines 区间完整覆盖 hosts.mjs 矩阵（无单点收窄）', () => {
   }
 })
 
-test('每个 @deepseek-ai/dsh-* peer 都覆盖同一版本集', () => {
+test('每个 @deepseek-ai/dsh-* peer 都与 engines 同串且覆盖矩阵', () => {
   const peers = hostPeerPackages
   assert.ok(peers.length >= 6, 'dsh peer 包数量不正常')
+  const m = peerRange.match(/^>=(\S+) <(\S+)$/)
+  assert.ok(m !== null, `peerRange 不是 '>=a <b' 区间形态：${peerRange}`)
+  const [, floor, ceiling] = m
   for (const name of peers) {
     const range = pkg.peerDependencies[name]
     assert.ok(typeof range === 'string', `peerDependencies 缺 ${name}`)
-    const declared = tagsOf(range)
-    for (const v of REQUIRED) {
-      assert.ok(declared.has(v), `peer ${name} 缺 ${v}`)
-    }
+    // peer 与矩阵同源：既等于 peerRange，也等于 engines.dsh（2026-11-14 形状统一）
     assert.equal(range, peerRange, `peer ${name} 与矩阵不同源`)
+    assert.equal(range, pkg.engines.dsh, `peer ${name} 与 engines.dsh 不同串`)
+    // 区间必须覆盖每个 REQUIRED 细胞
+    for (const v of REQUIRED) {
+      assert.ok(cmpVer(v, floor) >= 0, `peer ${name} 下限 ${floor} 高于 ${v}`)
+      assert.ok(cmpVer(v, ceiling) < 0, `peer ${name} 上限 ${ceiling} 低于 ${v}`)
+    }
   }
 })
