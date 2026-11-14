@@ -14,6 +14,10 @@
  * 本数组与由它生成的声明写点（package.json peerDependencies 的 6 个 dsh-* 项 /
  * package.json engines.dsh / dsh.plugin.json engines.dsh + version 镜像 /
  * README 管理块）**禁止手改**，由 sync-hosts.mjs 校验/下发。
+ *
+ * 声明形状（2026-11-14 版本上下限改造，用户裁定，与 dsh-date-wrapper /
+ * dsh-cookie-cleaner 批次同口径）：engines.dsh 发 {@link enginesRange} 有界区间
+ * （下限＝本枚举起点，不硬编码；上限 `<0.3.0`），peer 保持逐 rc 枚举。
  * cordis / schemastery / react 例外（见 cordisRange 注释）。
  */
 
@@ -50,8 +54,16 @@ export const supportedHosts = Object.freeze([
   '0.2.2-rc.1',
 ])
 
-/** peerDependencies / engines.dsh 共用的枚举串（精确枚举无暗坑：caret 与 `<x-0` 上界实测漏 rc 线）。 */
+/** peerDependencies 共用的枚举串（精确枚举无暗坑：caret 与 `<x-0` 上界实测漏 rc 线）。 */
 export const peerRange = supportedHosts.join(' || ')
+
+/**
+ * engines.dsh 的有界区间（2026-11-14 版本上下限改造）：下限由 {@link supportedHosts}
+ * 起点推导（0.1.2-rc.1 — IM 插件硬依赖认证/会话控制接口，更老线装上也必挂），上限
+ * `<0.3.0`。宿主侧判定带 `includePrerelease: true`，区间能覆盖 0.1.2～0.2.x 全部 rc；
+ * npm/pnpm 解析不带该旗标，故 peerDependencies 仍必须逐 rc 枚举。
+ */
+export const enginesRange = `>=${supportedHosts[0]} <0.3.0`
 
 /** 本地开发矩阵默认宿主。 */
 export const developmentHost = '0.2.0-rc.2'

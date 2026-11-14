@@ -3,11 +3,11 @@
  *
  * 机制移植自 dsh-tidy-display/scripts/sync-hosts.mjs（P0 试点定型版），本仓差异：
  * 1. 版本正则放行 rc 与 alpha（0.2.1 线只有 alpha）；
- * 2. 写点 1 = package.json：engines.dsh + 6 个 dsh-* peer（全量枚举，optional——
- *    profile 安装 autoInstallPeers:false，peer 不经注册表解析；树内一旦存在但版本
- *    不在枚举，npm/pnpm 照样 ERESOLVE）+ cordis/schemastery peer（独立版本空间）；
- *    react 为上游生态 peer，本脚本不碰。
- * 3. 写点 2 = dsh.plugin.json：engines.dsh + version 以 package.json 为准镜像；
+ * 2. 写点 1 = package.json：engines.dsh（{@link enginesRange} 有界区间）+ 6 个
+ *    dsh-* peer（全量枚举，optional——profile 安装 autoInstallPeers:false，peer
+ *    不经注册表解析；树内一旦存在但版本不在枚举，npm/pnpm 照样 ERESOLVE）+
+ *    cordis/schemastery peer（独立版本空间）；react 为上游生态 peer，本脚本不碰。
+ * 3. 写点 2 = dsh.plugin.json：engines.dsh（区间）+ version 以 package.json 为准镜像；
  * 4. 写点 3 = README.md（简体中文）/ README.en.md 的 host-compat 管理块。
  *
  * 双模式：默认只校验（exit 1 = 有漂移）；`--write` 实际写盘。
@@ -16,7 +16,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import assert from 'node:assert/strict'
-import { supportedHosts, peerRange, developmentHost, hostPeerPackages, cordisRange, schemasteryRange } from './hosts.mjs'
+import { supportedHosts, peerRange, enginesRange, developmentHost, hostPeerPackages, cordisRange, schemasteryRange } from './hosts.mjs'
 
 const ROOT = new URL('..', import.meta.url)
 const write = process.argv.includes('--write')
@@ -35,7 +35,7 @@ const pkgUrl = new URL('package.json', ROOT)
 const pkgOriginal = await read('package.json')
 const pkg = JSON.parse(pkgOriginal)
 pkg.engines ??= {}
-pkg.engines.dsh = peerRange
+pkg.engines.dsh = enginesRange
 pkg.peerDependencies ??= {}
 pkg.peerDependenciesMeta ??= {}
 for (const name of hostPeerPackages) {
@@ -56,7 +56,7 @@ if (hasManifest) {
   manifestOriginal = await read('dsh.plugin.json')
   const manifest = JSON.parse(manifestOriginal)
   manifest.engines ??= {}
-  manifest.engines.dsh = peerRange
+  manifest.engines.dsh = enginesRange
   manifest.version = pkg.version
   manifestExpected = JSON.stringify(manifest, null, 2) + '\n'
 }
@@ -68,9 +68,11 @@ const versionList = supportedHosts.map((v) => `\`${v}\``).join(' ')
 const LINES = '0.1.2 / 0.1.5 / 0.1.7 / 0.2.0 / 0.2.1'
 const linesPerLang = {
   'README.md': [
+    `- **声明区间：** \`${enginesRange}\`（\`engines.dsh\`；peer 仍逐 rc 枚举）`,
     `- **支持的 DSH 宿主：** ${versionList}（覆盖 ${LINES} 共 ${supportedHosts.length} 个 rc/alpha）`,
   ],
   'README.en.md': [
+    `- **Declared range:** \`${enginesRange}\` (\`engines.dsh\`; peers still enumerate per rc)`,
     `- **Supported DSH hosts:** ${versionList} (${supportedHosts.length} rc/alpha releases across lines ${LINES})`,
   ],
 }
@@ -122,7 +124,7 @@ for (const [file, lines] of Object.entries(linesPerLang)) {
 if (write) {
   if (pkgOriginal !== pkgExpected) {
     await writeFile(pkgUrl, pkgExpected)
-    console.log('write  package.json (engines.dsh + 6 dsh-* peers + cordis/schemastery)')
+    console.log('write  package.json (engines.dsh 区间 + 6 dsh-* peers + cordis/schemastery)')
   } else console.log('ok     package.json')
   if (hasManifest) {
     if (manifestOriginal !== manifestExpected) {

@@ -2,6 +2,10 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.5.5（宿主声明改有界区间：engines.dsh = `>=0.1.2-rc.1 <0.3.0`）
+版本上下限改造补件。双写点 `engines.dsh`（`package.json` / `dsh.plugin.json`）由逐 16 档 rc/alpha 枚举改为有界区间 `>=0.1.2-rc.1 <0.3.0`—下限由 `hosts.mjs` 矩阵起点推导（0.1.0/0.1.1 线仍不入列：缺认证与会话控制接口），上限不含 0.3 线，0.2.x 线上后续 rc 无需重发版即可安装。
+六个 `@deepseek-ai/dsh-*` peer 保持逐 rc 枚举（npm/pnpm 解析不带 `includePrerelease`）；README 双语管理块新增「声明区间」行。`tests/host-matrix.test.mjs` 同步改为区间断言（含极简 semver 比较：区间必须完整覆盖矩阵、下限不得写贵）。纯元数据发版，代码零改动；node --test 781/781 绿。
+
 ## 0.5.3（Discord Gateway 自动重连与 RESUME 续传：#2 收口）
 
 原挂账 T2.5 落地：连接一断就只记日志、不重建，而 Discord 会**定期**主动下发 `op 7 RECONNECT`，所以这条路径必然被走到——账号静默失联直到手动重启。
