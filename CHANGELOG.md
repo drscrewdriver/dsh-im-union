@@ -2,6 +2,14 @@
 
 本项目版本号遵循语义化版本；发布面与宿主兼容矩阵见 `scripts/hosts.mjs`（README 管理块同源）。
 
+## 0.5.7（仓库版本号回填对齐 + 产物重建重发）
+
+npm 上的 0.5.6 是直接从本仓工作区发布的：发布时把 `package.json` / `dsh.plugin.json` 的版本号改到 0.5.6，但该改动没有落进任何提交，仓库因此长期停在 0.5.5，被发布审计判为「仓库落后 npm」。本版把版本号回填到仓库并重建产物重发：代码与 0.5.6 一致（`engines.dsh` 与六个 `@deepseek-ai/dsh-*` peer 均为 `>=0.1.2-rc.1 <0.3.0-0` 有界区间），差异仅版本号与 README 双语管理块的重新同步。门禁：`npm run typecheck` 干净、`npm run hosts:check` 全绿（写点与 `hosts.mjs` 一致）、`node --test` 781/781 通过、`verify-dist` 冒烟 5 项全过。
+
+## 0.5.6（宿主声明统一为有界区间；npm 已发布，仓库补记）
+
+`engines.dsh` 与全部 `@deepseek-ai/dsh-*` peer 由逐 rc 枚举收敛为单一有界区间 `>=0.1.2-rc.1 <0.3.0-0`（提交 `5d6842b`）。该版已发布到 npm，但版本号未随提交回写，故在此补记，避免版本史出现空档。
+
 ## 0.5.5（宿主声明改有界区间：engines.dsh = `>=0.1.2-rc.1 <0.3.0`）
 版本上下限改造补件。双写点 `engines.dsh`（`package.json` / `dsh.plugin.json`）由逐 16 档 rc/alpha 枚举改为有界区间 `>=0.1.2-rc.1 <0.3.0`—下限由 `hosts.mjs` 矩阵起点推导（0.1.0/0.1.1 线仍不入列：缺认证与会话控制接口），上限不含 0.3 线，0.2.x 线上后续 rc 无需重发版即可安装。
 六个 `@deepseek-ai/dsh-*` peer 保持逐 rc 枚举（npm/pnpm 解析不带 `includePrerelease`）；README 双语管理块新增「声明区间」行。`tests/host-matrix.test.mjs` 同步改为区间断言（含极简 semver 比较：区间必须完整覆盖矩阵、下限不得写贵）。纯元数据发版，代码零改动；node --test 781/781 绿。
